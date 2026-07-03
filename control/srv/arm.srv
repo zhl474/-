@@ -1,0 +1,6 @@
+# 请求部分：一维 int 数组
+float32[] pose
+int32 speed
+---
+# 响应部分（举例：返回数组长度）
+int32 flag

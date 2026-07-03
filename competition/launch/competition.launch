@@ -1,0 +1,6 @@
+<launch>
+    <node pkg="camera" type="camera_node.py" name="camera_node" output="screen" />
+    <node pkg="image_process" type="process.py" name="image_process_node" output="screen"/>
+    <node pkg="control" type="controller.py" name="control_node" output="screen"/>
+    <node pkg="competition" type="competition.py" name="competition_node" output="screen"/>
+</launch>
