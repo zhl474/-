@@ -3,44 +3,13 @@ import numpy as np
 import math
 from scipy.ndimage import gaussian_filter1d
 import matplotlib.pyplot as plt
+from ultralytics import YOLO
 
-# def get_mask(img_input,category):#白色[6,5.355,234]
-#     img_gray = cv2.cvtColor(img_input, cv2.COLOR_BGR2GRAY)
-#     mask = img_gray <= 200
-#     filtered_pixels = img_gray[mask]        # 只保留 ≤200 的像素
-#     hist = np.bincount(filtered_pixels, minlength=256)  # 索引0-255都有，但>200部分必为0
-#     hist_smooth = gaussian_filter1d(hist.astype(np.float64), sigma=1.5)
-#     peak_bin = np.argmax(hist_smooth)   # 平滑后的主峰位置
-#     H_max = hist_smooth[peak_bin]
-#     half_max = H_max / 4.0
+SEG_MODEL_PATH = "/home/zhl/SingleArmTetris/SingleArmTetris/src/competition/model/best_seg.engine"
+SEG_CONF = 0.25
+TOP_SURFACE_CLASS_NAME = "top_surface"
+_SEG_MODEL = None
 
-#     # 左半高灰度值
-#     left = peak_bin
-#     while left > 0 and hist_smooth[left] > 1:
-#         left -= 1
-#     # 右半高灰度值 连续三次增长截止退出
-#     no_change = 0
-#     right = peak_bin
-#     while right < peak_bin+30:
-#         right += 1
-#         if hist_smooth[right] - hist_smooth[right-1] > -7:#比前一个大很多，或者没什么变化，都是不能接受的
-#             no_change = no_change+1
-#             if no_change>3:
-#                 break
-#     binary = np.where((img_gray >= left) & (img_gray <= right), 255, 0).astype(np.uint8)
-#     # print(f"类别:{category} 主峰：{peak_bin} 灰度级, 范围 [{left}, {right}]")
-#     # bins = np.arange(256)
-#     # plt.figure(figsize=(12, 5))
-#     # plt.subplot(1, 2, 1)
-#     # plt.bar(bins, hist, width=1.0, color='black')
-#     # plt.xlabel('value')
-#     # plt.ylabel('number')
-#     # plt.title('hist')
-#     # plt.xlim([0, 255])
-#     # plt.tight_layout()
-#     # plt.show()
-#     # cv2.imshow("gray",img_gray)
-#     return binary
 
 def detect_dominant_color(image, v_threshold=120, h_bins=30, s_bins=32):
     """
@@ -93,7 +62,81 @@ def detect_dominant_color(image, v_threshold=120, h_bins=30, s_bins=32):
     mean_v = cv2.mean(v, mask=bin_mask)[0]
     
     return (mean_h, mean_s, mean_v)
-def get_mask(img_input,category):#白色[6,5.355,234]
+
+
+def _print_red_warning(message):
+    print(f"\033[91m警告：{message}\033[0m")
+
+
+def _get_seg_model():
+    """懒加载上表面分割模型，避免每个裁剪图重复读取权重。"""
+    global _SEG_MODEL
+    if _SEG_MODEL is None:
+        _SEG_MODEL = YOLO(SEG_MODEL_PATH, task="segment")
+    return _SEG_MODEL
+
+
+def _get_top_surface_class_ids(model):
+    """从模型类别表中找出 top_surface 类别编号。"""
+    return [
+        int(class_id)
+        for class_id, class_name in model.names.items()
+        if class_name == TOP_SURFACE_CLASS_NAME
+    ]
+
+
+def _get_mask_by_yolo_seg(img_input):
+    """使用 YOLO-Seg 提取裁剪图中的上表面二值掩码。"""
+    if img_input is None or img_input.size == 0:
+        raise ValueError("输入裁剪图为空")
+
+    model = _get_seg_model()
+    results = model(img_input, conf=SEG_CONF, verbose=False, retina_masks=True)
+    if len(results) == 0:
+        raise RuntimeError("YOLO-Seg 没有返回结果")
+
+    result = results[0]
+    if result.masks is None or result.masks.data is None or len(result.masks.data) == 0:
+        raise RuntimeError("YOLO-Seg 没有检测到上表面 mask")
+
+    top_surface_ids = _get_top_surface_class_ids(model)
+    selected_indices = list(range(len(result.masks.data)))
+    if top_surface_ids and result.boxes is not None and result.boxes.cls is not None:
+        cls_ids = result.boxes.cls.detach().cpu().numpy().astype(int)
+        selected_indices = [
+            idx
+            for idx, cls_id in enumerate(cls_ids)
+            if cls_id in top_surface_ids
+        ]
+
+    if not selected_indices:
+        raise RuntimeError("YOLO-Seg 结果中没有 top_surface 类别")
+
+    best_mask = None
+    best_area = -1
+    for idx in selected_indices:
+        mask = result.masks.data[idx].detach().cpu().numpy()
+        mask = (mask > 0.5).astype(np.uint8)
+        area = int(mask.sum())
+        if area > best_area:
+            best_area = area
+            best_mask = mask
+
+    if best_mask is None or best_area <= 0:
+        raise RuntimeError("YOLO-Seg 返回的 top_surface mask 为空")
+
+    target_h, target_w = img_input.shape[:2]
+    if best_mask.shape != (target_h, target_w):
+        best_mask = cv2.resize(
+            best_mask,
+            (target_w, target_h),
+            interpolation=cv2.INTER_NEAREST
+        )
+
+    return (best_mask * 255).astype(np.uint8)
+
+
+def _get_mask_by_color(img_input,category):#白色[6,5.355,234]
     (lh,ls,lv)=detect_dominant_color(img_input, v_threshold=230, h_bins=30, s_bins=32)
     hsv = cv2.cvtColor(img_input, cv2.COLOR_BGR2HSV)
     h, w = hsv.shape[:2]
@@ -141,6 +184,16 @@ def get_mask(img_input,category):#白色[6,5.355,234]
     mask=mask2 | mask
     mask = cv2.erode(mask, kernel2)
     return mask,hsv
+
+
+def get_mask(img_input,category):
+    hsv = cv2.cvtColor(img_input, cv2.COLOR_BGR2HSV)
+    try:
+        mask = _get_mask_by_yolo_seg(img_input)
+        return mask,hsv
+    except Exception as exc:
+        _print_red_warning(f"YOLO-Seg 上表面分割失败，回退旧颜色分割。原因：{exc}")
+        return _get_mask_by_color(img_input,category)
 
 
 def get_length(point1,point2):

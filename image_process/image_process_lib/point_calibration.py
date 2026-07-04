@@ -78,6 +78,7 @@ def z_predict(px,py):
 class ArmCalibrator:
     def __init__(self):
         self.H = None  # 变换矩阵
+        self.affine_matrix = None  # 仿射变换矩阵，用于齐次变换异常时兜底
         self.board_theta = 0
         self.src_points = [(1, 14),(1, 1),(10, 14),(10, 1)]
         self.dst_points = []
@@ -93,6 +94,13 @@ class ArmCalibrator:
             
         src = np.array(self.src_points, dtype=np.float32)
         dst = np.array(self.dst_points, dtype=np.float32)
+        if not np.all(np.isfinite(dst)):
+            raise ValueError("托盘标定点包含无效数值，请检查托盘识别和像素到机械臂坐标预测")
+
+        affine_matrix, _ = cv2.estimateAffine2D(src, dst)
+        if affine_matrix is None or not np.all(np.isfinite(affine_matrix)):
+            raise ValueError("托盘仿射标定失败，请检查4个角点是否识别正确")
+        self.affine_matrix = affine_matrix.astype(np.float32)
         
         # 构建线性方程组 A * h = b
         A = []
@@ -120,6 +128,8 @@ class ArmCalibrator:
             [h[3], h[4], h[5]],
             [h[6], h[7], 1]
         ], dtype=np.float32)
+        if not np.all(np.isfinite(self.H)):
+            raise ValueError("托盘透视标定矩阵包含无效数值，请重新识别托盘")
     
     def transform(self, point):
         """
@@ -134,14 +144,25 @@ class ArmCalibrator:
         src_vec = np.array([x, y, 1], dtype=np.float32)
         dst_vec = self.H @ src_vec
         
-        # 齐次坐标归一化
-        u = dst_vec[0] / dst_vec[2]
-        v = dst_vec[1] / dst_vec[2]
+        # 齐次坐标归一化；分母异常时使用仿射矩阵兜底，避免产生 nan/inf。
+        if np.isfinite(dst_vec[2]) and abs(dst_vec[2]) > 1e-6:
+            u = dst_vec[0] / dst_vec[2]
+            v = dst_vec[1] / dst_vec[2]
+        elif self.affine_matrix is not None:
+            affine_dst = self.affine_matrix @ src_vec
+            u, v = affine_dst[0], affine_dst[1]
+        else:
+            raise ValueError("托盘标定投影失败：齐次坐标分母为0，请先重新标定托盘")
+
+        if not np.all(np.isfinite([u, v])):
+            raise ValueError("托盘标定投影结果包含无效数值，请重新标定托盘")
         return u, v
 
     def board_detector(self,board_bgr,pixel2world_client):
         self.dst_points = []
         board_cam_4_points = board_detect(board_bgr)
+        if len(board_cam_4_points) != 4 or not np.all(np.isfinite(board_cam_4_points)):
+            raise ValueError("托盘角点识别结果无效，请检查托盘是否完整进入画面")
         print("托盘像素坐标",board_cam_4_points)
         dx1=board_cam_4_points[2][0]-board_cam_4_points[0][0]
         dx2=board_cam_4_points[3][0]-board_cam_4_points[1][0]
@@ -166,7 +187,6 @@ class ArmCalibrator:
         # cv2.imshow('board_bgr', board_bgr)
         # cv2.waitKey(2000)
         # cv2.destroyAllWindows()
-
 
 
 

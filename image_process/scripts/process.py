@@ -12,6 +12,7 @@ import torch
 
 from image_process_lib.Place_optimization import get_all_cube, make_list, put_fenlei,cube_pocess,optimize_block_assignment,get_cube_location,get_put_pose
 from image_process_lib.block_detection import get_mask, coreect_LL_location
+from image_process_lib.template_config import load_template_sizes, get_template_size
 from image_process_lib.template_match.template_match import get_rect
 from image_process_lib.point_calibration import ArmCalibrator, x_predict,y_predict,z_predict
 from image_process_lib.board_detect import board_detect
@@ -82,6 +83,7 @@ class ImageProcessor:
         img_bgr = cv2.undistort(img_bgr1, self.camera_matrix, self.dist_coeff, None, new_camera_mtx)#去畸变
         img_bgr2=np.copy(img_bgr)#复制一个数组，我们会在检测到的图片中画黑框开辅助判断，但黑框会影响颜色分割，所以复制一个数组，img_bgr用来检测画黑框，img_bgr2用来颜色分割
         result = self.model(img_bgr,iou=0.5,conf=0.45)#yolo检测
+        template_sizes = load_template_sizes()#每次服务调用读取一次模板尺寸配置，便于标定后直接生效
         # cv2.imwrite('/home/zhl/桌面/yolo识别.jpg', result[0].plot())
         cube_list=[]#检测到方块储存在这个列表中
         for i in range(7):
@@ -108,12 +110,12 @@ class ImageProcessor:
             mask,hsv=get_mask(cropped_img,category)#颜色分割，mask是分割的图片二值化图
             cv2.imshow("mask",mask)
             cv2.imshow("cropped_img",cropped_img)
-            if(category=="line"):
-                rect = get_rect(mask,150, 33,category,img_bgr2,crop_x1,crop_y1)
-            elif(category=="square"):
-                rect = get_rect(mask,71, 71,category,img_bgr2,crop_x1,crop_y1)
-            else:
-                rect = get_rect(mask,109, 71,category,img_bgr2,crop_x1,crop_y1)
+            try:
+                template_w, template_h = get_template_size(category, template_sizes)
+            except Exception as e:
+                rospy.logwarn("模板尺寸配置读取失败，跳过方块 %s: %s" % (category, e))
+                continue
+            rect = get_rect(mask,template_w, template_h,category,img_bgr2,crop_x1,crop_y1)
             cv2.waitKey(0)
             cv2.destroyAllWindows()
             #方块上表面的最小矩形框，进而得到中心点
@@ -180,14 +182,22 @@ class ImageProcessor:
     
     def get_board_pos(self, req):
         img_bgr1 = self.latest_image
-        h, w = img_bgr1.shape[:2]
-        board_bgr = img_bgr1
-        new_camera_mtx, roi = cv2.getOptimalNewCameraMatrix(self.camera_matrix, self.dist_coeff, (w, h), 1, (w, h))
-        board_bgr = cv2.undistort(img_bgr1, self.camera_matrix, self.dist_coeff, None, new_camera_mtx)#去畸变
-        if board_bgr is None:
-            print("没有图片")
-        self.calibrator.board_detector(board_bgr,self.pixel2world_client)
-        self.calibrator.calibrate()#托盘识别结束
+        if img_bgr1 is None:
+            rospy.logerr("托盘识别失败：没有收到相机图像")
+            return GetTargetPosResponse([0.0])
+        try:
+            h, w = img_bgr1.shape[:2]
+            board_bgr = img_bgr1
+            new_camera_mtx, roi = cv2.getOptimalNewCameraMatrix(self.camera_matrix, self.dist_coeff, (w, h), 1, (w, h))
+            board_bgr = cv2.undistort(img_bgr1, self.camera_matrix, self.dist_coeff, None, new_camera_mtx)#去畸变
+            if board_bgr is None:
+                rospy.logerr("托盘识别失败：去畸变后的图像为空")
+                return GetTargetPosResponse([0.0])
+            self.calibrator.board_detector(board_bgr,self.pixel2world_client)
+            self.calibrator.calibrate()#托盘识别结束
+        except Exception as e:
+            rospy.logerr("托盘识别失败：%s" % e)
+            return GetTargetPosResponse([0.0])
 
         cv2.imwrite('/home/zhl/桌面/board_bgr.jpg', board_bgr)
         

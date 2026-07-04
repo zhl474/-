@@ -2,6 +2,14 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 import time
 
+def _check_finite_points(points, name, type_idx):
+    arr = np.array(points, dtype=np.float64)
+    if arr.size == 0:
+        return
+    if not np.all(np.isfinite(arr)):
+        invalid_pos = np.argwhere(~np.isfinite(arr))
+        raise ValueError(f"{name} 第 {type_idx} 类包含无效数值，位置: {invalid_pos.tolist()}")
+
 def optimize_block_assignment(blocks, targets, list):
     """
     优化7种方块类型的分配问题，精确处理方块数量
@@ -42,6 +50,8 @@ def optimize_block_assignment(blocks, targets, list):
         n_blocks = len(type_blocks)
         n_targets = len(type_targets)
         n = min(n_blocks, n_targets)  # 实际可分配的数量
+        _check_finite_points(type_blocks, "方块坐标", type_idx)
+        _check_finite_points(type_targets, "目标坐标", type_idx)
         
         # 1. 如果没有可分配的点，保持原始顺序
         if n == 0:
@@ -83,6 +93,10 @@ def optimize_block_assignment(blocks, targets, list):
 
                 arrive_distance = np.hypot(dx, dy)
                 cost_matrix[i, j] = arrive_distance + return_distance
+
+        if not np.all(np.isfinite(cost_matrix)):
+            invalid_pos = np.argwhere(~np.isfinite(cost_matrix))
+            raise ValueError(f"代价矩阵第 {type_idx} 类包含无效数值，位置: {invalid_pos.tolist()}")
 
         # 4. 使用匈牙利算法求解最优匹配
         row_ind, col_ind = linear_sum_assignment(cost_matrix)
@@ -245,7 +259,7 @@ def print_optimization_results(block2, selected, orig_dists, opt_dists, dist_sav
     return orig_total, opt_total
 
 def get_put_pose(x,y,shooting_angle, calibrator):  #眼
-    set_angle=shooting_angle
+    set_angle=list(shooting_angle)
     test_point=(x,y)
     transformed_point = calibrator.transform(test_point)
     set_angle[0]=transformed_point[0]

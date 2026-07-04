@@ -164,6 +164,7 @@ include_directories(
 set(PYTHON_EXECUTABLE "/home/zhl/fr3env/fr3env/bin/python")
 catkin_install_python(PROGRAMS
   scripts/process.py
+  scripts/template_size_calibration.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

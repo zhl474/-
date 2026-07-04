@@ -72,8 +72,14 @@ if __name__ == "__main__":
     rospy.wait_for_message('/camera/image_raw', Image, timeout=30)
     while True:
         resp = get_board_pos(GetTargetPos_req)
-        resp = get_array(GetTargetPos_req)
-        cube_num = int(resp.array[0])
+        board_ok = len(resp.array) > 0 and int(resp.array[0]) == 1
+        if board_ok:
+            resp = get_array(GetTargetPos_req)
+            cube_num = int(resp.array[0])
+        else:
+            # 红色提示托盘识别失败，本轮跳过方块识别，等待人工确认后重新执行循环。
+            print("\033[91m托盘识别失败，已跳过方块识别，请调整后重新识别。\033[0m")
+            cube_num = 0
         if input("识别结果满意扣1")=="1":
             break
 
@@ -213,7 +219,6 @@ if __name__ == "__main__":
 
     suck_req.state = sucker_off
     resp = suck_control.call(suck_req)
-
 
 
 
