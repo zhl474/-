@@ -21,8 +21,6 @@ def board_detect(img):
     model_path = "/home/zhl/SingleArmTetris/SingleArmTetris/src/competition/model/best.pt"
     model = YOLO(model_path)
     # img, depth_img = camera.read()
-    # image_path = "/home/zhl/机器人竞赛/data/托盘识别图/capture_1.jpg"
-    # img = cv2.imread(image_path)
     orig_img = img.copy()
     results = model(img)
     # cv2.imwrite("/home/zhl/桌面/托盘识别.png",results[0].plot())
@@ -76,7 +74,7 @@ def board_detect(img):
         31,
         7
     )
-    # cv2.imshow("result", th)
+    cv2.imshow("result", th)
     # cv2.waitKey(0)
     # cv2.destroyAllWindows()
 
@@ -98,7 +96,8 @@ def board_detect(img):
         flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
     )
 
-    # cv2.imshow("blobs", img_draw)
+    cv2.imshow("blobs", img_draw)
+    cv2.imwrite("/home/zhl/桌面/blobs.jpg",img_draw)
     # cv2.waitKey(0)
     # cv2.destroyAllWindows()
 
@@ -178,11 +177,9 @@ def board_detect(img):
         #print("裁剪图坐标:", (corner[0], corner[1]))
         #print("转换回原图坐标:", (x_orig, y_orig))
 
-    #cv2.imshow("blobs", img)
-    # cv2.imwrite("/home/zhl/桌面/托盘.jpg",img)
-    # cv2.imwrite("/home/zhl/桌面/blobs.jpg",img_draw)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
+    cv2.imshow("result", img)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
     # 1️⃣ 按 x 排序
     x_sorted = corners_pix_position[np.argsort(corners_pix_position[:, 0]), :]
@@ -201,3 +198,8 @@ def board_detect(img):
     # 5️⃣ 组合
     
     return np.array([left_top, left_bottom, right_top, right_bottom])
+
+if __name__ == "__main__":
+    image_path = "/home/zhl/图片/数据集/15_Color.png"
+    img = cv2.imread(image_path)
+    board_detect(img)
