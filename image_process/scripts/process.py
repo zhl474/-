@@ -112,7 +112,7 @@ class ImageProcessor:
             # cv2.imshow("cropped_img",cropped_img)
             try:
                 template_w, template_h = get_template_size(category, template_sizes)
-                print(f"\033[31m模版长度是{category,template_w, template_h}\033[0m")
+                # print(f"\033[31m模版长度是{category,template_w, template_h}\033[0m")
             except Exception as e:
                 rospy.logwarn("模板尺寸配置读取失败，跳过方块 %s: %s" % (category, e))
                 continue
@@ -143,18 +143,13 @@ class ImageProcessor:
                 theta = 360+theta0
 
             cam_point3d = [0,0,0]
-            #依据像素坐标预测显示3维坐标
+################################################       9点标定法(托盘标定那里也要同步改)      #########################################################
             predicted_x = x_predict(px,py)
             predicted_y = y_predict(px,py)
             predicted_z = z_predict(px,py)
             cam_point3d[0]=predicted_x
             cam_point3d[1]=predicted_y
             cam_point3d[2]=predicted_z
-################################################       9点标定法(托盘标定那里也要同步改)      #########################################################
-            # pred_X = x_predict(px,py)
-            # pred_Y = y_predict(px,py)
-            # predicted_z = z_predict(px,py)
-            # cam_point3d=[pred_X,pred_Y,predicted_z]
 ################################################       深度相机法        #########################################################
             # resp = self.pixel2world_client(pixel2worldRequest(px,py))
             # cam_point3d = list(resp.world_position)
