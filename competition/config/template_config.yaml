@@ -3,8 +3,8 @@ detect_model: /home/zhl/SingleArmTetris/SingleArmTetris/src/competition/model/be
 seg_model: /home/zhl/SingleArmTetris/SingleArmTetris/src/competition/model/best_seg.engine
 template_sizes:
   line:
-    long_side: 165.34
-    short_side: 37.77
+    long_side: 165
+    short_side: 37.13
     samples: 1
     measurements:
     - long_side: 165.34
@@ -12,8 +12,8 @@ template_sizes:
       score: 0.9544
       source: camera_1
   square:
-    long_side: 80.828
-    short_side: 80.201
+    long_side: 80
+    short_side: 80
     samples: 1
     measurements:
     - long_side: 80.828
@@ -30,8 +30,8 @@ template_sizes:
       score: 0.9336
       source: camera_1
   L_blue:
-    long_side: 122.379
-    short_side: 80.936
+    long_side: 122
+    short_side: 80.05
     samples: 1
     measurements:
     - long_side: 122.379

@@ -5,17 +5,17 @@ import math
 import matplotlib.pyplot as plt
 
 # 逻辑 L 形
-base_L_yellow = np.zeros((33+5+33, 33+5+33+5+33), dtype=np.float32)
-base_L_yellow[0:33+5,33+5+33+5:] = 1
-base_L_yellow[33+5:,:] = 1
+base_L_yellow = np.zeros((37+5+37, 37+5+37+5+37), dtype=np.float32)
+base_L_yellow[0:37+5,37+5+37+5:] = 1
+base_L_yellow[37+5:,:] = 1
 
-base_L_blue = np.zeros((33+5+33, 33+5+33+5+33), dtype=np.float32)
-base_L_blue[0:33+5,:33] = 1
-base_L_blue[33+5:,:] = 1
+base_L_blue = np.zeros((37+5+37, 37+5+37+5+37+2), dtype=np.float32)
+base_L_blue[0:37+5,:37] = 1
+base_L_blue[37+5:,:] = 1
 
-base_T = np.zeros((33+5+33, 33+5+33+5+33), dtype=np.float32)
-base_T[0:33+5,33+5:33+5+33] = 1
-base_T[33+5:,:] = 1
+base_T = np.zeros((37+5+37, 37+5+37+5+37), dtype=np.float32)
+base_T[0:37+5,37+5:37+5+37] = 1
+base_T[37+5:,:] = 1
 
 base_square = np.array([
     [1, 1],
@@ -25,15 +25,15 @@ base_line = np.array([
     [1, 1, 1, 1]
 ], dtype=np.float32)
 
-base_z_blue = np.zeros((33+5+33, 33+5+33+5+33), dtype=np.float32)
-base_z_blue[0:33,:33+5+33] = 1
-base_z_blue[33:33+5,33+5:33+5+33] = 1
-base_z_blue[33+5:,33+5:] = 1
+base_z_blue = np.zeros((37+5+37, 37+5+37+5+37), dtype=np.float32)
+base_z_blue[0:37,:37+5+37] = 1
+base_z_blue[37:37+5,37+5:37+5+37] = 1
+base_z_blue[37+5:,37+5:] = 1
 
-base_z_green = np.zeros((33+5+33, 33+5+33+5+33), dtype=np.float32)
-base_z_green[0:33,33+5:] = 1
-base_z_green[33:33+5,33+5:33+5+33] = 1
-base_z_green[33+5:,:33+5+33] = 1
+base_z_green = np.zeros((37+5+37, 37+5+37+5+37), dtype=np.float32)
+base_z_green[0:37,37+5:] = 1
+base_z_green[37:37+5,37+5:37+5+37] = 1
+base_z_green[37+5:,:37+5+37] = 1
 
 
 

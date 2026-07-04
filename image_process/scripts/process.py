@@ -108,16 +108,17 @@ class ImageProcessor:
                 continue
             cropped_img = img_bgr[crop_y1:crop_y2, crop_x1:crop_x2]#根据裁剪边距调整后的 YOLO 框取出图像
             mask,hsv=get_mask(cropped_img,category)#颜色分割，mask是分割的图片二值化图
-            cv2.imshow("mask",mask)
-            cv2.imshow("cropped_img",cropped_img)
+            # cv2.imshow("mask",mask)
+            # cv2.imshow("cropped_img",cropped_img)
             try:
                 template_w, template_h = get_template_size(category, template_sizes)
+                print(f"\033[31m模版长度是{category,template_w, template_h}\033[0m")
             except Exception as e:
                 rospy.logwarn("模板尺寸配置读取失败，跳过方块 %s: %s" % (category, e))
                 continue
             rect = get_rect(mask,template_w, template_h,category,img_bgr2,crop_x1,crop_y1)
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
+            # cv2.waitKey(0)
+            # cv2.destroyAllWindows()
             #方块上表面的最小矩形框，进而得到中心点
             box = cv2.boxPoints(rect)
             box = np.intp(box)
@@ -182,22 +183,14 @@ class ImageProcessor:
     
     def get_board_pos(self, req):
         img_bgr1 = self.latest_image
-        if img_bgr1 is None:
-            rospy.logerr("托盘识别失败：没有收到相机图像")
-            return GetTargetPosResponse([0.0])
-        try:
-            h, w = img_bgr1.shape[:2]
-            board_bgr = img_bgr1
-            new_camera_mtx, roi = cv2.getOptimalNewCameraMatrix(self.camera_matrix, self.dist_coeff, (w, h), 1, (w, h))
-            board_bgr = cv2.undistort(img_bgr1, self.camera_matrix, self.dist_coeff, None, new_camera_mtx)#去畸变
-            if board_bgr is None:
-                rospy.logerr("托盘识别失败：去畸变后的图像为空")
-                return GetTargetPosResponse([0.0])
-            self.calibrator.board_detector(board_bgr,self.pixel2world_client)
-            self.calibrator.calibrate()#托盘识别结束
-        except Exception as e:
-            rospy.logerr("托盘识别失败：%s" % e)
-            return GetTargetPosResponse([0.0])
+        h, w = img_bgr1.shape[:2]
+        board_bgr = img_bgr1
+        new_camera_mtx, roi = cv2.getOptimalNewCameraMatrix(self.camera_matrix, self.dist_coeff, (w, h), 1, (w, h))
+        board_bgr = cv2.undistort(img_bgr1, self.camera_matrix, self.dist_coeff, None, new_camera_mtx)#去畸变
+        if board_bgr is None:
+            print("没有图片")
+        self.calibrator.board_detector(board_bgr,self.pixel2world_client)
+        self.calibrator.calibrate()#托盘识别结束
 
         cv2.imwrite('/home/zhl/桌面/board_bgr.jpg', board_bgr)
         

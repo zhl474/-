@@ -1,6 +1,9 @@
 <launch>
     <node pkg="camera" type="camera_node.py" name="camera_node" output="screen" />
     <node pkg="image_process" type="process.py" name="image_process_node" output="screen"/>
-    <node pkg="control" type="controller.py" name="control_node" output="screen"/>
+    <node pkg="control" type="controller.py" name="control_node" output="screen">
+        <param name="servo_port" value="/dev/servo_motor"/>
+        <param name="servo_baudrate" value="115200"/>
+    </node>
     <node pkg="competition" type="competition.py" name="competition_node" output="screen"/>
 </launch>

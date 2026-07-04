@@ -4,6 +4,7 @@ import threading
 import time
 import warnings
 import serial
+from serial.tools import list_ports
 from akai_fr import AkaiFr, AkaiElectricSucker
 
 from control.srv import arm,armResponse,motor,motorResponse,suck,suckResponse
@@ -18,10 +19,7 @@ class Control:
         self.arm.set_tcf(tool_id, tcf)
         self.sucker = AkaiElectricSucker(self.arm)    # 创建电子吸盘对象
 
-        self.ser = serial.Serial()
-        self.ser.port = '/dev/ttyUSB0'  # 设置串口号
-        self.ser.baudrate = 115200  # 设置波特率
-        self.ser.open()  # 打开串口
+        self.ser = self.open_servo_serial()
 
         self.arm_server = rospy.Service("arm_control",arm,self.arm_control)
         self.set_servo_angle_server = rospy.Service("motor_control",motor,self.motor_control)
@@ -30,6 +28,24 @@ class Control:
         # monitor_thread = threading.Thread(target=self.monitor_serial, daemon=True)
         # monitor_thread.start()
         rospy.loginfo("机械臂/吸盘/舵机控制节点启动")
+
+    def open_servo_serial(self):
+        """打开舵机串口,默认使用udev固定别名/dev/servo_motor"""
+        port = rospy.get_param("~servo_port", "/dev/servo_motor")
+        baudrate = rospy.get_param("~servo_baudrate", 115200)
+        try:
+            ser = serial.Serial(port=port, baudrate=baudrate, timeout=1)
+            rospy.loginfo(f"舵机串口已打开: {port}, 波特率: {baudrate}")
+            return ser
+        except serial.SerialException as e:
+            available_ports = [
+                f"{item.device} ({item.description}, 序列号: {item.serial_number})"
+                for item in list_ports.comports()
+            ]
+            rospy.logerr(f"舵机串口打开失败: {port}, 错误: {e}")
+            rospy.logerr(f"当前可用串口: {available_ports}")
+            rospy.logerr("建议为舵机USB串口配置udev固定别名/dev/servo_motor")
+            raise
     def suck_in(self):  
         self.sucker.set_solenoid_valve(False)   # 电磁阀关闭
         self.sucker.set_pump_motor(True)        # 气泵电机开启
