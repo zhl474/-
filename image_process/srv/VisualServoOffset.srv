@@ -1,0 +1,15 @@
+string target_type
+string expected_category
+float32 row
+float32 col
+---
+bool found
+string target_type
+string category
+float32 px
+float32 py
+float32 dx_px
+float32 dy_px
+float32 theta
+float32 score
+string message

@@ -13,7 +13,7 @@ from matplotlib import pyplot as plt
 from sensor_msgs.msg import Image
 
 from control.srv import arm, armRequest, motor, motorRequest, suck, suckRequest
-from image_process.srv import GetTargetPos, GetTargetPosRequest, VisualTargetOffset
+from image_process.srv import GetTargetPos, GetTargetPosRequest, VisualServoOffset, VisualServoOffsetRequest
 
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -27,13 +27,13 @@ try:
     from visual_servo.visual_servo_common import (
         apply_camera_to_sucker_offset,
         load_visual_servo_config,
-        run_visual_servo_alignment,
+        run_offset_visual_servo_alignment,
     )
 except Exception as exc:
     # 视觉伺服骨架阶段允许公共库暂时不可用；真正启用视觉抓取前必须解决这里。
     apply_camera_to_sucker_offset = None
     load_visual_servo_config = None
-    run_visual_servo_alignment = None
+    run_offset_visual_servo_alignment = None
     print(f"\033[91m视觉伺服公共库导入失败，视觉抓取暂不可用: {exc}\033[0m")
 
 
@@ -49,6 +49,9 @@ if __name__ == "__main__":
     # ========================= 主流程开关和待实测参数 =========================
     # 默认先走旧开环抓取，避免未填实的视觉伺服占位函数被误调用。
     USE_VISUAL_PICK = False
+
+    # 默认先走旧开环摆放；托盘视觉伺服骨架补齐后，再逐步打开这个开关实测。
+    USE_VISUAL_PLACE = False
 
     # 方块视觉伺服期望类别；空字符串表示不限制类别，当前只作为未来接口参数保留。
     EXPECTED_BLOCK_CATEGORY = ""
@@ -70,6 +73,15 @@ if __name__ == "__main__":
 
     # 下探吸取速度：正式启用视觉抓取前建议低速实测。
     PICK_SPEED = 60
+
+    # 托盘摆放高位，单位 mm；当前沿用旧开环摆放高度，后续需要按视觉伺服实测确认。
+    PLACE_HIGH_Z = 197.0
+
+    # 托盘下放高度，单位 mm；当前沿用旧开环摆放高度，后续需要按视觉伺服实测确认。
+    PLACE_DOWN_Z = 188.0
+
+    # 托盘释放后抬起高度增量，单位 mm；当前沿用旧流程的 +20。
+    PLACE_LIFT_STEP_MM = 20.0
 
     # 视觉伺服收敛阈值，单位像素；连续多帧低于该阈值才认为对准成功。
     VISUAL_ERROR_THRESHOLD_PX = 2.0
@@ -94,17 +106,17 @@ if __name__ == "__main__":
     rospy.wait_for_service("get_board_pos")
     rospy.wait_for_service("get_cube_location")
     rospy.wait_for_service("get_put_pose")
-    if USE_VISUAL_PICK:
-        rospy.wait_for_service("get_visual_target_offset")
+    if USE_VISUAL_PICK or USE_VISUAL_PLACE:
+        rospy.wait_for_service("get_visual_servo_offset")
 
     try:
         get_array = rospy.ServiceProxy("get_cube_pos", GetTargetPos)
         get_board_pos = rospy.ServiceProxy("get_board_pos", GetTargetPos)
         get_cube_location = rospy.ServiceProxy("get_cube_location", GetTargetPos)
         get_put_pose = rospy.ServiceProxy("get_put_pose", GetTargetPos)
-        visual_target_offset = (
-            rospy.ServiceProxy("get_visual_target_offset", VisualTargetOffset)
-            if USE_VISUAL_PICK
+        visual_servo_offset = (
+            rospy.ServiceProxy("get_visual_servo_offset", VisualServoOffset)
+            if USE_VISUAL_PICK or USE_VISUAL_PLACE
             else None
         )
         arm_control = rospy.ServiceProxy("arm_control", arm)
@@ -158,6 +170,45 @@ if __name__ == "__main__":
         """统一控制吸盘状态：0 吸气，1 喷气，2 关闭。"""
         suck_req.state = int(state)
         return suck_control.call(suck_req)
+
+    def request_visual_servo_offset(target_type, expected_category="", row=0.0, col=0.0):
+        """请求图像节点返回视觉伺服目标相对相机中心的像素偏差。
+
+        这是 competition.py 和 image_process 节点之间的统一通信入口。
+        方块请求使用 target_type="block"，托盘请求使用 target_type="board"。
+        返回对象必须包含 found、dx_px、dy_px、message 等字段，供通用闭环函数使用。
+        """
+        if visual_servo_offset is None:
+            raise RuntimeError("视觉伺服服务代理未创建，请先打开 USE_VISUAL_PICK 或 USE_VISUAL_PLACE")
+        req = VisualServoOffsetRequest()
+        req.target_type = str(target_type)
+        req.expected_category = str(expected_category)
+        req.row = float(row)
+        req.col = float(col)
+        return visual_servo_offset.call(req)
+
+    def request_block_visual_offset(expected_category=""):
+        """请求图像节点返回当前方块目标相对相机中心的像素偏差。"""
+        return request_visual_servo_offset(
+            target_type="block",
+            expected_category=expected_category,
+        )
+
+    def request_board_visual_offset(row, col):
+        """请求图像节点返回托盘目标格点相对相机中心的像素偏差。"""
+        return request_visual_servo_offset(
+            target_type="board",
+            row=row,
+            col=col,
+        )
+
+    def move_pose_for_visual_servo(pose, speed, wait_sec):
+        """供通用视觉伺服闭环调用的机械臂移动函数。
+
+        闭环模块只负责计算下一步 pose；真正发机械臂命令仍然通过 send_arm_pose，
+        这样速度、等待、未来位姿补偿都集中在 competition.py 管理。
+        """
+        return send_arm_pose(pose, speed=speed, wait_sec=wait_sec, label="视觉伺服闭环移动")
 
     def wait_motor_ready():
         """等待舵机转动完成。
@@ -242,23 +293,24 @@ if __name__ == "__main__":
         """用方块视觉伺服把相机中心对准目标方块。
 
         start_pose 是 choose_block_rough_camera_pose 输出的观察位姿。
-        这里正式委托 visual_servo_common.run_visual_servo_alignment 执行闭环：
-        图像节点负责 get_visual_target_offset，公共函数负责像素误差到机械臂 XY 修正。
+        这里委托 visual_servo_common.run_offset_visual_servo_alignment 执行闭环：
+        图像节点负责 get_visual_servo_offset(target_type="block")，
+        公共函数负责像素误差到机械臂 XY 修正。
         返回格式固定为 success, camera_pose, message，供 down_pick_visual 统一处理。
         """
-        if visual_target_offset is None:
-            return False, list(start_pose), "视觉抓取未启用，未创建 get_visual_target_offset 服务代理"
-        if run_visual_servo_alignment is None:
+        if visual_servo_offset is None:
+            return False, list(start_pose), "视觉抓取未启用，未创建 get_visual_servo_offset 服务代理"
+        if run_offset_visual_servo_alignment is None:
             return False, list(start_pose), "视觉伺服公共函数不可用，无法执行闭环对准"
         if not visual_servo_config:
             return False, list(start_pose), "视觉伺服配置为空，无法执行闭环对准"
 
-        success, camera_pose, last_resp, message = run_visual_servo_alignment(
-            arm_control,
-            visual_target_offset,
+        get_offset_func = lambda: request_block_visual_offset(expected_category)
+        success, camera_pose, last_resp, message = run_offset_visual_servo_alignment(
+            get_offset_func,
+            move_pose_for_visual_servo,
             start_pose,
             visual_servo_config,
-            expected_category=expected_category,
             speed=ARM_SPEED,
             error_threshold_px=VISUAL_ERROR_THRESHOLD_PX,
             max_step_mm=VISUAL_MAX_STEP_MM,
@@ -307,6 +359,147 @@ if __name__ == "__main__":
         print(f"第 {index_cube} 个方块吸盘高位: {sucker_high_pose}")
         answer = input("确认吸盘高位安全后按回车下探；输入 n 取消本次吸取: ")
         return answer.strip().lower() != "n"
+
+    def get_place_target_grid(index_cube):
+        """获取当前方块要摆放到的托盘逻辑格点。
+
+        基础任务中，本地 pick_list 的第 0 列是 col，第 1 列是 row。
+        进阶任务时 process.py 内部可能根据规划结果改写 pick_list；后续如果要完整支持进阶任务，
+        需要让图像/规划节点显式返回当前 index_cube 对应的 row/col，不能只依赖本地静态表。
+        返回顺序固定为 row, col，供 request_board_visual_offset 使用。
+        """
+        place_item = pick_list[index_cube]
+        col = float(place_item[0])
+        row = float(place_item[1])
+        return row, col
+
+    def choose_board_rough_camera_pose(put_pose, row, col, index_cube):
+        """决定托盘视觉伺服开始前相机观察位。
+
+        put_pose 来自旧 get_put_pose，含义更接近吸盘/末端摆放位，不一定是相机观察位。
+        这里后续要解决：机械臂先去哪里，才能让目标 row/col 进入相机视野且不被手上方块遮挡。
+        当前没有实测策略，因此保守失败，不让托盘视觉摆放直接运动。
+        """
+        message = "choose_board_rough_camera_pose 尚未实测：不能确定托盘视觉伺服起始观察位"
+        print(f"\033[91m{message}\033[0m")
+        return False, list(put_pose), message
+
+    def align_camera_to_board_target(start_pose, row, col):
+        """用托盘视觉伺服把相机中心对准目标格点。
+
+        图像节点通过 get_visual_servo_offset(target_type="board", row=row, col=col)
+        返回目标格点相对相机中心的像素偏差；闭环运动逻辑与方块完全共用。
+        """
+        if visual_servo_offset is None:
+            return False, list(start_pose), "视觉摆放未启用，未创建 get_visual_servo_offset 服务代理"
+        if run_offset_visual_servo_alignment is None:
+            return False, list(start_pose), "视觉伺服公共函数不可用，无法执行托盘闭环对准"
+        if not visual_servo_config:
+            return False, list(start_pose), "视觉伺服配置为空，无法执行托盘闭环对准"
+
+        get_offset_func = lambda: request_board_visual_offset(row, col)
+        success, camera_pose, last_resp, message = run_offset_visual_servo_alignment(
+            get_offset_func,
+            move_pose_for_visual_servo,
+            start_pose,
+            visual_servo_config,
+            speed=ARM_SPEED,
+            error_threshold_px=VISUAL_ERROR_THRESHOLD_PX,
+            max_step_mm=VISUAL_MAX_STEP_MM,
+            max_iter=VISUAL_MAX_ITER,
+            success_stable_frames=VISUAL_SUCCESS_STABLE_FRAMES,
+            max_missed_frames=VISUAL_MAX_MISSED_FRAMES,
+            settle_sec=VISUAL_SETTLE_SEC,
+        )
+        if not success:
+            return False, list(camera_pose), message
+        return True, list(camera_pose), message
+
+    def make_place_pose_from_camera_pose(camera_pose, theta_place, index_cube):
+        """相机对准目标格点后，计算吸盘/持块中心摆放位。
+
+        当前 camera_to_sucker_offset_mm 标定的是相机中心到吸盘中心的 XY 偏移。
+        托盘摆放时手上拿着方块，真正需要对准的可能是“持块中心”而不是裸吸盘中心，
+        不同方块形状和舵机角度也可能影响偏移。因此这里先保守占位，后续实测后再填。
+        """
+        message = "make_place_pose_from_camera_pose 尚未实测：不能确定持块中心相对相机的摆放偏移"
+        print(f"\033[91m{message}\033[0m")
+        return False, list(camera_pose), message
+
+    def choose_board_place_heights(index_cube, row, col):
+        """集中管理托盘摆放高位、下放高度和抬起高度。
+
+        当前先沿用旧开环摆放高度：高位 PLACE_HIGH_Z、下放 PLACE_DOWN_Z、释放后抬起 PLACE_LIFT_STEP_MM。
+        后续如果不同层数、不同方块或不同 row/col 需要不同高度，只改这里。
+        """
+        print("\033[93mchoose_board_place_heights 尚未实测：暂用旧开环摆放高度\033[0m")
+        return float(PLACE_HIGH_Z), float(PLACE_DOWN_Z), float(PLACE_LIFT_STEP_MM)
+
+    def verify_place_before_down(place_high_pose, index_cube):
+        """托盘下放前的安全确认入口。"""
+        print(f"第 {index_cube} 个方块托盘摆放高位: {place_high_pose}")
+        answer = input("确认托盘摆放高位安全后按回车下放；输入 n 取消本次摆放: ")
+        return answer.strip().lower() != "n"
+
+    def handle_place_servo_failed(index_cube, message):
+        """处理托盘视觉摆放失败。当前策略是保守中断，不下放。"""
+        error_message = f"第 {index_cube} 个方块托盘视觉摆放失败: {message}"
+        print(f"\033[91m{error_message}\033[0m")
+        raise RuntimeError(error_message)
+
+    def down_place_visual(put_pose, row, col, theta_place, index_cube):
+        """托盘视觉伺服摆放骨架。
+
+        流程：粗观察位 -> 对准托盘目标格点 -> 换算持块摆放位 -> 下放 -> 喷气 -> 抬起。
+        当前观察位和持块中心偏移仍是占位函数，USE_VISUAL_PLACE 默认 False。
+        """
+        rough_ok, rough_camera_pose, message = choose_board_rough_camera_pose(put_pose, row, col, index_cube)
+        if not rough_ok:
+            handle_place_servo_failed(index_cube, message)
+
+        send_arm_pose(rough_camera_pose, speed=ARM_SPEED, theta_deg=theta_place, label="托盘视觉摆放粗定位")
+        success, camera_pose, message = align_camera_to_board_target(rough_camera_pose, row, col)
+        if not success:
+            handle_place_servo_failed(index_cube, message)
+
+        success, place_pose, message = make_place_pose_from_camera_pose(camera_pose, theta_place, index_cube)
+        if not success:
+            handle_place_servo_failed(index_cube, message)
+
+        place_high_z, place_down_z, lift_step_mm = choose_board_place_heights(index_cube, row, col)
+        place_high_pose = list(place_pose)
+        place_high_pose[2] = place_high_z
+        place_high_pose[5] = shooting_angle[5]
+        send_arm_pose(place_high_pose, speed=ARM_SPEED, theta_deg=theta_place, label="托盘视觉摆放高位")
+
+        if not verify_place_before_down(place_high_pose, index_cube):
+            handle_place_servo_failed(index_cube, "人工取消托盘下放")
+
+        place_down_pose = list(place_high_pose)
+        place_down_pose[2] = place_down_z
+        send_arm_pose(place_down_pose, speed=PICK_SPEED, theta_deg=theta_place, label="托盘视觉摆放下放")
+        input("放")
+        set_sucker_state(suck_out)
+
+        place_lift_pose = list(place_down_pose)
+        place_lift_pose[2] = place_lift_pose[2] + lift_step_mm
+        send_arm_pose(place_lift_pose, speed=ARM_SPEED, theta_deg=theta_place, label="托盘视觉摆放抬起")
+
+    def down_place_open_loop(put_pose, theta_place):
+        """旧开环摆放流程，视觉摆放未启用时继续使用。"""
+        put_pose = list(put_pose)
+        put_pose[2] = PLACE_HIGH_Z
+        put_pose[5] = shooting_angle[5]
+        send_arm_pose(put_pose, speed=ARM_SPEED, theta_deg=theta_place, label="摆放上方")
+
+        put_pose[2] = PLACE_DOWN_Z
+        put_pose[5] = shooting_angle[5]
+        send_arm_pose(put_pose, speed=PICK_SPEED, theta_deg=theta_place, label="摆放下放")
+        input("放")
+        set_sucker_state(suck_out)
+
+        put_pose[2] = put_pose[2] + PLACE_LIFT_STEP_MM
+        send_arm_pose(put_pose, speed=ARM_SPEED, theta_deg=theta_place, label="摆放抬起")
 
     #################################           复位              ################################
     shooting_angle = [-250.4151306152343, 22.14801216125488, 380.3343505859375, -180, 0, 90]  # process那里还有一个
@@ -452,20 +645,12 @@ if __name__ == "__main__":
         resp = get_put_pose.call(GetTargetPos_req)
         put_pose = list(resp.array)
 
-        # 运动到放置位置上方较高处，气泵喷气。
-        put_pose[2] = 197  # 高度稍微高一点，不然会撞到方块。
-        put_pose[5] = shooting_angle[5]
-        send_arm_pose(put_pose, speed=ARM_SPEED, theta_deg=theta_place, label="摆放上方")
+        if USE_VISUAL_PLACE:
+            row, col = get_place_target_grid(i)
+            down_place_visual(put_pose, row, col, theta_place, i)
+        else:
+            down_place_open_loop(put_pose, theta_place)
 
-        put_pose[2] = 188
-        put_pose[5] = shooting_angle[5]
-        send_arm_pose(put_pose, speed=PICK_SPEED, theta_deg=theta_place, label="摆放下放")
-        input("放")
-        set_sucker_state(suck_out)
-
-        # 再上来，准备捡下一个方块。
-        put_pose[2] = put_pose[2] + 20
-        send_arm_pose(put_pose, speed=ARM_SPEED, theta_deg=theta_place, label="摆放抬起")
         i = i + 1
         if i == 34:  # 捡完34个方块结束。
             break

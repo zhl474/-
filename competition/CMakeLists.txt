@@ -164,9 +164,6 @@ set(PYTHON_EXECUTABLE "/home/zhl/fr3env/fr3env/bin/python")
 catkin_install_python(PROGRAMS
   scripts/competition.py
   scripts/visual_servo/visual_servo_common.py
-  scripts/visual_servo/calibrate_pixel_motion.py
-  scripts/visual_servo/calibrate_camera_sucker_offset.py
-  scripts/visual_servo/test_single_block_visual_servo.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

@@ -5,8 +5,6 @@ import time
 import numpy as np
 import yaml
 
-from control.srv import armRequest, suckRequest
-
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", ".."))
@@ -23,7 +21,7 @@ DEFAULT_CONFIG = {
 
 
 def load_visual_servo_config(config_path=VISUAL_SERVO_CONFIG_PATH):
-    """读取视觉伺服配置；缺字段时用默认值补齐，方便先跑最小验证。"""
+    """读取视觉伺服配置；缺字段时用默认值补齐，正式运行统一从这里拿参数。"""
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
@@ -39,32 +37,9 @@ def load_visual_servo_config(config_path=VISUAL_SERVO_CONFIG_PATH):
 
 
 def save_visual_servo_config(config, config_path=VISUAL_SERVO_CONFIG_PATH):
-    """保存视觉伺服配置，标定脚本统一写这个文件。"""
+    """保存视觉伺服配置，标定工具或人工调参脚本统一写这个文件。"""
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
-
-
-def call_target_offset(offset_client, expected_category=""):
-    """调用图像节点，获取唯一目标方块相对相机中心的像素偏差。"""
-    return offset_client(expected_category)
-
-
-def move_arm(arm_client, pose, speed=60, wait_sec=0.35):
-    """发送机械臂 MoveL 指令，并等待画面稳定一小段时间。"""
-    req = armRequest()
-    req.pose = [float(v) for v in pose]
-    req.speed = int(speed)
-    resp = arm_client.call(req)
-    if wait_sec > 0:
-        time.sleep(wait_sec)
-    return resp
-
-
-def set_sucker(suck_client, state):
-    """控制吸盘状态：0 吸气，1 喷气，2 关闭。"""
-    req = suckRequest()
-    req.state = int(state)
-    return suck_client.call(req)
 
 
 def limit_xy_step(delta_xy, max_step_mm):
@@ -79,8 +54,9 @@ def limit_xy_step(delta_xy, max_step_mm):
 def pixel_error_to_robot_delta(dx_px, dy_px, pixel_to_robot_matrix, max_step_mm):
     """把像素误差换算成机械臂 XY 修正量，并做限幅。
 
-    配置中的 2x2 矩阵由 calibrate_pixel_motion.py 根据人工输入数据计算得到，
-    表示 [dx_px, dy_px] 到 [dx_mm, dy_mm] 的局部线性映射。
+    pixel_to_robot_matrix 表示 [dx_px, dy_px] 到 [dx_mm, dy_mm] 的局部线性映射。
+    方块和托盘暂时共用同一矩阵；如果后续实测发现高度或目标不同导致映射不同，
+    再把配置拆成 block_pixel_to_robot_matrix 和 board_pixel_to_robot_matrix。
     """
     matrix = np.array(pixel_to_robot_matrix, dtype=float)
     pixel_error = np.array([float(dx_px), float(dy_px)], dtype=float)
@@ -88,24 +64,25 @@ def pixel_error_to_robot_delta(dx_px, dy_px, pixel_to_robot_matrix, max_step_mm)
     return limit_xy_step(delta_xy, max_step_mm)
 
 
-def run_visual_servo_alignment(
-    arm_client,
-    offset_client,
+def run_offset_visual_servo_alignment(
+    get_offset_func,
+    move_pose_func,
     start_pose,
     config,
-    expected_category="",
-    speed=45,
-    error_threshold_px=3.0,
-    max_step_mm=5.0,
-    max_iter=20,
-    success_stable_frames=5,
-    max_missed_frames=5,
-    settle_sec=0.25,
+    speed,
+    error_threshold_px,
+    max_step_mm,
+    max_iter,
+    success_stable_frames,
+    max_missed_frames,
+    settle_sec,
 ):
-    """执行闭环视觉伺服对准。
+    """通用视觉伺服闭环。
 
-    成功条件不是单帧进入阈值，而是连续 success_stable_frames 帧都满足误差阈值。
-    单帧未识别只跳过，不抬高、不运动；连续丢失超过 max_missed_frames 才失败。
+    get_offset_func 是无参数函数，内部可以请求方块或托盘图像服务，但返回对象必须至少包含
+    found、dx_px、dy_px、message 字段。
+    move_pose_func 是主流程传入的机械臂移动函数，签名为 move_pose_func(pose, speed, wait_sec)，
+    这样闭环运动仍然走 competition.py 的统一运动入口。
     """
     pose = list(start_pose)
     stable_count = 0
@@ -114,7 +91,7 @@ def run_visual_servo_alignment(
     pixel_to_robot_matrix = config["pixel_to_robot_matrix"]
 
     for iter_idx in range(max_iter):
-        resp = call_target_offset(offset_client, expected_category)
+        resp = get_offset_func()
         last_resp = resp
         if not resp.found:
             missed_count += 1
@@ -131,6 +108,7 @@ def run_visual_servo_alignment(
             stable_count += 1
             print(
                 f"[视觉伺服] 第 {iter_idx + 1} 轮满足阈值，"
+                f"目标={getattr(resp, 'target_type', '')}，"
                 f"误差=({resp.dx_px:.2f},{resp.dy_px:.2f})px，"
                 f"连续成功 {stable_count}/{success_stable_frames}"
             )
@@ -149,16 +127,17 @@ def run_visual_servo_alignment(
         pose[0] += float(delta_xy[0])
         pose[1] += float(delta_xy[1])
         print(
-            f"[视觉伺服] 第 {iter_idx + 1} 轮误差=({resp.dx_px:.2f},{resp.dy_px:.2f})px，"
+            f"[视觉伺服] 第 {iter_idx + 1} 轮目标={getattr(resp, 'target_type', '')}，"
+            f"误差=({resp.dx_px:.2f},{resp.dy_px:.2f})px，"
             f"修正=({delta_xy[0]:.3f},{delta_xy[1]:.3f})mm，目标pose={pose}"
         )
-        move_arm(arm_client, pose, speed=speed, wait_sec=settle_sec)
+        move_pose_func(pose, speed=speed, wait_sec=settle_sec)
 
     return False, pose, last_resp, "达到最大迭代次数仍未连续稳定"
 
 
 def apply_camera_to_sucker_offset(camera_pose, config):
-    """相机中心已对准方块时，按标定偏移生成吸盘高位姿态。"""
+    """相机中心已对准目标时，按标定偏移生成吸盘高位姿态。"""
     pose = list(camera_pose)
     offset_xy = config.get("camera_to_sucker_offset_mm", [0.0, 0.0])
     pose[0] += float(offset_xy[0])

@@ -23,6 +23,7 @@ from image_process_lib.single_block_detector import (
 from image_process.srv import GetTargetPos, GetTargetPosResponse
 from image_process.srv import VisualTargetOffset, VisualTargetOffsetResponse
 from image_process.srv import VisualBoardOffset, VisualBoardOffsetResponse
+from image_process.srv import VisualServoOffset, VisualServoOffsetResponse
 from camera.srv import pixel2world, pixel2worldRequest
 
 from ctypes import * 
@@ -52,6 +53,11 @@ def make_debug_image_with_mask(debug_image, mask):
     mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
     return np.hstack((debug_image, mask_bgr))
 
+
+VISUAL_TARGET_BLOCK = "block"
+VISUAL_TARGET_BOARD = "board"
+
+
 class ImageProcessor:
     def __init__(self):
         self.bridge = CvBridge()
@@ -70,6 +76,11 @@ class ImageProcessor:
             "get_visual_board_offset",
             VisualBoardOffset,
             self.get_visual_board_offset,
+        )
+        self.visual_servo_offset_service = rospy.Service(
+            "get_visual_servo_offset",
+            VisualServoOffset,
+            self.get_visual_servo_offset,
         )
 
         model_path="/home/zhl/SingleArmTetris/SingleArmTetris/src/competition/model/best5.14.pt"
@@ -270,16 +281,93 @@ class ImageProcessor:
             put_pose=get_put_pose(pick_cube[0],pick_cube[1],self.shooting_angle,self.calibrator)
         return GetTargetPosResponse(array=put_pose)
 
-    def get_visual_board_offset(self, req):
-        """返回目标托盘格点相对相机中心的像素偏差，不控制机械臂。"""
+    def make_visual_servo_result(
+        self,
+        found=False,
+        target_type="",
+        category="",
+        px=0,
+        py=0,
+        dx_px=0,
+        dy_px=0,
+        theta=0,
+        score=0,
+        message="",
+    ):
+        """统一组织视觉伺服偏差结果，方块和托盘服务都必须返回这个结构。
+
+        found 表示本帧是否识别到目标。
+        px/py 是目标点在图像中的像素坐标。
+        dx_px/dy_px 是目标点相对图像中心的像素偏差，闭环控制只依赖这两个值移动机械臂。
+        theta/score/category 是给方块识别预留的附加信息；托盘分支可以保持默认值。
+        """
+        return {
+            "found": bool(found),
+            "target_type": str(target_type),
+            "category": str(category),
+            "px": float(px),
+            "py": float(py),
+            "dx_px": float(dx_px),
+            "dy_px": float(dy_px),
+            "theta": float(theta),
+            "score": float(score),
+            "message": str(message),
+        }
+
+    def visual_servo_result_to_response(self, result):
+        """把内部字典转换成统一 ROS 服务响应。"""
+        return VisualServoOffsetResponse(
+            found=result["found"],
+            target_type=result["target_type"],
+            category=result["category"],
+            px=result["px"],
+            py=result["py"],
+            dx_px=result["dx_px"],
+            dy_px=result["dy_px"],
+            theta=result["theta"],
+            score=result["score"],
+            message=result["message"],
+        )
+
+    def handle_block_visual_servo_request(self, req):
+        """方块视觉伺服服务分支。
+
+        这里是胶水代码：只解析服务请求，然后调用真正的方块识别函数。
+        真正要改识别算法时，去填 detect_block_visual_offset，不要在这里写图像处理细节。
+        """
+        expected_category = (req.expected_category or "").strip()
+        return self.detect_block_visual_offset(expected_category)
+
+    def handle_board_visual_servo_request(self, req):
+        """托盘视觉伺服服务分支。
+
+        这里是胶水代码：只解析目标格点 row/col，然后调用真正的托盘识别函数。
+        真正要改托盘识别或目标点计算时，去填 detect_board_visual_offset。
+        """
+        return self.detect_board_visual_offset(float(req.row), float(req.col))
+
+    def make_unknown_visual_target_result(self, raw_target_type):
+        """请求的 target_type 不是 block/board 时，返回统一失败结果。"""
+        target_type = (raw_target_type or "").strip().lower()
+        return self.make_visual_servo_result(
+            found=False,
+            target_type=target_type,
+            message=f"未知视觉伺服目标类型: {raw_target_type}，应为 block 或 board",
+        )
+
+    def detect_board_visual_offset(self, row, col):
+        """识别托盘目标格点相对相机中心的像素偏差。
+
+        下一步真正要填或重写的托盘识别代码就在这里。
+        这里只负责图像识别和像素偏差计算，不控制机械臂。
+        board_grid_detect 必须识别完整 140 个格点；数量不对时直接返回 found=False。
+        row/col 支持整数格点和半格插值，具体排序和插值在 board_detect.py 内部完成。
+        """
         img_bgr1 = self.latest_image
         if img_bgr1 is None:
-            return VisualBoardOffsetResponse(
+            return self.make_visual_servo_result(
                 found=False,
-                px=0,
-                py=0,
-                dx_px=0,
-                dy_px=0,
+                target_type="board",
                 message="没有可用图像",
             )
 
@@ -289,19 +377,16 @@ class ImageProcessor:
             board_bgr = cv2.undistort(img_bgr1, self.camera_matrix, self.dist_coeff, None, new_camera_mtx)#去畸变
             detect_result = board_grid_detect(board_bgr, debug_path=self.visual_board_debug_path)
             if not detect_result["found"]:
-                return VisualBoardOffsetResponse(
+                return self.make_visual_servo_result(
                     found=False,
-                    px=0,
-                    py=0,
-                    dx_px=0,
-                    dy_px=0,
+                    target_type="board",
                     message=detect_result["message"],
                 )
 
             target_point = interpolate_grid_point(
                 detect_result["grid_points"],
-                req.row,
-                req.col,
+                row,
+                col,
             )
             center_x = w / 2.0
             center_y = h / 2.0
@@ -316,7 +401,7 @@ class ImageProcessor:
             )
             cv2.putText(
                 debug_image,
-                f"row={float(req.row):.2f} col={float(req.col):.2f} dx={dx_px:.1f} dy={dy_px:.1f}",
+                f"row={float(row):.2f} col={float(col):.2f} dx={dx_px:.1f} dy={dy_px:.1f}",
                 (20, 35),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
@@ -325,160 +410,40 @@ class ImageProcessor:
                 cv2.LINE_AA,
             )
             save_image_to_path(self.visual_board_debug_path, debug_image)
-            return VisualBoardOffsetResponse(
+            return self.make_visual_servo_result(
                 found=True,
+                target_type="board",
+                category="board_grid",
                 px=float(target_point[0]),
                 py=float(target_point[1]),
                 dx_px=dx_px,
                 dy_px=dy_px,
+                theta=0,
+                score=1.0,
                 message="托盘目标格点识别成功",
             )
         except Exception as exc:
             rospy.logerr("托盘视觉伺服目标检测失败: %s" % exc)
             print("\033[91m托盘视觉伺服目标检测失败，请重新识别。\033[0m")
-            return VisualBoardOffsetResponse(
+            return self.make_visual_servo_result(
                 found=False,
-                px=0,
-                py=0,
-                dx_px=0,
-                dy_px=0,
+                target_type="board",
                 message=str(exc),
             )
-    
-    def get_put_table(self,cube_count,place_order,test):
-        result = test.IDBS(cube_count[0], cube_count[1], cube_count[2], cube_count[3], cube_count[4], cube_count[5],
-                        cube_count[6],place_order[0],place_order[1],place_order[2],place_order[3],place_order[4],place_order[5],place_order[6])  # 调用库里的函数sum，求和函数
-        result = result.decode('gbk')
-        cube_list0 = result.split(',')
-        length = len(cube_list0) // 4
-        cube_list = []
-        for i in range(length):
-            cube_list.append([])
-            cube_list[i].append(float(cube_list0[i * 4 + 2])+0.5)
-            cube_list[i].append(float(cube_list0[i * 4 + 3])+0.5)
-            cube_list[i].append(float(cube_list0[i * 4 + 1]))
-            cube_name=normalize_category_name(cube_list0[i * 4])
-            cube_list[i].append(cube_name)
-        # print(cube_list, cube_list0[-1])  # 打印结果
-        cube_sum = 0
-        for i in cube_count:
-            cube_sum = cube_sum + i * 4
-        level = cube_sum // 10
-        print("极限填满行", level)
-        return cube_list,cube_list0[-1]
 
-    # def get_visual_target_offset(self, req):
-    #     """返回当前唯一目标方块相对相机中心的像素偏差，供视觉伺服闭环调用。"""
-    #     img_bgr1 = self.latest_image
-    #     if img_bgr1 is None:
-    #         return VisualTargetOffsetResponse(
-    #             found=False,
-    #             category="",
-    #             px=0,
-    #             py=0,
-    #             dx_px=0,
-    #             dy_px=0,
-    #             theta=0,
-    #             score=0,
-    #             message="没有可用图像",
-    #         )
-    #
-    #     try:
-    #         img_bgr = undistort_bgr_image(img_bgr1, self.camera_matrix, self.dist_coeff)
-    #         template_sizes = load_template_sizes()
-    #         detection = detect_single_block_in_image(
-    #             img_bgr,
-    #             self.model,
-    #             template_sizes=template_sizes,
-    #             crop_margin=8,
-    #             expected_category=req.expected_category,
-    #         )
-    #         debug_image = detection.get("debug_image")
-    #         h, w = img_bgr.shape[:2]
-    #         center_x = w / 2.0
-    #         center_y = h / 2.0
-    #         if detection["found"]:
-    #             dx_px = detection["px"] - center_x
-    #             dy_px = detection["py"] - center_y
-    #             if debug_image is not None:
-    #                 cv2.drawMarker(
-    #                     debug_image,
-    #                     (int(center_x), int(center_y)),
-    #                     (255, 0, 0),
-    #                     markerType=cv2.MARKER_CROSS,
-    #                     markerSize=24,
-    #                     thickness=2,
-    #                 )
-    #                 cv2.line(
-    #                     debug_image,
-    #                     (int(center_x), int(center_y)),
-    #                     (int(detection["px"]), int(detection["py"])),
-    #                     (255, 0, 0),
-    #                     1,
-    #                 )
-    #                 cv2.putText(
-    #                     debug_image,
-    #                     f"dx={dx_px:.1f}px dy={dy_px:.1f}px",
-    #                     (20, 35),
-    #                     cv2.FONT_HERSHEY_SIMPLEX,
-    #                     0.8,
-    #                     (255, 0, 0),
-    #                     2,
-    #                     cv2.LINE_AA,
-    #                 )
-    #                 cv2.imwrite(self.visual_servo_debug_path, debug_image)
-    #             return VisualTargetOffsetResponse(
-    #                 found=True,
-    #                 category=detection["category"],
-    #                 px=float(detection["px"]),
-    #                 py=float(detection["py"]),
-    #                 dx_px=float(dx_px),
-    #                 dy_px=float(dy_px),
-    #                 theta=float(detection["theta"]),
-    #                 score=float(detection["score"]),
-    #                 message=detection["message"],
-    #             )
-    #
-    #         if debug_image is not None:
-    #             cv2.imwrite(self.visual_servo_debug_path, debug_image)
-    #         return VisualTargetOffsetResponse(
-    #             found=False,
-    #             category="",
-    #             px=0,
-    #             py=0,
-    #             dx_px=0,
-    #             dy_px=0,
-    #             theta=0,
-    #             score=0,
-    #             message=detection["message"],
-    #         )
-    #     except Exception as exc:
-    #         rospy.logerr("视觉伺服目标检测失败: %s" % exc)
-    #         return VisualTargetOffsetResponse(
-    #             found=False,
-    #             category="",
-    #             px=0,
-    #             py=0,
-    #             dx_px=0,
-    #             dy_px=0,
-    #             theta=0,
-    #             score=0,
-    #             message=str(exc),
-    #         )
+    def detect_block_visual_offset(self, expected_category=""):
+        """识别方块目标相对相机中心的像素偏差。
 
-    def get_visual_target_offset(self, req):
-        """返回浅色背景下唯一深色旋转矩形相对相机中心的像素偏差。"""
+        下一步真正要填或重写的方块识别代码就在这里。
+        当前正式通信接口已经支持 expected_category，但这里仍沿用实测成功的深色旋转矩形检测。
+        也就是说：现在还没有真正按 7 类方块类别筛选目标。
+        正式多方块同框时，需要后续补上类别过滤、ROI 或距离画面中心优先等目标选择策略。
+        """
         img_bgr1 = self.latest_image
         if img_bgr1 is None:
-            return VisualTargetOffsetResponse(
+            return self.make_visual_servo_result(
                 found=False,
-                category="",
-                px=0,
-                py=0,
-                dx_px=0,
-                dy_px=0,
-                theta=0,
-                score=0,
+                target_type="block",
                 message="没有可用图像",
             )
 
@@ -523,15 +488,9 @@ class ImageProcessor:
 
             if not valid_contours:
                 save_image_to_path(self.visual_servo_debug_path, make_debug_image_with_mask(debug_image, dark_mask))
-                return VisualTargetOffsetResponse(
+                return self.make_visual_servo_result(
                     found=False,
-                    category="",
-                    px=0,
-                    py=0,
-                    dx_px=0,
-                    dy_px=0,
-                    theta=0,
-                    score=0,
+                    target_type="block",
                     message="未检测到深色旋转矩形",
                 )
 
@@ -540,15 +499,9 @@ class ImageProcessor:
             (px, py), (rect_w, rect_h), raw_angle = rect
             if rect_w <= 1e-6 or rect_h <= 1e-6:
                 save_image_to_path(self.visual_servo_debug_path, make_debug_image_with_mask(debug_image, dark_mask))
-                return VisualTargetOffsetResponse(
+                return self.make_visual_servo_result(
                     found=False,
-                    category="",
-                    px=0,
-                    py=0,
-                    dx_px=0,
-                    dy_px=0,
-                    theta=0,
-                    score=0,
+                    target_type="block",
                     message="深色区域尺寸异常",
                 )
 
@@ -597,9 +550,12 @@ class ImageProcessor:
                 cv2.LINE_AA,
             )
             save_image_to_path(self.visual_servo_debug_path, make_debug_image_with_mask(debug_image, dark_mask))
-            print("\033[31m确认保存\033[0m")
-            return VisualTargetOffsetResponse(
+            message = "检测到深色旋转矩形"
+            if expected_category:
+                message += f"；注意：当前尚未按类别 {expected_category} 筛选目标"
+            return self.make_visual_servo_result(
                 found=True,
+                target_type="block",
                 category="dark_rectangle",
                 px=float(px),
                 py=float(py),
@@ -607,21 +563,83 @@ class ImageProcessor:
                 dy_px=float(dy_px),
                 theta=float(theta),
                 score=float(score),
-                message="检测到深色旋转矩形",
+                message=message,
             )
         except Exception as exc:
             rospy.logerr("视觉伺服目标检测失败: %s" % exc)
-            return VisualTargetOffsetResponse(
+            return self.make_visual_servo_result(
                 found=False,
-                category="",
-                px=0,
-                py=0,
-                dx_px=0,
-                dy_px=0,
-                theta=0,
-                score=0,
+                target_type="block",
                 message=str(exc),
             )
+
+    def get_visual_servo_offset(self, req):
+        """统一视觉伺服偏差服务入口。
+
+        请求格式：
+        - target_type="block"：识别当前方块目标，expected_category 可选。
+        - target_type="board"：识别托盘目标格点，需要 row/col。
+
+        返回格式固定为 VisualServoOffsetResponse。
+        本函数只做分流，不写任何具体图像识别算法。
+        """
+        target_type = (req.target_type or "").strip().lower()
+        if target_type == VISUAL_TARGET_BLOCK:
+            result = self.handle_block_visual_servo_request(req)
+        elif target_type == VISUAL_TARGET_BOARD:
+            result = self.handle_board_visual_servo_request(req)
+        else:
+            result = self.make_unknown_visual_target_result(req.target_type)
+        return self.visual_servo_result_to_response(result)
+
+    def get_visual_board_offset(self, req):
+        """旧托盘偏差服务兼容包装；正式主流程改用 get_visual_servo_offset。"""
+        result = self.detect_board_visual_offset(req.row, req.col)
+        return VisualBoardOffsetResponse(
+            found=result["found"],
+            px=result["px"],
+            py=result["py"],
+            dx_px=result["dx_px"],
+            dy_px=result["dy_px"],
+            message=result["message"],
+        )
+    
+    def get_put_table(self,cube_count,place_order,test):
+        result = test.IDBS(cube_count[0], cube_count[1], cube_count[2], cube_count[3], cube_count[4], cube_count[5],
+                        cube_count[6],place_order[0],place_order[1],place_order[2],place_order[3],place_order[4],place_order[5],place_order[6])  # 调用库里的函数sum，求和函数
+        result = result.decode('gbk')
+        cube_list0 = result.split(',')
+        length = len(cube_list0) // 4
+        cube_list = []
+        for i in range(length):
+            cube_list.append([])
+            cube_list[i].append(float(cube_list0[i * 4 + 2])+0.5)
+            cube_list[i].append(float(cube_list0[i * 4 + 3])+0.5)
+            cube_list[i].append(float(cube_list0[i * 4 + 1]))
+            cube_name=normalize_category_name(cube_list0[i * 4])
+            cube_list[i].append(cube_name)
+        # print(cube_list, cube_list0[-1])  # 打印结果
+        cube_sum = 0
+        for i in cube_count:
+            cube_sum = cube_sum + i * 4
+        level = cube_sum // 10
+        print("极限填满行", level)
+        return cube_list,cube_list0[-1]
+
+    def get_visual_target_offset(self, req):
+        """旧方块偏差服务兼容包装；正式主流程改用 get_visual_servo_offset。"""
+        result = self.detect_block_visual_offset(req.expected_category)
+        return VisualTargetOffsetResponse(
+            found=result["found"],
+            category=result["category"],
+            px=result["px"],
+            py=result["py"],
+            dx_px=result["dx_px"],
+            dy_px=result["dy_px"],
+            theta=result["theta"],
+            score=result["score"],
+            message=result["message"],
+        )
 
 if __name__ == "__main__":
     rospy.init_node("image_processor")

@@ -1,6 +1,6 @@
 # 视觉伺服最小验证配置。
 # pixel_to_robot_matrix: [dx_px, dy_px] -> [dx_mm, dy_mm]
-# 初始值只是估计值，正式使用前用 calibrate_pixel_motion.py 按人工输入数据覆盖。
+# 初始值只是估计值，正式使用前必须用实机像素运动数据重新标定后覆盖。
 pixel_to_robot_matrix:
   # 第一行：像素误差 dx/dy 对机械臂 X 修正量的影响，单位 mm/px。
   - [0.0, 0.1]
