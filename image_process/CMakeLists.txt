@@ -60,6 +60,7 @@ add_service_files(
   FILES
   GetTargetPos.srv
   VisualTargetOffset.srv
+  VisualBoardOffset.srv
 )
 
 ## Generate actions in the 'action' folder

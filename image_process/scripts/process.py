@@ -12,7 +12,7 @@ from ultralytics import YOLO
 from image_process_lib.Place_optimization import get_all_cube, make_list, put_fenlei,cube_pocess,optimize_block_assignment,get_cube_location,get_put_pose
 from image_process_lib.template_config import load_template_sizes, get_template_size
 from image_process_lib.point_calibration import ArmCalibrator, x_predict,y_predict,z_predict
-from image_process_lib.board_detect import board_detect
+from image_process_lib.board_detect import board_detect, board_grid_detect, draw_grid_debug, interpolate_grid_point
 from image_process_lib.single_block_detector import (
     detect_blocks_in_image,
     detect_single_block_in_image,
@@ -22,6 +22,7 @@ from image_process_lib.single_block_detector import (
 
 from image_process.srv import GetTargetPos, GetTargetPosResponse
 from image_process.srv import VisualTargetOffset, VisualTargetOffsetResponse
+from image_process.srv import VisualBoardOffset, VisualBoardOffsetResponse
 from camera.srv import pixel2world, pixel2worldRequest
 
 from ctypes import * 
@@ -65,6 +66,11 @@ class ImageProcessor:
             VisualTargetOffset,
             self.get_visual_target_offset,
         )
+        self.visual_board_offset_service = rospy.Service(
+            "get_visual_board_offset",
+            VisualBoardOffset,
+            self.get_visual_board_offset,
+        )
 
         model_path="/home/zhl/SingleArmTetris/SingleArmTetris/src/competition/model/best5.14.pt"
         self.model=YOLO(model_path)
@@ -83,6 +89,10 @@ class ImageProcessor:
         self.visual_servo_debug_path = rospy.get_param(
             "~visual_servo_debug_path",
             "/home/zhl/桌面/视觉伺服当前检测.jpg"
+        )
+        self.visual_board_debug_path = rospy.get_param(
+            "~visual_board_debug_path",
+            "/home/zhl/桌面/托盘视觉伺服当前检测.jpg"
         )
 
         self.pixel2world_client = rospy.ServiceProxy("get_world_pos",pixel2world)
@@ -179,14 +189,23 @@ class ImageProcessor:
     
     def get_board_pos(self, req):
         img_bgr1 = self.latest_image
+        if img_bgr1 is None:
+            rospy.logwarn("没有可用图像，无法识别托盘")
+            return GetTargetPosResponse([0.0])
         h, w = img_bgr1.shape[:2]
         board_bgr = img_bgr1
         new_camera_mtx, roi = cv2.getOptimalNewCameraMatrix(self.camera_matrix, self.dist_coeff, (w, h), 1, (w, h))
         board_bgr = cv2.undistort(img_bgr1, self.camera_matrix, self.dist_coeff, None, new_camera_mtx)#去畸变
         if board_bgr is None:
             print("没有图片")
-        self.calibrator.board_detector(board_bgr,self.pixel2world_client)
-        self.calibrator.calibrate()#托盘识别结束
+            return GetTargetPosResponse([0.0])
+        try:
+            self.calibrator.board_detector(board_bgr,self.pixel2world_client)
+            self.calibrator.calibrate()#托盘识别结束
+        except Exception as exc:
+            rospy.logerr("托盘识别失败: %s" % exc)
+            print("\033[91m托盘识别失败，请重新识别。\033[0m")
+            return GetTargetPosResponse([0.0])
 
         save_image_to_path('/home/zhl/桌面/board_bgr.jpg', board_bgr)
         
@@ -241,6 +260,81 @@ class ImageProcessor:
             # put_pose=get_put_pose(pick_cube[0]-0.03,pick_cube[1]+0.03,self.shooting_angle,self.calibrator)
             put_pose=get_put_pose(pick_cube[0],pick_cube[1],self.shooting_angle,self.calibrator)
         return GetTargetPosResponse(array=put_pose)
+
+    def get_visual_board_offset(self, req):
+        """返回目标托盘格点相对相机中心的像素偏差，不控制机械臂。"""
+        img_bgr1 = self.latest_image
+        if img_bgr1 is None:
+            return VisualBoardOffsetResponse(
+                found=False,
+                px=0,
+                py=0,
+                dx_px=0,
+                dy_px=0,
+                message="没有可用图像",
+            )
+
+        try:
+            h, w = img_bgr1.shape[:2]
+            new_camera_mtx, roi = cv2.getOptimalNewCameraMatrix(self.camera_matrix, self.dist_coeff, (w, h), 1, (w, h))
+            board_bgr = cv2.undistort(img_bgr1, self.camera_matrix, self.dist_coeff, None, new_camera_mtx)#去畸变
+            detect_result = board_grid_detect(board_bgr, debug_path=self.visual_board_debug_path)
+            if not detect_result["found"]:
+                return VisualBoardOffsetResponse(
+                    found=False,
+                    px=0,
+                    py=0,
+                    dx_px=0,
+                    dy_px=0,
+                    message=detect_result["message"],
+                )
+
+            target_point = interpolate_grid_point(
+                detect_result["grid_points"],
+                req.row,
+                req.col,
+            )
+            center_x = w / 2.0
+            center_y = h / 2.0
+            dx_px = float(target_point[0] - center_x)
+            dy_px = float(target_point[1] - center_y)
+
+            debug_image = draw_grid_debug(
+                board_bgr,
+                detect_result["grid_points"],
+                target_point=target_point,
+                center_point=(center_x, center_y),
+            )
+            cv2.putText(
+                debug_image,
+                f"row={float(req.row):.2f} col={float(req.col):.2f} dx={dx_px:.1f} dy={dy_px:.1f}",
+                (20, 35),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (255, 0, 0),
+                2,
+                cv2.LINE_AA,
+            )
+            save_image_to_path(self.visual_board_debug_path, debug_image)
+            return VisualBoardOffsetResponse(
+                found=True,
+                px=float(target_point[0]),
+                py=float(target_point[1]),
+                dx_px=dx_px,
+                dy_px=dy_px,
+                message="托盘目标格点识别成功",
+            )
+        except Exception as exc:
+            rospy.logerr("托盘视觉伺服目标检测失败: %s" % exc)
+            print("\033[91m托盘视觉伺服目标检测失败，请重新识别。\033[0m")
+            return VisualBoardOffsetResponse(
+                found=False,
+                px=0,
+                py=0,
+                dx_px=0,
+                dy_px=0,
+                message=str(exc),
+            )
     
     def get_put_table(self,cube_count,place_order,test):
         result = test.IDBS(cube_count[0], cube_count[1], cube_count[2], cube_count[3], cube_count[4], cube_count[5],

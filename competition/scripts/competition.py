@@ -105,29 +105,6 @@ if __name__ == "__main__":
             break
 
 
-    #################################           运动到第一个方块上方             ################################
-    # input("按回车后运动到第一个上方...")
-    # GetTargetPos_req.num = -1
-    # resp = get_cube_location.call(GetTargetPos_req)
-    # x,y,z,t,xuanzhuan_angle=resp.array
-
-    # #因为是270度舵机，所以正反只有135度，为了应对170度的情况需要先预留空间
-    # motor_req.angle = 180
-    # motor_control.call(motor_req)
-   
-    # print(f"该方块经9点标定预测的实际坐标、角度：x={x}, y={y}, z={z}, t={t}")
-    # #运动到第一个方块上方，所以高度为z+3
-    # set_angle=shooting_angle
-    # base_x=x
-    # base_y=y
-    # base_z=shooting_angle[2] - z + 100 -66 
-    # set_angle[0]=base_x
-    # set_angle[1]=base_y
-    # set_angle[2]=z+7
-    # set_angle[5]=shooting_angle[5]
-    # arm_req.pose = set_angle
-    # arm_control.call(arm_req)
-
     #################################           捡所有方块             ################################
     input("按回车后捡所有方块...")
     angle_velocity = 270

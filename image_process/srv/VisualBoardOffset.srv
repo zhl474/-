@@ -1,0 +1,9 @@
+float32 row
+float32 col
+---
+bool found
+float32 px
+float32 py
+float32 dx_px
+float32 dy_px
+string message
