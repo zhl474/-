@@ -1,0 +1,11 @@
+string expected_category
+---
+bool found
+string category
+float32 px
+float32 py
+float32 dx_px
+float32 dy_px
+float32 theta
+float32 score
+string message

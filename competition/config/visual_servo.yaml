@@ -1,0 +1,14 @@
+# 视觉伺服最小验证配置。
+# pixel_to_robot_matrix: [dx_px, dy_px] -> [dx_mm, dy_mm]
+# 初始值只是估计值，正式使用前用 calibrate_pixel_motion.py 按人工输入数据覆盖。
+pixel_to_robot_matrix:
+  # 第一行：像素误差 dx/dy 对机械臂 X 修正量的影响，单位 mm/px。
+  - [0.0, 0.1]
+  # 第二行：像素误差 dx/dy 对机械臂 Y 修正量的影响，单位 mm/px。
+  - [0.1, 0.0]
+# 相机中心对准目标后，吸盘中心需要移动的 [X, Y] 偏移，单位 mm。
+camera_to_sucker_offset_mm: [-94.1, -13.8]
+# 最近一次标定时间，仅用于记录，不参与控制。
+last_calibration:
+  pixel_motion: "未标定"
+  camera_sucker_offset: "未标定"

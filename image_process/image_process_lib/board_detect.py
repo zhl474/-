@@ -65,16 +65,17 @@ def board_detect(img):
     # plt.show()
 
     gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
     # gray = cv2.equalizeHist(gray)
-    th = cv2.adaptiveThreshold(
-        gray,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        31,
-        7
-    )
-    # cv2.imshow("result", th)
+    _, th = cv2.threshold(
+    blackhat,
+    0,
+    255,
+    cv2.THRESH_BINARY + cv2.THRESH_OTSU
+)
+    # cv2.imshow("result", gray)
+    # cv2.imshow("result2", th)
     # cv2.waitKey(0)
     # cv2.destroyAllWindows()
 
@@ -96,7 +97,7 @@ def board_detect(img):
         flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
     )
 
-    # cv2.imshow("blobs", img_draw)
+    cv2.imshow("blobs", img_draw)
     cv2.imwrite("/home/zhl/桌面/blobs.jpg",img_draw)
     # cv2.waitKey(0)
     # cv2.destroyAllWindows()
@@ -152,9 +153,9 @@ def board_detect(img):
         #print("裁剪图坐标:", (corner[0], corner[1]))
         #print("转换回原图坐标:", (x_orig, y_orig))
 
-    # cv2.imshow("result", img)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
+    cv2.imshow("result", img)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
     # 1️⃣ 按 x 排序
     x_sorted = corners_pix_position[np.argsort(corners_pix_position[:, 0]), :]

@@ -8,30 +8,48 @@ import numpy as np
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension
 import yaml
 from ultralytics import YOLO
-import torch
 
 from image_process_lib.Place_optimization import get_all_cube, make_list, put_fenlei,cube_pocess,optimize_block_assignment,get_cube_location,get_put_pose
-from image_process_lib.block_detection import get_mask, coreect_LL_location, draw_mask_on_full_image
 from image_process_lib.template_config import load_template_sizes, get_template_size
-from image_process_lib.template_match.template_match import get_rect
 from image_process_lib.point_calibration import ArmCalibrator, x_predict,y_predict,z_predict
 from image_process_lib.board_detect import board_detect
+from image_process_lib.single_block_detector import (
+    detect_blocks_in_image,
+    detect_single_block_in_image,
+    normalize_category_name,
+    undistort_bgr_image,
+)
 
 from image_process.srv import GetTargetPos, GetTargetPosResponse
+from image_process.srv import VisualTargetOffset, VisualTargetOffsetResponse
 from camera.srv import pixel2world, pixel2worldRequest
 
 from ctypes import * 
 
-# 进阶任务动态库可能仍输出旧类别名，这里统一转换为新模型类别名。
-CATEGORY_NAME_MAP = {
-    "LR": "L_blue",
-    "LL": "L_yellow",
-    "ZL": "z_blue",
-    "ZR": "z_green",
-    "O": "square",
-    "suqare": "square",
-    "Line": "line",
-}
+def save_image_to_path(image_path, image):
+    """保存调试图像，兼容中文路径，并在失败时输出日志。"""
+    if image is None:
+        rospy.logwarn("调试图像为空，无法保存: %s" % image_path)
+        return False
+    try:
+        dot_index = image_path.rfind(".")
+        image_ext = image_path[dot_index:] if dot_index >= 0 else ".jpg"
+        ok, encoded_image = cv2.imencode(image_ext, image)
+        if not ok:
+            rospy.logwarn("调试图像编码失败: %s" % image_path)
+            return False
+        encoded_image.tofile(image_path)
+        return True
+    except Exception as exc:
+        rospy.logwarn("调试图像保存失败 %s: %s" % (image_path, exc))
+        return False
+
+def make_debug_image_with_mask(debug_image, mask):
+    """把检测结果和二值掩码拼在一起，方便现场调阈值。"""
+    if debug_image is None or mask is None:
+        return debug_image
+    mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+    return np.hstack((debug_image, mask_bgr))
 
 class ImageProcessor:
     def __init__(self):
@@ -42,6 +60,11 @@ class ImageProcessor:
         self.service2 = rospy.Service("get_board_pos", GetTargetPos,self.get_board_pos)
         self.get_cube_location_service = rospy.Service("get_cube_location", GetTargetPos,self.get_cube_location1)
         self.get_put_pose_service = rospy.Service("get_put_pose", GetTargetPos,self.get_put_pose)
+        self.visual_target_offset_service = rospy.Service(
+            "get_visual_target_offset",
+            VisualTargetOffset,
+            self.get_visual_target_offset,
+        )
 
         model_path="/home/zhl/SingleArmTetris/SingleArmTetris/src/competition/model/best5.14.pt"
         self.model=YOLO(model_path)
@@ -56,6 +79,10 @@ class ImageProcessor:
         self.top_surface_mask_vis_path = rospy.get_param(
             "~top_surface_mask_vis_path",
             "/home/zhl/桌面/top_surface_masks.jpg"
+        )
+        self.visual_servo_debug_path = rospy.get_param(
+            "~visual_servo_debug_path",
+            "/home/zhl/桌面/视觉伺服当前检测.jpg"
         )
 
         self.pixel2world_client = rospy.ServiceProxy("get_world_pos",pixel2world)
@@ -80,75 +107,33 @@ class ImageProcessor:
 
     def get_cube_pos(self, req):
         img_bgr1 = self.latest_image
+        if img_bgr1 is None:
+            rospy.logwarn("没有可用图像，无法识别方块")
+            return GetTargetPosResponse([0])
         # 裁剪边距：正数向外扩展 YOLO 框，负数向内收缩 YOLO 框，单位是像素。
         crop_margin = 8
         cube_count=[0,0,0,0,0,0,0]#记录每个方块的放置个数
-        h, w = img_bgr1.shape[:2]
-        new_camera_mtx, roi = cv2.getOptimalNewCameraMatrix(self.camera_matrix, self.dist_coeff, (w, h), 1, (w, h))
-        img_bgr = cv2.undistort(img_bgr1, self.camera_matrix, self.dist_coeff, None, new_camera_mtx)#去畸变
-        img_bgr2=np.copy(img_bgr)#复制一个数组，我们会在检测到的图片中画黑框开辅助判断，但黑框会影响颜色分割，所以复制一个数组，img_bgr用来检测画黑框，img_bgr2用来颜色分割
-        mask_vis_img = np.copy(img_bgr) if self.save_top_surface_mask_vis else None#用于把每个 ROI 的上表面掩码叠加回大图
-        result = self.model(img_bgr,iou=0.5,conf=0.45)#yolo检测
+        img_bgr = undistort_bgr_image(img_bgr1, self.camera_matrix, self.dist_coeff)#去畸变
         template_sizes = load_template_sizes()#每次服务调用读取一次模板尺寸配置，便于标定后直接生效
-        # cv2.imwrite('/home/zhl/桌面/yolo识别.jpg', result[0].plot())
         cube_list=[]#检测到方块储存在这个列表中
         for i in range(7):
             cube_list.append([])
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"使用设备: {device}")
-        for det in result[0].boxes.data.tolist():
-            x1, y1, x2, y2, score, cid = det#取出识别结果
-            category = self.model.names[int(cid)]#类别
-            category = CATEGORY_NAME_MAP.get(category, category)
-            if(category=="board"):
-                continue
+        blocks, img_bgr2 = detect_blocks_in_image(
+            img_bgr,
+            self.model,
+            template_sizes=template_sizes,
+            crop_margin=crop_margin,
+            save_mask_overlay=self.save_top_surface_mask_vis,
+        )
+        for block in blocks:
+            category = block["category"]
             cube_count=get_all_cube(category,cube_count)#读取每种方块的个数
-            px=(x1+x2)/2
-            py=(y1+y2)/2
-            crop_x1 = max(0, int(x1) - crop_margin)
-            crop_y1 = max(0, int(y1) - crop_margin)
-            crop_x2 = min(w, int(x2) + crop_margin)
-            crop_y2 = min(h, int(y2) + crop_margin)
-            if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
-                rospy.logwarn("裁剪区域无效，跳过方块: %s" % category)
-                continue
-            cropped_img = img_bgr[crop_y1:crop_y2, crop_x1:crop_x2]#根据裁剪边距调整后的 YOLO 框取出图像
-            mask,hsv=get_mask(cropped_img,category)#颜色分割，mask是分割的图片二值化图
-            if self.save_top_surface_mask_vis:
-                draw_mask_on_full_image(mask_vis_img, mask, crop_x1, crop_y1)
-            # cv2.imshow("mask",mask)
-            # cv2.imshow("cropped_img",cropped_img)
-            try:
-                template_w, template_h = get_template_size(category, template_sizes)
-                # print(f"\033[31m模版长度是{category,template_w, template_h}\033[0m")
-            except Exception as e:
-                rospy.logwarn("模板尺寸配置读取失败，跳过方块 %s: %s" % (category, e))
-                continue
-            rect = get_rect(mask,template_w, template_h,category,img_bgr2,crop_x1,crop_y1)
-            # cv2.waitKey(0)
-            # cv2.destroyAllWindows()
-            #方块上表面的最小矩形框，进而得到中心点
-            box = cv2.boxPoints(rect)
-            box = np.intp(box)
-            # abs_box = box + [crop_x1, crop_y1]
-
-            px=(int(rect[0][0])+crop_x1)
-            py=(int(rect[0][1])+crop_y1)
-            if(category=="L_yellow" or category=="L_blue"):#L型方块要特殊处理，吸中间吸不起来
-                px,py=coreect_LL_location(box,mask,rect)
-                px=(px+crop_x1)
-                py=(py+crop_y1)
-
-            #给中心点画圈
-            cv2.circle(img_bgr2,(px,py),1, (0, 0, 255), 2)
+            px = block["px"]
+            py = block["py"]
             print(f"{category}坐标{px,py}")
 
             #获取角度，不用看
-            # theta0=get_precise_angle(rect,box,category,mask)#获取角度，不用看
-            theta0=rect[2]
-            theta = theta0
-            if theta0<-180:
-                theta = 360+theta0
+            theta = block["theta"]
 
             cam_point3d = [0,0,0]
 ################################################       9点标定法(托盘标定那里也要同步改)      #########################################################
@@ -167,9 +152,12 @@ class ImageProcessor:
         # cv2.imshow('img_bgr2', img_bgr2)
         # cv2.waitKey(2000)
         # cv2.destroyAllWindows()
-        cv2.imwrite('/home/zhl/桌面/cube_pos_image.jpg', img_bgr2)
+        save_image_to_path('/home/zhl/桌面/cube_pos_image.jpg', img_bgr2)
         if self.save_top_surface_mask_vis:
-            if cv2.imwrite(self.top_surface_mask_vis_path, mask_vis_img):
+            mask_vis_img = blocks[-1].get("mask_overlay") if blocks else img_bgr2
+            if mask_vis_img is None:
+                mask_vis_img = img_bgr2
+            if save_image_to_path(self.top_surface_mask_vis_path, mask_vis_img):
                 rospy.loginfo("上表面掩码可视化已保存: %s" % self.top_surface_mask_vis_path)
             else:
                 rospy.logwarn("上表面掩码可视化保存失败: %s" % self.top_surface_mask_vis_path)
@@ -200,7 +188,7 @@ class ImageProcessor:
         self.calibrator.board_detector(board_bgr,self.pixel2world_client)
         self.calibrator.calibrate()#托盘识别结束
 
-        cv2.imwrite('/home/zhl/桌面/board_bgr.jpg', board_bgr)
+        save_image_to_path('/home/zhl/桌面/board_bgr.jpg', board_bgr)
         
         return GetTargetPosResponse([1.0])
     
@@ -266,7 +254,7 @@ class ImageProcessor:
             cube_list[i].append(float(cube_list0[i * 4 + 2])+0.5)
             cube_list[i].append(float(cube_list0[i * 4 + 3])+0.5)
             cube_list[i].append(float(cube_list0[i * 4 + 1]))
-            cube_name=CATEGORY_NAME_MAP.get(cube_list0[i * 4], cube_list0[i * 4])
+            cube_name=normalize_category_name(cube_list0[i * 4])
             cube_list[i].append(cube_name)
         # print(cube_list, cube_list0[-1])  # 打印结果
         cube_sum = 0
@@ -275,6 +263,262 @@ class ImageProcessor:
         level = cube_sum // 10
         print("极限填满行", level)
         return cube_list,cube_list0[-1]
+
+    # def get_visual_target_offset(self, req):
+    #     """返回当前唯一目标方块相对相机中心的像素偏差，供视觉伺服闭环调用。"""
+    #     img_bgr1 = self.latest_image
+    #     if img_bgr1 is None:
+    #         return VisualTargetOffsetResponse(
+    #             found=False,
+    #             category="",
+    #             px=0,
+    #             py=0,
+    #             dx_px=0,
+    #             dy_px=0,
+    #             theta=0,
+    #             score=0,
+    #             message="没有可用图像",
+    #         )
+    #
+    #     try:
+    #         img_bgr = undistort_bgr_image(img_bgr1, self.camera_matrix, self.dist_coeff)
+    #         template_sizes = load_template_sizes()
+    #         detection = detect_single_block_in_image(
+    #             img_bgr,
+    #             self.model,
+    #             template_sizes=template_sizes,
+    #             crop_margin=8,
+    #             expected_category=req.expected_category,
+    #         )
+    #         debug_image = detection.get("debug_image")
+    #         h, w = img_bgr.shape[:2]
+    #         center_x = w / 2.0
+    #         center_y = h / 2.0
+    #         if detection["found"]:
+    #             dx_px = detection["px"] - center_x
+    #             dy_px = detection["py"] - center_y
+    #             if debug_image is not None:
+    #                 cv2.drawMarker(
+    #                     debug_image,
+    #                     (int(center_x), int(center_y)),
+    #                     (255, 0, 0),
+    #                     markerType=cv2.MARKER_CROSS,
+    #                     markerSize=24,
+    #                     thickness=2,
+    #                 )
+    #                 cv2.line(
+    #                     debug_image,
+    #                     (int(center_x), int(center_y)),
+    #                     (int(detection["px"]), int(detection["py"])),
+    #                     (255, 0, 0),
+    #                     1,
+    #                 )
+    #                 cv2.putText(
+    #                     debug_image,
+    #                     f"dx={dx_px:.1f}px dy={dy_px:.1f}px",
+    #                     (20, 35),
+    #                     cv2.FONT_HERSHEY_SIMPLEX,
+    #                     0.8,
+    #                     (255, 0, 0),
+    #                     2,
+    #                     cv2.LINE_AA,
+    #                 )
+    #                 cv2.imwrite(self.visual_servo_debug_path, debug_image)
+    #             return VisualTargetOffsetResponse(
+    #                 found=True,
+    #                 category=detection["category"],
+    #                 px=float(detection["px"]),
+    #                 py=float(detection["py"]),
+    #                 dx_px=float(dx_px),
+    #                 dy_px=float(dy_px),
+    #                 theta=float(detection["theta"]),
+    #                 score=float(detection["score"]),
+    #                 message=detection["message"],
+    #             )
+    #
+    #         if debug_image is not None:
+    #             cv2.imwrite(self.visual_servo_debug_path, debug_image)
+    #         return VisualTargetOffsetResponse(
+    #             found=False,
+    #             category="",
+    #             px=0,
+    #             py=0,
+    #             dx_px=0,
+    #             dy_px=0,
+    #             theta=0,
+    #             score=0,
+    #             message=detection["message"],
+    #         )
+    #     except Exception as exc:
+    #         rospy.logerr("视觉伺服目标检测失败: %s" % exc)
+    #         return VisualTargetOffsetResponse(
+    #             found=False,
+    #             category="",
+    #             px=0,
+    #             py=0,
+    #             dx_px=0,
+    #             dy_px=0,
+    #             theta=0,
+    #             score=0,
+    #             message=str(exc),
+    #         )
+
+    def get_visual_target_offset(self, req):
+        """返回浅色背景下唯一深色旋转矩形相对相机中心的像素偏差。"""
+        img_bgr1 = self.latest_image
+        if img_bgr1 is None:
+            return VisualTargetOffsetResponse(
+                found=False,
+                category="",
+                px=0,
+                py=0,
+                dx_px=0,
+                dy_px=0,
+                theta=0,
+                score=0,
+                message="没有可用图像",
+            )
+
+        try:
+            img_bgr = undistort_bgr_image(img_bgr1, self.camera_matrix, self.dist_coeff)
+            debug_image = img_bgr.copy()
+            h, w = img_bgr.shape[:2]
+            center_x = w / 2.0
+            center_y = h / 2.0
+
+            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            gray = cv2.GaussianBlur(gray, (5, 5), 0)
+            # 相机曝光没调好时，目标会变成灰黑色；用 Otsu 自动阈值找浅色背景上的深色区域。
+            _, dark_mask = cv2.threshold(
+                gray,
+                0,
+                255,
+                cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+            )
+
+            # 去掉小噪点并填补目标内部的小孔，保证旋转矩形拟合稳定。
+            kernel = np.ones((5, 5), np.uint8)
+            dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+            contours, _ = cv2.findContours(
+                dark_mask,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE,
+            )
+            min_area = max(200.0, float(h * w) * 0.0002)
+            valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) >= min_area]
+
+            cv2.drawMarker(
+                debug_image,
+                (int(center_x), int(center_y)),
+                (255, 0, 0),
+                markerType=cv2.MARKER_CROSS,
+                markerSize=24,
+                thickness=2,
+            )
+
+            if not valid_contours:
+                save_image_to_path(self.visual_servo_debug_path, make_debug_image_with_mask(debug_image, dark_mask))
+                return VisualTargetOffsetResponse(
+                    found=False,
+                    category="",
+                    px=0,
+                    py=0,
+                    dx_px=0,
+                    dy_px=0,
+                    theta=0,
+                    score=0,
+                    message="未检测到深色旋转矩形",
+                )
+
+            target_contour = max(valid_contours, key=cv2.contourArea)
+            rect = cv2.minAreaRect(target_contour)
+            (px, py), (rect_w, rect_h), raw_angle = rect
+            if rect_w <= 1e-6 or rect_h <= 1e-6:
+                save_image_to_path(self.visual_servo_debug_path, make_debug_image_with_mask(debug_image, dark_mask))
+                return VisualTargetOffsetResponse(
+                    found=False,
+                    category="",
+                    px=0,
+                    py=0,
+                    dx_px=0,
+                    dy_px=0,
+                    theta=0,
+                    score=0,
+                    message="深色区域尺寸异常",
+                )
+
+            # theta 表示旋转矩形长边相对图像 x 轴的角度，范围约为 -90 到 90 度。
+            theta = raw_angle
+            if rect_w < rect_h:
+                theta += 90.0
+            while theta >= 90.0:
+                theta -= 180.0
+            while theta < -90.0:
+                theta += 180.0
+
+            dx_px = px - center_x
+            dy_px = py - center_y
+            contour_area = cv2.contourArea(target_contour)
+            rect_area = rect_w * rect_h
+            score = float(contour_area / rect_area) if rect_area > 1e-6 else 0.0
+
+            box = cv2.boxPoints(rect)
+            box = np.intp(box)
+            cv2.drawContours(debug_image, [target_contour], -1, (0, 255, 255), 1)
+            cv2.drawContours(debug_image, [box], 0, (0, 165, 255), 2)
+            cv2.drawMarker(
+                debug_image,
+                (int(px), int(py)),
+                (0, 0, 255),
+                markerType=cv2.MARKER_CROSS,
+                markerSize=24,
+                thickness=2,
+            )
+            cv2.line(
+                debug_image,
+                (int(center_x), int(center_y)),
+                (int(px), int(py)),
+                (255, 0, 0),
+                1,
+            )
+            cv2.putText(
+                debug_image,
+                f"dx={dx_px:.1f}px dy={dy_px:.1f}px theta={theta:.1f}",
+                (20, 35),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (255, 0, 0),
+                2,
+                cv2.LINE_AA,
+            )
+            save_image_to_path(self.visual_servo_debug_path, make_debug_image_with_mask(debug_image, dark_mask))
+            print("\033[31m确认保存\033[0m")
+            return VisualTargetOffsetResponse(
+                found=True,
+                category="dark_rectangle",
+                px=float(px),
+                py=float(py),
+                dx_px=float(dx_px),
+                dy_px=float(dy_px),
+                theta=float(theta),
+                score=float(score),
+                message="检测到深色旋转矩形",
+            )
+        except Exception as exc:
+            rospy.logerr("视觉伺服目标检测失败: %s" % exc)
+            return VisualTargetOffsetResponse(
+                found=False,
+                category="",
+                px=0,
+                py=0,
+                dx_px=0,
+                dy_px=0,
+                theta=0,
+                score=0,
+                message=str(exc),
+            )
 
 if __name__ == "__main__":
     rospy.init_node("image_processor")

@@ -59,6 +59,7 @@ catkin_python_setup()
 add_service_files(
   FILES
   GetTargetPos.srv
+  VisualTargetOffset.srv
 )
 
 ## Generate actions in the 'action' folder
@@ -107,7 +108,7 @@ generate_messages(
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES image_process
-#  CATKIN_DEPENDS cv_bridge rospy sensor_msgs std_msgs
+  CATKIN_DEPENDS message_runtime cv_bridge rospy sensor_msgs std_msgs
 #  DEPENDS system_lib
 )
 

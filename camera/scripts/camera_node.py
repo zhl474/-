@@ -67,7 +67,7 @@ class CameraNode:
     
     def publish_images(self):
         """发布图像的主循环"""
-        rate = rospy.Rate(5)  # 30Hz
+        rate = rospy.Rate(30)  # 30Hz
         
         while not rospy.is_shutdown():
             try:
