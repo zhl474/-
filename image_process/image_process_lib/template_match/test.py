@@ -1,28 +1,27 @@
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
 
-# 创建一个测试图像
-img = np.zeros((100, 100), dtype=np.uint8)
-img[20:80, 20:80] = 255  # 白色方块
 
-# 腐蚀操作
-kernel = np.ones((5, 5), np.uint8)
-eroded = cv2.erode(img, kernel, iterations=1)
+def main():
+    # 创建一个测试图像。
+    img = np.zeros((100, 100), dtype=np.uint8)
+    img[20:80, 20:80] = 255
 
-# 计算边缘（原始 - 腐蚀）
-edge = cv2.subtract(img, eroded)
+    # 腐蚀操作。
+    kernel = np.ones((5, 5), np.uint8)
+    eroded = cv2.erode(img, kernel, iterations=1)
 
-# 创建显示画布
-base_canvas = edge.copy()
+    # 计算边缘（原始 - 腐蚀）。
+    edge = cv2.subtract(img, eroded)
+    base_canvas = edge.copy()
 
-# 显示
-cv2.imshow("Original", img)
-cv2.imshow("Eroded", eroded)
-cv2.imshow("Edge (Original - Eroded)", edge)
-cv2.imshow("Base Canvas", base_canvas)
+    cv2.imshow("原图", img)
+    cv2.imshow("腐蚀后", eroded)
+    cv2.imshow("边缘", edge)
+    cv2.imshow("显示画布", base_canvas)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
-# 等待按键
-cv2.waitKey(0)
-cv2.destroyAllWindows()
 
+if __name__ == "__main__":
+    main()

@@ -1,67 +1,11 @@
-updated_at: '2026-07-04 11:00:12'
 detect_model: /home/zhl/SingleArmTetris/SingleArmTetris/src/competition/model/best5.14.pt
 seg_model: /home/zhl/SingleArmTetris/SingleArmTetris/src/competition/model/best_seg.engine
 template_sizes:
-  line:
-    long_side: 165
-    short_side: 37.13
-    samples: 1
-    measurements:
-    - long_side: 165.34
-      short_side: 37.77
-      score: 0.9544
-      source: camera_1
-  square:
-    long_side: 80
-    short_side: 80
-    samples: 1
-    measurements:
-    - long_side: 80.828
-      short_side: 80.201
-      score: 0.9615
-      source: camera_1
-  L_yellow:
-    long_side: 120.349
-    short_side: 78.86
-    samples: 1
-    measurements:
-    - long_side: 120.349
-      short_side: 78.86
-      score: 0.9336
-      source: camera_1
-  L_blue:
-    long_side: 122
-    short_side: 80.05
-    samples: 1
-    measurements:
-    - long_side: 122.379
-      short_side: 80.936
-      score: 0.9442
-      source: camera_1
-  z_blue:
-    long_side: 120.512
-    short_side: 78.159
-    samples: 1
-    measurements:
-    - long_side: 120.512
-      short_side: 78.159
-      score: 0.9579
-      source: camera_1
-  z_green:
-    long_side: 120.779
-    short_side: 78.225
-    samples: 1
-    measurements:
-    - long_side: 120.779
-      short_side: 78.225
-      score: 0.9272
-      source: camera_1
-  T:
-    long_side: 120.065
-    short_side: 79.527
-    samples: 1
-    measurements:
-    - long_side: 120.065
-      short_side: 79.527
-      score: 0.9326
-      source: camera_1
+  active_profile: high
+  profiles:
+    high:
+      block_px: 37
+      connector_px: 5
+    low:
+      block_px: 37
+      connector_px: 5

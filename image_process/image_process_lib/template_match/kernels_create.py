@@ -1,311 +1,283 @@
-import torch
-import numpy as np
-import cv2
 import math
+
+import cv2
 import matplotlib.pyplot as plt
-
-# 逻辑 L 形
-base_L_yellow = np.zeros((37+5+37, 37+5+37+5+37), dtype=np.float32)
-base_L_yellow[0:37+5,37+5+37+5:] = 1
-base_L_yellow[37+5:,:] = 1
-
-base_L_blue = np.zeros((37+5+37, 37+5+37+5+37), dtype=np.float32)
-base_L_blue[0:37+5,:37] = 1
-base_L_blue[37+5:,:] = 1
-
-base_T = np.zeros((37+5+37, 37+5+37+5+37), dtype=np.float32)
-base_T[0:37+5,37+5:37+5+37] = 1
-base_T[37+5:,:] = 1
-
-base_square = np.array([
-    [1, 1],
-    [1, 1]
-], dtype=np.float32)
-base_line = np.array([
-    [1, 1, 1, 1]
-], dtype=np.float32)
-
-base_z_blue = np.zeros((37+5+37, 37+5+37+5+37), dtype=np.float32)
-base_z_blue[0:37,:37+5+37] = 1
-base_z_blue[37:37+5,37+5:37+5+37] = 1
-base_z_blue[37+5:,37+5:] = 1
-
-base_z_green = np.zeros((37+5+37, 37+5+37+5+37), dtype=np.float32)
-base_z_green[0:37,37+5:] = 1
-base_z_green[37:37+5,37+5:37+5+37] = 1
-base_z_green[37+5:,:37+5+37] = 1
+import numpy as np
+import torch
 
 
+# 每个类别的逻辑子块坐标。坐标只描述基础朝向，旋转角度由卷积核生成阶段处理。
+TETRIS_BLOCKS = {
+    "L_yellow": [(2, 0), (0, 1), (1, 1), (2, 1)],
+    "L_blue": [(0, 0), (0, 1), (1, 1), (2, 1)],
+    "T": [(1, 0), (0, 1), (1, 1), (2, 1)],
+    "z_blue": [(0, 0), (1, 0), (1, 1), (2, 1)],
+    "z_green": [(1, 0), (2, 0), (0, 1), (1, 1)],
+    "square": [(0, 0), (1, 0), (0, 1), (1, 1)],
+    "line": [(0, 0), (1, 0), (2, 0), (3, 0)],
+}
 
-# ==============================
-# 1️⃣ 显示函数
-# ==============================
+ROTATION_TOTAL_ANGLE = {
+    "L_blue": 360,
+    "L_yellow": 360,
+    "T": 360,
+    "z_blue": 180,
+    "z_green": 180,
+    "square": 90,
+    "line": 180,
+}
 
-def show_kernel(kernels, index,show=1):
+
+def _normalize_angle(angle, period):
+    angle = float(angle) % float(period)
+    if np.isclose(angle, period, atol=1e-9):
+        return 0.0
+    return angle
+
+
+def _validate_angle_step(angle_step):
+    try:
+        angle_step = float(angle_step)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("angle_step 必须是数字") from exc
+
+    if angle_step <= 0:
+        raise ValueError("angle_step 必须为正数")
+
+    return angle_step
+
+
+def build_angle_values(category, angle_step=1, angle_center=None, angle_window=None, angle_values=None):
+    """生成实际用于模板旋转的角度列表。"""
+    if category not in ROTATION_TOTAL_ANGLE:
+        raise ValueError(f"未知方块类别: {category}")
+
+    period = float(ROTATION_TOTAL_ANGLE[category])
+    if angle_values is not None:
+        angles = [_normalize_angle(angle, period) for angle in angle_values]
+    else:
+        angle_step = _validate_angle_step(angle_step)
+        if angle_center is None or angle_window is None:
+            count = int(math.ceil(period / angle_step))
+            angles = [_normalize_angle(i * angle_step, period) for i in range(count)]
+        else:
+            angle_window = float(angle_window)
+            if angle_window < 0:
+                raise ValueError("angle_window 必须大于等于 0")
+
+            start = float(angle_center) - angle_window
+            end = float(angle_center) + angle_window
+            count = int(math.floor((end - start) / angle_step)) + 1
+            angles = [_normalize_angle(start + i * angle_step, period) for i in range(count)]
+            end_angle = _normalize_angle(end, period)
+            if not any(np.isclose(angle, end_angle, atol=1e-6) for angle in angles):
+                angles.append(end_angle)
+
+    deduped = []
+    seen = set()
+    for angle in angles:
+        key = round(float(angle), 6)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(float(angle))
+
+    if not deduped:
+        raise ValueError("角度列表不能为空")
+
+    return deduped
+
+
+def _validate_geometry(block_px, connector_px):
+    try:
+        block_px = int(round(float(block_px)))
+        connector_px = int(round(float(connector_px)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("block_px 和 connector_px 必须是数字") from exc
+
+    if block_px <= 0 or connector_px <= 0:
+        raise ValueError("block_px 和 connector_px 必须为正数")
+
+    return block_px, connector_px
+
+
+def _category_cells(category):
+    if category not in TETRIS_BLOCKS:
+        raise ValueError(f"未知方块类别: {category}")
+    return TETRIS_BLOCKS[category]
+
+
+def get_template_rect_size(category, block_px, connector_px):
+    """按类别和几何参数计算基础模板的外接矩形尺寸。"""
+    block_px, connector_px = _validate_geometry(block_px, connector_px)
+    cells = _category_cells(category)
+    grid_w = max(x for x, _ in cells) + 1
+    grid_h = max(y for _, y in cells) + 1
+    width = grid_w * block_px + (grid_w - 1) * connector_px
+    height = grid_h * block_px + (grid_h - 1) * connector_px
+    return width, height
+
+
+def create_base_shape(category, block_px, connector_px):
+    """生成未旋转的基础模板，像素值为 0/1。"""
+    block_px, connector_px = _validate_geometry(block_px, connector_px)
+    cells = set(_category_cells(category))
+    width, height = get_template_rect_size(category, block_px, connector_px)
+    canvas = np.zeros((height, width), dtype=np.float32)
+
+    step = block_px + connector_px
+
+    for x, y in cells:
+        x0 = x * step
+        y0 = y * step
+        canvas[y0:y0 + block_px, x0:x0 + block_px] = 1.0
+
+    for x, y in cells:
+        x0 = x * step
+        y0 = y * step
+        if (x + 1, y) in cells:
+            canvas[y0:y0 + block_px, x0 + block_px:x0 + block_px + connector_px] = 1.0
+        if (x, y + 1) in cells:
+            canvas[y0 + block_px:y0 + block_px + connector_px, x0:x0 + block_px] = 1.0
+
+    # 四个子块围住同一个连接交点时，填充中心连接区域，避免 square 中心留空。
+    max_x = max(x for x, _ in cells)
+    max_y = max(y for _, y in cells)
+    for x in range(max_x):
+        for y in range(max_y):
+            if {(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)}.issubset(cells):
+                x0 = x * step + block_px
+                y0 = y * step + block_px
+                canvas[y0:y0 + connector_px, x0:x0 + connector_px] = 1.0
+
+    return canvas
+
+
+def show_kernel(kernels, index, show=1):
     kernel = kernels[index, 0].detach().cpu().numpy()
-    # 确保是2D数组
+    # 确保是二维数组。
     if kernel.ndim == 3 and kernel.shape[0] == 1:
-        kernel = kernel.squeeze(0)  # 从 (1, H, W) -> (H, W)
+        kernel = kernel.squeeze(0)
     elif kernel.ndim == 3 and kernel.shape[2] == 1:
-        kernel = kernel.squeeze(-1)  # 从 (H, W, 1) -> (H, W)
+        kernel = kernel.squeeze(-1)
 
-    # 归一化到 0-255（如果 kernel 值不在这个范围）
+    # 归一化到 0-255，便于 OpenCV 显示和画轮廓。
     if kernel.min() < 0 or kernel.max() > 1:
         kernel_normalized = (kernel - kernel.min()) / (kernel.max() - kernel.min()) * 255
         kernel_uint8 = kernel_normalized.astype(np.uint8)
+    elif kernel.max() > 0:
+        scale = 255 / kernel.max()
+        kernel_uint8 = (kernel * scale).astype(np.uint8)
     else:
-        A = 255/kernel.max()
-        kernel_uint8 = (kernel * A).astype(np.uint8)
+        kernel_uint8 = kernel.astype(np.uint8)
 
-    # 显示
     if show:
         cv2.imshow("Kernel Visualization", kernel_uint8)
-        cv2.waitKey(0)  # 等待按键
-        cv2.destroyAllWindows()  # 关闭窗口
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
     return kernel_uint8
 
 
 def show_all_kernels_grid(kernels, cols=12):
     k = kernels.shape[0]
-    L = kernels.shape[2]
+    length = kernels.shape[2]
 
     rows = math.ceil(k / cols)
-    canvas = np.zeros((rows * L, cols * L))
+    canvas = np.zeros((rows * length, cols * length))
 
     for i in range(k):
         r = i // cols
         c = i % cols
         kernel = kernels[i, 0].detach().cpu().numpy()
-        canvas[r*L:(r+1)*L, c*L:(c+1)*L] = kernel
+        canvas[r * length:(r + 1) * length, c * length:(c + 1) * length] = kernel
 
     plt.figure(figsize=(12, 12))
     plt.imshow(canvas, cmap="gray")
-    plt.title("All Rotation Kernels")
+    plt.title("所有旋转模板")
     plt.show()
 
 
-# ==============================
-# 2️⃣ 将逻辑形状放大为真实像素尺寸
-# ==============================
-
-def upscale_shape(base_shape: np.ndarray,
-                  total_w: int,
-                  total_h: int) -> np.ndarray:
-    """
-    将俄罗斯方块逻辑结构放大为真实像素尺寸
-    """
-
-    grid_h, grid_w = base_shape.shape
-
-    block_w = total_w // grid_w
-    block_h = total_h // grid_h
-
-    canvas = np.zeros((grid_h * block_h, grid_w * block_w),
-                      dtype=np.float32)
-
-    for y in range(grid_h):
-        for x in range(grid_w):
-            if base_shape[y, x] == 1:
-                canvas[
-                    y*block_h:(y+1)*block_h,
-                    x*block_w:(x+1)*block_w
-                ] = 1.0
-
-    return canvas
-
-
-# ==============================
-# 3️⃣ 嵌入中心
-# ==============================
-
-def embed_in_center(base_shape: np.ndarray, L: int) -> np.ndarray:
-    canvas = np.zeros((L, L), dtype=np.float32)
+def embed_in_center(base_shape: np.ndarray, length: int) -> np.ndarray:
+    canvas = np.zeros((length, length), dtype=np.float32)
 
     h, w = base_shape.shape
+    start_y = length // 2 - h // 2
+    start_x = length // 2 - w // 2
 
-    start_y = L // 2 - h // 2
-    start_x = L // 2 - w // 2
-
-    canvas[start_y:start_y + h,
-           start_x:start_x + w] = base_shape
-
+    canvas[start_y:start_y + h, start_x:start_x + w] = base_shape
     return canvas
 
-
-# ==============================
-# 4️⃣ 旋转
-# ==============================
 
 def rotate_image(img: np.ndarray, angle: float) -> np.ndarray:
-    L = img.shape[0]
-    center = (L // 2, L // 2)
+    length = img.shape[0]
+    center = (length // 2, length // 2)
 
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-
-    rotated = cv2.warpAffine(
+    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    return cv2.warpAffine(
         img,
-        M,
-        (L, L),
-        flags=cv2.INTER_NEAREST,   # 必须最近邻
+        matrix,
+        (length, length),
+        flags=cv2.INTER_NEAREST,
         borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0
+        borderValue=0,
     )
 
-    return rotated
 
-
-# ==============================
-# 5️⃣ 主函数：生成旋转卷积核
-# ==============================
-
-def create_kernels(base_shape: np.ndarray,category,total_w: int,total_h: int,angle_step: int,total_angle:int, device=None):
-
-    # 1️⃣ 放大到真实尺寸
-    if category=="line" or category=="square":
-        base_shape = upscale_shape(base_shape,total_w,total_h)
-
+def create_kernels(base_shape: np.ndarray, angles, device=None):
+    """生成一个类别的所有旋转卷积核。"""
     h, w = base_shape.shape
 
-    # 2️⃣ 计算旋转安全画布
-    L = int(math.ceil(math.sqrt(w**2 + h**2)))
-    if L % 2 == 0:
-        L += 1
+    length = int(math.ceil(math.sqrt(w ** 2 + h ** 2)))
+    if length % 2 == 0:
+        length += 1
 
-    # 3️⃣ 嵌入中心
-    base_canvas = embed_in_center(base_shape, L)
+    base_canvas = embed_in_center(base_shape, length)
+    angles = [float(angle) for angle in angles]
+    angle_num = len(angles)
+    kernel_dtype = np.float32 if device is None or str(device) == "cpu" else np.float16
+    kernels = np.zeros((angle_num, length, length), dtype=kernel_dtype)
 
-    #强化边缘部分
-    erode_kernel = np.ones((5, 5), np.uint8)
-    eroded = cv2.erode(base_canvas, erode_kernel, iterations=1)
-    edge = cv2.subtract(base_canvas,eroded)
-    base_canvas = base_canvas+edge*4
-    # cv2.imshow("eroded", eroded)
-    # cv2.imshow("base_canvas1", edge)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
-
-    angle_num = int(total_angle / angle_step)
-    kernels = np.zeros((angle_num, L, L),
-                       dtype=np.float16)
-
-    # 4️⃣ 生成旋转模板
-    for i, angle in enumerate(range(0, total_angle, angle_step)):
+    for i, angle in enumerate(angles):
         rotated = rotate_image(base_canvas, angle)
-        rotated = (rotated > 0.5).astype(np.float16)
-        kernels[i] = rotated
+        kernels[i] = (rotated > 0.5).astype(kernel_dtype)
 
-    # 5️⃣ 转 torch
     kernels_tensor = torch.from_numpy(kernels).unsqueeze(1)
-
-    # 6️⃣ 归一化（可选）
-    # kernel_sum = kernels_tensor.sum(dim=(2, 3), keepdim=True)
-    # kernels_tensor = kernels_tensor / (kernel_sum + 1e-6)
-
     if device is not None:
         kernels_tensor = kernels_tensor.to(device)
 
-    return kernels_tensor, L
+    return kernels_tensor, length, angles
 
 
-# ==============================
-# 6️⃣ 测试
-# ==============================
+def create_rotation_kernels(
+    block_px,
+    connector_px,
+    category,
+    device=None,
+    angle_step=1,
+    angle_center=None,
+    angle_window=None,
+    angle_values=None,
+):
+    """按子块和连接处像素生成指定类别的旋转模板。"""
+    base_shape = create_base_shape(category, block_px, connector_px)
+    angles = build_angle_values(
+        category,
+        angle_step=angle_step,
+        angle_center=angle_center,
+        angle_window=angle_window,
+        angle_values=angle_values,
+    )
+    return create_kernels(
+        base_shape,
+        angles,
+        device=device,
+    )
 
-def create_rotation_kernels(w, h, category, device=None):
-    if(category=="L_blue"):
-        return create_kernels(
-        base_L_blue,
-        category,
-        total_w=w,
-        total_h=h,
-        angle_step=1,
-        total_angle=360,
-        device=device
-    )
-    elif(category=="L_yellow"):
-        return create_kernels(
-        base_L_yellow,
-        category,
-        total_w=w,
-        total_h=h,
-        angle_step=1,
-        total_angle=360,
-        device=device
-    )
-    elif(category=="z_blue"):
-        return create_kernels(
-        base_z_blue,
-        category,
-        total_w=w,
-        total_h=h,
-        angle_step=1,
-        total_angle=180,
-        device=device
-    )
-    elif(category=="z_green"):
-        return create_kernels(
-        base_z_green,
-        category,
-        total_w=w,
-        total_h=h,
-        angle_step=1,
-        total_angle=180,
-        device=device
-    )
-    elif(category=="square"):#这个东西不是0，是O，o
-        return create_kernels(
-        base_square,
-        category,
-        total_w=w,
-        total_h=h,
-        angle_step=1,
-        total_angle=90,
-        device=device
-    )
-    elif(category=="T"):
-        return create_kernels(
-        base_T,
-        category,
-        total_w=w,
-        total_h=h,
-        angle_step=1,
-        total_angle=360,
-        device=device
-    )
-    elif(category=="line"):
-        return create_kernels(
-        base_line,
-        category,
-        total_w=w,
-        total_h=h,
-        angle_step=1,
-        total_angle=180,
-        device=device
-    )
-    else:
-        raise ValueError(f"未知方块类别: {category}")
 
 if __name__ == "__main__":
+    kernels, kernel_size, angles = create_rotation_kernels(37, 5, "T", device="cuda")
 
-    
-
-    # 已知外接矩形尺寸
-    W = 109
-    H = 70
-    kernels, L = create_kernels(
-        base_T,
-        total_w=W,
-        total_h=H,
-        angle_step=1,
-        total_angle=180,
-        device="cuda"
-    )
-
-    print("Kernel shape:", kernels.shape)
-    print("Kernel size:", L)
-
-    # 显示某个角度
+    print("卷积核形状:", kernels.shape)
+    print("卷积核大小:", kernel_size)
+    print("角度数量:", len(angles))
     show_kernel(kernels, 45)
-
-    # 或显示全部
-    # show_all_kernels_grid(kernels, cols=12)

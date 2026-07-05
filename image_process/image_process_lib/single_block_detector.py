@@ -6,7 +6,7 @@ from image_process_lib.block_detection import (
     draw_mask_on_full_image,
     get_mask,
 )
-from image_process_lib.template_config import get_template_size, load_template_sizes
+from image_process_lib.template_config import load_template_geometry
 from image_process_lib.template_match.template_match import get_rect
 
 
@@ -56,9 +56,16 @@ def _empty_detection(message, debug_image=None):
 def detect_blocks_in_image(
     img_bgr,
     model,
-    template_sizes=None,
+    template_geometry=None,
+    template_profile=None,
     crop_margin=8,
     save_mask_overlay=False,
+    angle_step=1,
+    angle_center=None,
+    angle_window=None,
+    angle_values=None,
+    search_center=None,
+    search_radius=None,
 ):
     """检测当前图像里的所有方块，并返回每个方块的吸取点像素和角度。
 
@@ -69,8 +76,10 @@ def detect_blocks_in_image(
     if img_bgr is None or img_bgr.size == 0:
         return [], _empty_detection("输入图像为空")
 
-    if template_sizes is None:
-        template_sizes = load_template_sizes()
+    if template_geometry is None:
+        template_geometry = load_template_geometry(template_profile)
+    block_px = template_geometry["block_px"]
+    connector_px = template_geometry["connector_px"]
 
     image_h, image_w = img_bgr.shape[:2]
     debug_image = np.copy(img_bgr)
@@ -94,8 +103,27 @@ def detect_blocks_in_image(
         cropped_img = img_bgr[crop_y1:crop_y2, crop_x1:crop_x2]
         try:
             mask, _ = get_mask(cropped_img, category)
-            template_w, template_h = get_template_size(category, template_sizes)
-            rect = get_rect(mask, template_w, template_h, category, debug_image, crop_x1, crop_y1)
+            local_search_center = None
+            if search_center is not None:
+                local_search_center = (
+                    float(search_center[0]) - crop_x1,
+                    float(search_center[1]) - crop_y1,
+                )
+            rect = get_rect(
+                mask,
+                block_px,
+                connector_px,
+                category,
+                debug_image,
+                crop_x1,
+                crop_y1,
+                angle_step=angle_step,
+                angle_center=angle_center,
+                angle_window=angle_window,
+                angle_values=angle_values,
+                search_center=local_search_center,
+                search_radius=search_radius,
+            )
         except Exception as exc:
             print(f"方块 {category} 精定位失败，跳过。原因：{exc}")
             continue
@@ -153,9 +181,16 @@ def detect_blocks_in_image(
 def detect_single_block_in_image(
     img_bgr,
     model,
-    template_sizes=None,
+    template_geometry=None,
+    template_profile=None,
     crop_margin=8,
     expected_category="",
+    angle_step=1,
+    angle_center=None,
+    angle_window=None,
+    angle_values=None,
+    search_center=None,
+    search_radius=None,
 ):
     """检测画面中的唯一目标方块。
 
@@ -166,8 +201,15 @@ def detect_single_block_in_image(
     blocks, debug_image = detect_blocks_in_image(
         img_bgr,
         model,
-        template_sizes=template_sizes,
+        template_geometry=template_geometry,
+        template_profile=template_profile,
         crop_margin=crop_margin,
+        angle_step=angle_step,
+        angle_center=angle_center,
+        angle_window=angle_window,
+        angle_values=angle_values,
+        search_center=search_center,
+        search_radius=search_radius,
     )
     if expected_category:
         expected_category = normalize_category_name(expected_category)

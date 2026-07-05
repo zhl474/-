@@ -10,7 +10,7 @@ import yaml
 from ultralytics import YOLO
 
 from image_process_lib.Place_optimization import get_all_cube, make_list, put_fenlei,cube_pocess,optimize_block_assignment,get_cube_location,get_put_pose
-from image_process_lib.template_config import load_template_sizes, get_template_size
+from image_process_lib.template_config import load_template_geometry
 from image_process_lib.point_calibration import ArmCalibrator, x_predict,y_predict,z_predict
 from image_process_lib.board_detect import board_detect, board_grid_detect, draw_grid_debug, interpolate_grid_point
 from image_process_lib.single_block_detector import (
@@ -141,14 +141,14 @@ class ImageProcessor:
         crop_margin = 8
         cube_count=[0,0,0,0,0,0,0]#记录每个方块的放置个数
         img_bgr = undistort_bgr_image(img_bgr1, self.camera_matrix, self.dist_coeff)#去畸变
-        template_sizes = load_template_sizes()#每次服务调用读取一次模板尺寸配置，便于标定后直接生效
+        template_geometry = load_template_geometry("high")#每次服务调用读取一次模板几何配置，便于标定后直接生效
         cube_list=[]#检测到方块储存在这个列表中
         for i in range(7):
             cube_list.append([])
         blocks, img_bgr2 = detect_blocks_in_image(
             img_bgr,
             self.model,
-            template_sizes=template_sizes,
+            template_geometry=template_geometry,
             crop_margin=crop_margin,
             save_mask_overlay=self.save_top_surface_mask_vis,
         )
@@ -336,7 +336,37 @@ class ImageProcessor:
         真正要改识别算法时，去填 detect_block_visual_offset，不要在这里写图像处理细节。
         """
         expected_category = (req.expected_category or "").strip()
-        return self.detect_block_visual_offset(expected_category)
+        template_options = self.parse_block_template_match_options(req)
+        return self.detect_block_visual_offset(expected_category, **template_options)
+
+    def parse_block_template_match_options(self, req):
+        """解析方块低位模板匹配先验；当前低位临时代码暂不使用这些参数。"""
+        template_profile = (getattr(req, "template_profile", "") or "low").strip() or "low"
+        angle_step = float(getattr(req, "angle_step_deg", 1.0) or 1.0)
+        if angle_step <= 0:
+            angle_step = 1.0
+
+        options = {
+            "template_profile": template_profile,
+            "angle_step": angle_step,
+            "angle_center": None,
+            "angle_window": None,
+            "search_center": None,
+            "search_radius": None,
+        }
+
+        if bool(getattr(req, "use_angle_prior", False)):
+            options["angle_center"] = float(getattr(req, "angle_center_deg", 0.0))
+            options["angle_window"] = max(0.0, float(getattr(req, "angle_window_deg", 0.0)))
+
+        if bool(getattr(req, "use_position_prior", False)):
+            options["search_center"] = (
+                float(getattr(req, "search_center_x", 0.0)),
+                float(getattr(req, "search_center_y", 0.0)),
+            )
+            options["search_radius"] = max(0.0, float(getattr(req, "search_radius_px", 0.0)))
+
+        return options
 
     def handle_board_visual_servo_request(self, req):
         """托盘视觉伺服服务分支。
@@ -431,7 +461,16 @@ class ImageProcessor:
                 message=str(exc),
             )
 
-    def detect_block_visual_offset(self, expected_category=""):
+    def detect_block_visual_offset(
+        self,
+        expected_category="",
+        template_profile="low",
+        angle_step=1.0,
+        angle_center=None,
+        angle_window=None,
+        search_center=None,
+        search_radius=None,
+    ):
         """识别方块目标相对相机中心的像素偏差。
 
         下一步真正要填或重写的方块识别代码就在这里。

@@ -171,7 +171,21 @@ if __name__ == "__main__":
         suck_req.state = int(state)
         return suck_control.call(suck_req)
 
-    def request_visual_servo_offset(target_type, expected_category="", row=0.0, col=0.0):
+    def request_visual_servo_offset(
+        target_type,
+        expected_category="",
+        row=0.0,
+        col=0.0,
+        template_profile="",
+        use_angle_prior=False,
+        angle_center_deg=0.0,
+        angle_window_deg=0.0,
+        angle_step_deg=1.0,
+        use_position_prior=False,
+        search_center_x=0.0,
+        search_center_y=0.0,
+        search_radius_px=0.0,
+    ):
         """请求图像节点返回视觉伺服目标相对相机中心的像素偏差。
 
         这是 competition.py 和 image_process 节点之间的统一通信入口。
@@ -185,13 +199,42 @@ if __name__ == "__main__":
         req.expected_category = str(expected_category)
         req.row = float(row)
         req.col = float(col)
+        req.template_profile = str(template_profile)
+        req.use_angle_prior = bool(use_angle_prior)
+        req.angle_center_deg = float(angle_center_deg)
+        req.angle_window_deg = float(angle_window_deg)
+        req.angle_step_deg = float(angle_step_deg)
+        req.use_position_prior = bool(use_position_prior)
+        req.search_center_x = float(search_center_x)
+        req.search_center_y = float(search_center_y)
+        req.search_radius_px = float(search_radius_px)
         return visual_servo_offset.call(req)
 
-    def request_block_visual_offset(expected_category=""):
+    def request_block_visual_offset(
+        expected_category="",
+        template_profile="low",
+        use_angle_prior=False,
+        angle_center_deg=0.0,
+        angle_window_deg=0.0,
+        angle_step_deg=1.0,
+        use_position_prior=False,
+        search_center_x=0.0,
+        search_center_y=0.0,
+        search_radius_px=0.0,
+    ):
         """请求图像节点返回当前方块目标相对相机中心的像素偏差。"""
         return request_visual_servo_offset(
             target_type="block",
             expected_category=expected_category,
+            template_profile=template_profile,
+            use_angle_prior=use_angle_prior,
+            angle_center_deg=angle_center_deg,
+            angle_window_deg=angle_window_deg,
+            angle_step_deg=angle_step_deg,
+            use_position_prior=use_position_prior,
+            search_center_x=search_center_x,
+            search_center_y=search_center_y,
+            search_radius_px=search_radius_px,
         )
 
     def request_board_visual_offset(row, col):

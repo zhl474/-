@@ -2,6 +2,15 @@ string target_type
 string expected_category
 float32 row
 float32 col
+string template_profile
+bool use_angle_prior
+float32 angle_center_deg
+float32 angle_window_deg
+float32 angle_step_deg
+bool use_position_prior
+float32 search_center_x
+float32 search_center_y
+float32 search_radius_px
 ---
 bool found
 string target_type

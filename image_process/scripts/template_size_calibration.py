@@ -2,7 +2,6 @@
 import argparse
 import os
 import sys
-from datetime import datetime
 from statistics import median
 
 import cv2
@@ -15,7 +14,7 @@ PACKAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PACKAGE_DIR not in sys.path:
     sys.path.insert(0, PACKAGE_DIR)
 
-from image_process_lib.block_detection import SEG_MODEL_PATH, get_mask
+from image_process_lib.block_detection import get_mask
 from image_process_lib.template_config import TEMPLATE_CONFIG_PATH
 
 
@@ -38,7 +37,7 @@ CATEGORY_ORDER = ["line", "square", "L_yellow", "L_blue", "z_blue", "z_green", "
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="自动标定俄罗斯方块上表面模板匹配尺寸；不传参数时默认使用相机获取一帧图像，且不保存可视化图片。"
+        description="测量俄罗斯方块上表面外接矩形，并打印模板几何参数建议值；不传参数时默认使用相机获取一帧图像。"
     )
     parser.add_argument("--image", action="append", default=[], help="输入图片路径，可重复传入多张")
     parser.add_argument("--camera", action="store_true", help="从 ROS 相机话题读取图像；不传 --image 时默认启用")
@@ -46,12 +45,12 @@ def parse_args():
     parser.add_argument("--frames", type=int, default=1, help="从相机读取的帧数，默认 1 帧")
     parser.add_argument("--timeout", type=float, default=30.0, help="等待相机帧超时时间")
     parser.add_argument("--detect-model", default=DETECT_MODEL_PATH, help="方块检测模型路径")
-    parser.add_argument("--output", default=TEMPLATE_CONFIG_PATH, help="模板尺寸配置输出路径")
+    parser.add_argument("--output", default=TEMPLATE_CONFIG_PATH, help="仅用于提示配置文件路径，不会自动写入")
     parser.add_argument("--vis-dir", default=DEFAULT_VIS_DIR, help="可视化图片保存目录")
     parser.add_argument("--save-vis", action="store_true", help="保存每次测量的可视化图片，默认不保存")
     parser.add_argument("--no-window", action="store_true", help="不弹出 OpenCV 窗口，改用终端确认")
     parser.add_argument("--auto-accept", action="store_true", help="自动接受所有有效测量")
-    parser.add_argument("--accumulate", action="store_true", help="载入配置中已有 measurements，和本次测量一起累计取 median")
+    parser.add_argument("--accumulate", action="store_true", help="兼容旧参数；当前脚本只统计本次接受测量")
     parser.add_argument("--category", action="append", choices=CATEGORY_ORDER, help="只标定指定类别，可重复传入")
     parser.add_argument("--detect-conf", type=float, default=0.45, help="检测置信度阈值")
     parser.add_argument("--iou", type=float, default=0.5, help="检测 NMS IoU 阈值")
@@ -149,11 +148,11 @@ def draw_measurement_visual(frame, mask, rect, crop_box, category, score, long_s
     cv2.rectangle(visual, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
     text_lines = [
-        f"category: {category}",
-        f"score: {score:.3f}",
-        f"long side: {long_side:.1f}px",
-        f"short side: {short_side:.1f}px",
-        "Enter/y: accept, n/Space: skip, q: quit",
+        f"类别: {category}",
+        f"置信度: {score:.3f}",
+        f"长边: {long_side:.1f}px",
+        f"短边: {short_side:.1f}px",
+        "回车/y: 接受, n/空格: 跳过, q: 退出",
     ]
     text_x = max(10, min(x1, visual.shape[1] - 430))
     text_y = max(10, y1 - 150)
@@ -213,90 +212,53 @@ def ask_user_to_accept(visual, args, category, source_name, det_idx):
     return "skip"
 
 
-def load_existing_measurements(config_path, accumulate):
-    measurements = {category: [] for category in CATEGORY_ORDER}
-    base_config = {"template_sizes": {}}
-    if not os.path.exists(config_path):
-        return base_config, measurements
-
-    with open(config_path, "r", encoding="utf-8") as f:
-        base_config = yaml.safe_load(f) or {"template_sizes": {}}
-
-    if not accumulate:
-        return base_config, measurements
-
-    for category, item in base_config.get("template_sizes", {}).items():
-        measurements.setdefault(category, [])
-        for measurement in item.get("measurements", []) or []:
-            if "long_side" in measurement and "short_side" in measurement:
-                measurements[category].append(
-                    {
-                        "long_side": float(measurement["long_side"]),
-                        "short_side": float(measurement["short_side"]),
-                        "score": float(measurement.get("score", 0.0)),
-                        "source": measurement.get("source", "历史记录"),
-                        "is_new": False,
-                    }
-                )
-
-    return base_config, measurements
+def init_measurements():
+    return {category: [] for category in CATEGORY_ORDER}
 
 
-def save_template_config(config_path, base_config, measurements, args):
-    template_sizes = {}
-    existing_sizes = base_config.get("template_sizes", {})
-    all_categories = list(CATEGORY_ORDER)
-    for category in existing_sizes:
-        if category not in all_categories:
-            all_categories.append(category)
-    for category in measurements:
-        if category not in all_categories:
-            all_categories.append(category)
+def estimate_geometry_from_measurement(category, long_side, short_side):
+    """从单次外接矩形测量推导模板几何参数。"""
+    if category in ("L_yellow", "L_blue", "z_blue", "z_green", "T"):
+        block_px = 2.0 * short_side - long_side
+        connector_px = 2.0 * long_side - 3.0 * short_side
+    elif category == "line":
+        block_px = short_side
+        connector_px = (long_side - 4.0 * block_px) / 3.0
+    else:
+        return None
 
-    for category in all_categories:
-        existing_item = existing_sizes.get(category, {})
-        category_measurements = measurements.get(category, [])
-        item = dict(existing_item)
+    if block_px <= 0 or connector_px <= 0:
+        return None
 
-        if category_measurements:
-            longs = [m["long_side"] for m in category_measurements]
-            shorts = [m["short_side"] for m in category_measurements]
-            item["long_side"] = round(float(median(longs)), 3)
-            item["short_side"] = round(float(median(shorts)), 3)
-            item["samples"] = len(category_measurements)
-            item["measurements"] = [
-                {
-                    "long_side": round(float(m["long_side"]), 3),
-                    "short_side": round(float(m["short_side"]), 3),
-                    "score": round(float(m.get("score", 0.0)), 4),
-                    "source": m.get("source", ""),
-                }
-                for m in category_measurements
-            ]
-        elif "long_side" not in item or "short_side" not in item:
-            continue
-
-        template_sizes[category] = item
-
-    output_data = {
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "detect_model": args.detect_model,
-        "seg_model": SEG_MODEL_PATH,
-        "template_sizes": template_sizes,
+    return {
+        "category": category,
+        "block_px": float(block_px),
+        "connector_px": float(connector_px),
     }
 
-    os.makedirs(os.path.dirname(config_path), exist_ok=True)
-    with open(config_path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(output_data, f, allow_unicode=True, sort_keys=False)
+
+def collect_geometry_estimates(measurements):
+    estimates = []
+    for category, category_measurements in measurements.items():
+        for measurement in category_measurements:
+            estimate = estimate_geometry_from_measurement(
+                category,
+                float(measurement["long_side"]),
+                float(measurement["short_side"]),
+            )
+            if estimate is not None:
+                estimates.append(estimate)
+    return estimates
 
 
 def process_frame(frame, source_name, detect_model, camera_params, measurements, args):
     frame = undistort_image(frame, camera_params)
     h, w = frame.shape[:2]
     result = detect_model(frame, iou=args.iou, conf=args.detect_conf, verbose=False)
-    cv2.imshow("yolo_result", result[0].plot())
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    if not args.no_window:
+        cv2.imshow("检测结果", result[0].plot())
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
     if len(result) == 0 or result[0].boxes is None or len(result[0].boxes) == 0:
         print(f"提示：{source_name} 没有检测到方块")
         return True
@@ -356,18 +318,23 @@ def process_frame(frame, source_name, detect_model, camera_params, measurements,
                 "is_new": True,
             }
         )
-        print(f"接受：{category} 长边={long_side:.1f}px 短边={short_side:.1f}px 面积={area:.1f}")
+        estimate = estimate_geometry_from_measurement(category, long_side, short_side)
+        if estimate is None:
+            print(f"接受：{category} 长边={long_side:.1f}px 短边={short_side:.1f}px 面积={area:.1f}")
+        else:
+            print(
+                f"接受：{category} 长边={long_side:.1f}px 短边={short_side:.1f}px 面积={area:.1f}，"
+                f"建议子块={estimate['block_px']:.1f}px 连接处={estimate['connector_px']:.1f}px"
+            )
 
     return True
 
 
-def print_measurement_group(title, measurements, only_new=False):
+def print_measurement_group(title, measurements):
     print(f"\n{title}：")
     has_measurement = False
     for category in CATEGORY_ORDER:
         category_measurements = measurements.get(category, [])
-        if only_new:
-            category_measurements = [m for m in category_measurements if m.get("is_new", False)]
         if not category_measurements:
             continue
         has_measurement = True
@@ -381,26 +348,86 @@ def print_measurement_group(title, measurements, only_new=False):
         print("无")
 
 
+def print_geometry_estimates(estimates):
+    print("\n几何参数推导：")
+    if not estimates:
+        print("无可用推导结果；至少需要 line 或 L/T/Z 类别的有效测量")
+        return None
+
+    for category in CATEGORY_ORDER:
+        category_estimates = [item for item in estimates if item["category"] == category]
+        if not category_estimates:
+            continue
+        block_values = [item["block_px"] for item in category_estimates]
+        connector_values = [item["connector_px"] for item in category_estimates]
+        print(
+            f"{category}: 子块={median(block_values):.1f}px, "
+            f"连接处={median(connector_values):.1f}px, 样本数={len(category_estimates)}"
+        )
+
+    block_px = median([item["block_px"] for item in estimates])
+    connector_px = median([item["connector_px"] for item in estimates])
+    print(f"\n建议值 median：子块={block_px:.1f}px，连接处={connector_px:.1f}px")
+    return block_px, connector_px
+
+
+def print_square_check(measurements, suggested_geometry):
+    square_measurements = measurements.get("square", [])
+    if not square_measurements or suggested_geometry is None:
+        return
+
+    block_px, connector_px = suggested_geometry
+    expected_side = 2.0 * block_px + connector_px
+    longs = [m["long_side"] for m in square_measurements]
+    shorts = [m["short_side"] for m in square_measurements]
+    measured_side = median([(long_side + short_side) / 2.0 for long_side, short_side in zip(longs, shorts)])
+    print(
+        f"square 一致性检查：实测边长约 {measured_side:.1f}px，"
+        f"建议几何边长 {expected_side:.1f}px，偏差 {measured_side - expected_side:.1f}px"
+    )
+
+
+def print_yaml_snippet(suggested_geometry, profile_name="high"):
+    if suggested_geometry is None:
+        return
+
+    block_px, connector_px = suggested_geometry
+    block_px = int(round(block_px))
+    connector_px = int(round(connector_px))
+    snippet = {
+        "template_sizes": {
+            "active_profile": profile_name,
+            "profiles": {
+                profile_name: {
+                    "block_px": block_px,
+                    "connector_px": connector_px,
+                },
+                "low": {
+                    "block_px": block_px,
+                    "connector_px": connector_px,
+                },
+            },
+        },
+    }
+
+    print("\n可复制到配置文件的 YAML 片段：")
+    print(yaml.safe_dump(snippet, allow_unicode=True, sort_keys=False).rstrip())
+
+
 def print_summary(measurements):
-    print_measurement_group("本次接受测量", measurements, only_new=True)
-    print_measurement_group("累计标定结果 median", measurements)
+    print_measurement_group("本次接受测量", measurements)
+    estimates = collect_geometry_estimates(measurements)
+    suggested_geometry = print_geometry_estimates(estimates)
+    print_square_check(measurements, suggested_geometry)
+    print_yaml_snippet(suggested_geometry)
 
 
 def main():
     args = parse_args()
     camera_params = None if args.no_undistort else load_camera_params(args.calibration)
-    base_config, measurements = load_existing_measurements(args.output, args.accumulate)
-    historical_count = sum(
-        1
-        for category_measurements in measurements.values()
-        for measurement in category_measurements
-        if not measurement.get("is_new", False)
-    )
-    if historical_count > 0:
-        print(
-            f"提示：已从配置载入 {historical_count} 条历史测量；"
-            "累计 median 会和本次新测量一起统计。"
-        )
+    measurements = init_measurements()
+    if args.accumulate:
+        print("提示：当前脚本不再读取历史 measurements，只统计本次接受测量。")
 
     detect_model = YOLO(args.detect_model)
     input_iterators = [iter_image_inputs(args.image)]
@@ -437,12 +464,12 @@ def main():
         if measurement.get("is_new", False)
     )
     if new_accepted_count == 0:
-        print("没有接受任何新测量，未写入配置")
+        print("没有接受任何新测量，未输出模板几何建议")
         return
 
-    save_template_config(args.output, base_config, measurements, args)
     print_summary(measurements)
-    print(f"\n已保存模板尺寸配置: {args.output}")
+    print(f"\n配置文件路径：{args.output}")
+    print("提示：脚本不会自动修改配置文件，请按需要手动复制上述 YAML 片段。")
 
 
 if __name__ == "__main__":
