@@ -132,8 +132,8 @@ class ImageProcessor:
                 py=(py+crop_y1)
 
             #给中心点画圈
-            cv2.circle(img_bgr2,(px,py),3, (0, 0, 255), 2)
-            
+            cv2.circle(img_bgr2,(px,py),1, (0, 0, 255), 2)
+            print(f"{category}坐标{px,py}")
 
             #获取角度，不用看
             # theta0=get_precise_angle(rect,box,category,mask)#获取角度，不用看

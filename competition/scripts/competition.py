@@ -37,7 +37,7 @@ if __name__ == "__main__":
         rospy.logerr("Service call failed: %s" % e)
     GetTargetPos_req = GetTargetPosRequest()
     arm_req = armRequest()
-    arm_req.speed = 40
+    arm_req.speed = 80
     motor_req = motorRequest()
     suck_req = suckRequest()
     suck_in = 0
@@ -109,7 +109,7 @@ if __name__ == "__main__":
 
     #################################           捡所有方块             ################################
     input("按回车后捡所有方块...")
-    angle_velocity = 360
+    angle_velocity = 270
     last_angle = 180
     def down_pick(x,y,z,t,xuanzhuan_angle,index_cube):#根据位置过去捡方块
         global motor_done,last_angle
@@ -143,14 +143,14 @@ if __name__ == "__main__":
         # if(index_cube!=0):
         arm_req.pose = set_angle
         arm_control.call(arm_req)
-
+        input("按空格继续...")
         #吸方块
         while not motor_done:#等舵机转完
             time.sleep(0.05)
-        set_angle[2]=z-5
+        set_angle[2]=z-8
         arm_req.pose = set_angle
-        arm_req.speed = 40
-        arm_control.call(arm_req)
+        arm_req.speed = 60
+        # arm_control.call(arm_req)
         # input("捡")
         suck_req.state = suck_in
         suck_control.call(suck_req)
@@ -159,7 +159,7 @@ if __name__ == "__main__":
         #吸到方块后起来一点
         set_angle[2]=z+20
         arm_req.pose = set_angle
-        arm_req.speed = 40
+        arm_req.speed = 80
         arm_control.call(arm_req)
 
         #开始设置舵机角度
@@ -188,7 +188,7 @@ if __name__ == "__main__":
 
         #运动到放置位置上方较高处，气泵喷气
         # put_pose[2]=205#高度稍微高一点，不然会撞到方块
-        put_pose[2]=190#高度稍微高一点，不然会撞到方块
+        put_pose[2]=197#高度稍微高一点，不然会撞到方块
         put_pose[5]=shooting_angle[5]
         # print("目标位置",put_pose)
         arm_req.pose = put_pose
@@ -201,9 +201,9 @@ if __name__ == "__main__":
         put_pose[2]=188
         put_pose[5]=shooting_angle[5]
         arm_req.pose = put_pose
-        arm_req.speed = 40
+        arm_req.speed = 60
         arm_control.call(arm_req)
-        # input("放")
+        input("放")
         suck_req.state = suck_out
         resp = suck_control.call(suck_req)
 
@@ -211,7 +211,7 @@ if __name__ == "__main__":
         #再上来，准备捡下一个方块
         put_pose[2]=put_pose[2]+20
         arm_req.pose = put_pose
-        arm_req.speed = 40
+        arm_req.speed = 80
         arm_control.call(arm_req)
         i=i+1
         if(i==34):#捡完34个方块结束

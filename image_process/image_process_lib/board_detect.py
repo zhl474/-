@@ -74,7 +74,7 @@ def board_detect(img):
         31,
         7
     )
-    cv2.imshow("result", th)
+    # cv2.imshow("result", th)
     # cv2.waitKey(0)
     # cv2.destroyAllWindows()
 
@@ -96,7 +96,7 @@ def board_detect(img):
         flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
     )
 
-    cv2.imshow("blobs", img_draw)
+    # cv2.imshow("blobs", img_draw)
     cv2.imwrite("/home/zhl/桌面/blobs.jpg",img_draw)
     # cv2.waitKey(0)
     # cv2.destroyAllWindows()
@@ -104,31 +104,6 @@ def board_detect(img):
     # 提取点
     points = np.array([kp.pt for kp in keypoints], dtype=np.float32)
 
-    # # 1️⃣ PCA
-    # mean, eigenvectors = cv2.PCACompute(points, mean=None)
-
-    # center = mean[0]
-    # axis1 = eigenvectors[0]
-    # axis2 = eigenvectors[1]
-
-    # # 2️⃣ 投影到两个轴
-    # proj1 = np.dot(points - center, axis1)
-    # proj2 = np.dot(points - center, axis2)
-
-    # # 3️⃣ 找 min/max
-    # min1, max1 = np.min(proj1), np.max(proj1)
-    # min2, max2 = np.min(proj2), np.max(proj2)
-
-    # # 4️⃣ 组合四个角（在 PCA 坐标系）
-    # corners = [
-    #     center + min1*axis1 + min2*axis2,
-    #     center + max1*axis1 + min2*axis2,
-    #     center + max1*axis1 + max2*axis2,
-    #     center + min1*axis1 + max2*axis2
-    # ]
-
-    # corners = np.array(corners)
-    # # print(corners)
     # 1️⃣ PCA
     mean, eigenvectors = cv2.PCACompute(points, mean=None)
     center = mean[0]
@@ -177,9 +152,9 @@ def board_detect(img):
         #print("裁剪图坐标:", (corner[0], corner[1]))
         #print("转换回原图坐标:", (x_orig, y_orig))
 
-    cv2.imshow("result", img)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    # cv2.imshow("result", img)
+    # cv2.waitKey(0)
+    # cv2.destroyAllWindows()
 
     # 1️⃣ 按 x 排序
     x_sorted = corners_pix_position[np.argsort(corners_pix_position[:, 0]), :]
