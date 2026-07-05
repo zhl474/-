@@ -46,13 +46,29 @@ def _red_error(message):
 
 
 def _make_blob_detector():
-    """创建托盘格点 blob 检测器，参数沿用旧版实测配置。"""
+    """创建托盘格点 blob 检测器，用于检测白色圆点。"""
     params = cv2.SimpleBlobDetector_Params()
+
+    # 二值图里格点颜色
+    params.filterByColor = True
+    params.blobColor = 0
+
+    # 面积过滤
     params.filterByArea = True
     params.minArea = 25
     params.maxArea = 200
+
+    # 圆度过滤
     params.filterByCircularity = True
     params.minCircularity = 0.3
+
+    # 这两个默认可能会误杀一些不完美圆点，建议关掉
+    params.filterByInertia = False
+    params.filterByConvexity = False
+
+    # 点间距明显大于 10，这个可以保留
+    params.minDistBetweenBlobs = 8
+
     return cv2.SimpleBlobDetector_create(params)
 
 
@@ -104,13 +120,14 @@ def _detect_grid_keypoints(crop_img):
     gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
     blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+    # cv2.imshow("1",blackhat)
     _, threshold_img = cv2.threshold(
         blackhat,
         0,
         255,
         cv2.THRESH_BINARY + cv2.THRESH_OTSU,
     )
-
+    # cv2.imshow("2",threshold_img)
     detector = _make_blob_detector()
     keypoints = detector.detect(gray)
     debug_image = cv2.drawKeypoints(
@@ -119,6 +136,8 @@ def _detect_grid_keypoints(crop_img):
         None,
         flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS,
     )
+    # cv2.waitKey(0)
+    # cv2.destroyAllWindows()
     return keypoints, debug_image, threshold_img
 
 
@@ -157,10 +176,13 @@ def _sort_points_to_grid(crop_points, orig_points):
         for i in range(BOARD_ROW_COUNT)
     ]
 
-    # row=1 约定为画面中更靠上的一行。
+    # row=1 约定为画面中更靠下的一行，也就是左下角原点。
     first_row_y = float(np.mean(orig_points[row_groups[0], 1]))
     last_row_y = float(np.mean(orig_points[row_groups[-1], 1]))
-    if first_row_y > last_row_y:
+
+    # 图像坐标系 y 越大越靠下。
+    # 如果当前第一组在上面，就反转，让最下面那一行排到 row=1。
+    if first_row_y < last_row_y:
         row_groups.reverse()
 
     grid_points = [[None for _ in range(BOARD_COL_COUNT + 1)] for _ in range(BOARD_ROW_COUNT + 1)]
@@ -316,10 +338,17 @@ def board_detect(img):
         raise BoardGridDetectionError(result["message"])
 
     grid_points = result["grid_points"]
-    left_top = grid_points[1][1]
-    left_bottom = grid_points[BOARD_ROW_COUNT][1]
-    right_top = grid_points[1][BOARD_COL_COUNT]
-    right_bottom = grid_points[BOARD_ROW_COUNT][BOARD_COL_COUNT]
+
+    # 新坐标系：
+    # [1,1] 是左下角
+    # [BOARD_ROW_COUNT,1] 是左上角
+    # [1,BOARD_COL_COUNT] 是右下角
+    # [BOARD_ROW_COUNT,BOARD_COL_COUNT] 是右上角
+    left_bottom = grid_points[1][1]
+    left_top = grid_points[BOARD_ROW_COUNT][1]
+    right_bottom = grid_points[1][BOARD_COL_COUNT]
+    right_top = grid_points[BOARD_ROW_COUNT][BOARD_COL_COUNT]
+
     return np.array([left_top, left_bottom, right_top, right_bottom], dtype=np.float32)
 
 
@@ -327,4 +356,4 @@ if __name__ == "__main__":
     image_path = "/home/zhl/图片/数据集/15_Color.png"
     image = cv2.imread(image_path)
     detect_result = board_grid_detect(image)
-    print(detect_result["message"])
+    print(detect_result["grid_points"])

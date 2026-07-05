@@ -59,7 +59,7 @@ class ImageProcessor:
         self.image_sub = rospy.Subscriber("/camera/image_raw", Image, self.image_callback)
         self.service1 = rospy.Service("get_cube_pos", GetTargetPos,self.get_cube_pos)
         self.service2 = rospy.Service("get_board_pos", GetTargetPos,self.get_board_pos)
-        self.get_cube_location_service = rospy.Service("get_cube_location", GetTargetPos,self.get_cube_location1)
+        self.get_cube_location_service = rospy.Service("get_cube_location", GetTargetPos,self.get_cube_location1)#这里这样搞是因为不小心把俩函数重名了，导入的函数也有个get_cube_location
         self.get_put_pose_service = rospy.Service("get_put_pose", GetTargetPos,self.get_put_pose)
         self.visual_target_offset_service = rospy.Service(
             "get_visual_target_offset",
