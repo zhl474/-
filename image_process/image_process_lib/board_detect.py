@@ -8,6 +8,12 @@ BOARD_ROW_COUNT = 14
 BOARD_COL_COUNT = 10
 BOARD_POINT_COUNT = BOARD_ROW_COUNT * BOARD_COL_COUNT
 DEFAULT_DEBUG_PATH = "/home/zhl/桌面/托盘格点识别.jpg"
+LOW_BOARD_ROI_HALF_SIZE = 120
+LOW_BOARD_BLACKHAT_KERNEL_SIZE = 15
+LOW_BOARD_MIN_DOT_AREA = 20
+LOW_BOARD_MAX_DOT_AREA = 250
+LOW_BOARD_MIN_DOT_CIRCULARITY = 0.35
+LOW_BOARD_MAX_DOT_ASPECT_RATIO = 1.8
 
 _board_model = None
 
@@ -45,6 +51,68 @@ def _red_error(message):
     print(f"\033[91m{message}\033[0m")
 
 
+def _make_odd_kernel_size(kernel_size):
+    """把形态学核尺寸规整成大于等于 3 的奇数。"""
+    kernel_size = int(round(float(kernel_size)))
+    if kernel_size < 3:
+        kernel_size = 3
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    return kernel_size
+
+
+def _clip_roi_bounds(image_shape, center_point, roi_half_size):
+    """按全图中心点裁剪 ROI 边界，靠近图像边缘时自动截断。"""
+    h, w = image_shape[:2]
+    cx, cy = center_point
+    half_size = max(1, int(round(float(roi_half_size))))
+    x1 = max(0, int(round(float(cx))) - half_size)
+    y1 = max(0, int(round(float(cy))) - half_size)
+    x2 = min(w, int(round(float(cx))) + half_size)
+    y2 = min(h, int(round(float(cy))) + half_size)
+    return x1, y1, x2, y2
+
+
+def _put_chinese_text(image, text, org, color, font_size=22):
+    """在调试图上写中文；Pillow 不可用时退回 OpenCV 英文渲染能力。"""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        import os
+
+        font_candidates = [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/truetype/arphic/uming.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+        font = None
+        for font_path in font_candidates:
+            if os.path.exists(font_path):
+                font = ImageFont.truetype(font_path, font_size)
+                break
+        if font is None:
+            font = ImageFont.load_default()
+
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        pil_image = Image.fromarray(rgb_image)
+        draw = ImageDraw.Draw(pil_image)
+        b, g, r = color
+        draw.text(org, text, font=font, fill=(r, g, b))
+        image[:] = cv2.cvtColor(np.asarray(pil_image), cv2.COLOR_RGB2BGR)
+    except Exception:
+        cv2.putText(
+            image,
+            text,
+            org,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+
+
 def _make_blob_detector():
     """创建托盘格点 blob 检测器，用于检测白色圆点。"""
     params = cv2.SimpleBlobDetector_Params()
@@ -70,6 +138,227 @@ def _make_blob_detector():
     params.minDistBetweenBlobs = 8
 
     return cv2.SimpleBlobDetector_create(params)
+
+
+def _extract_low_board_dot_candidates(
+    threshold_img,
+    roi_offset,
+    roi_center,
+    min_area,
+    max_area,
+    min_circularity,
+    max_aspect_ratio,
+):
+    """从低位 ROI 二值图里提取形状接近圆点的候选连通域。"""
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        threshold_img,
+        8,
+    )
+    candidates = []
+    offset_x, offset_y = roi_offset
+    center_x, center_y = roi_center
+
+    for label in range(1, num_labels):
+        area = float(stats[label, cv2.CC_STAT_AREA])
+        if area < min_area or area > max_area:
+            continue
+
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        width = int(stats[label, cv2.CC_STAT_WIDTH])
+        height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        if width <= 1 or height <= 1:
+            continue
+
+        aspect_ratio = max(width, height) / float(min(width, height))
+        if aspect_ratio > max_aspect_ratio:
+            continue
+
+        component_mask = np.zeros_like(threshold_img, dtype=np.uint8)
+        component_mask[labels == label] = 255
+        contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        contour = max(contours, key=cv2.contourArea)
+        perimeter = float(cv2.arcLength(contour, True))
+        if perimeter <= 1e-6:
+            continue
+        circularity = float(4.0 * np.pi * area / (perimeter * perimeter))
+        if circularity < min_circularity:
+            continue
+
+        local_x, local_y = centroids[label]
+        px = float(local_x + offset_x)
+        py = float(local_y + offset_y)
+        distance = float((local_x - center_x) ** 2 + (local_y - center_y) ** 2)
+        candidates.append(
+            {
+                "px": px,
+                "py": py,
+                "area": area,
+                "bbox": (x + offset_x, y + offset_y, width, height),
+                "circularity": circularity,
+                "distance": distance,
+            }
+        )
+
+    return candidates
+
+
+def draw_low_board_roi_debug(
+    image,
+    roi_bounds,
+    center_point,
+    candidates,
+    selected_candidate=None,
+    row=None,
+    col=None,
+):
+    """画低位托盘 ROI、候选圆点、选中圆点和中文调试信息。"""
+    debug_image = image.copy()
+    x1, y1, x2, y2 = roi_bounds
+    center_x, center_y = center_point
+    cv2.rectangle(debug_image, (x1, y1), (x2, y2), (0, 255, 255), 2)
+    cv2.drawMarker(
+        debug_image,
+        (int(round(center_x)), int(round(center_y))),
+        (255, 0, 0),
+        markerType=cv2.MARKER_CROSS,
+        markerSize=24,
+        thickness=2,
+    )
+
+    for candidate in candidates:
+        x, y, width, height = candidate["bbox"]
+        px, py = candidate["px"], candidate["py"]
+        cv2.rectangle(debug_image, (int(x), int(y)), (int(x + width), int(y + height)), (0, 180, 0), 1)
+        cv2.circle(debug_image, (int(round(px)), int(round(py))), 4, (0, 255, 0), 1)
+
+    dx_px = 0.0
+    dy_px = 0.0
+    if selected_candidate is not None:
+        px, py = selected_candidate["px"], selected_candidate["py"]
+        dx_px = float(px - center_x)
+        dy_px = float(py - center_y)
+        cv2.drawMarker(
+            debug_image,
+            (int(round(px)), int(round(py))),
+            (0, 0, 255),
+            markerType=cv2.MARKER_CROSS,
+            markerSize=24,
+            thickness=2,
+        )
+        cv2.line(
+            debug_image,
+            (int(round(center_x)), int(round(center_y))),
+            (int(round(px)), int(round(py))),
+            (255, 0, 0),
+            1,
+        )
+
+    row_col_text = ""
+    if row is not None and col is not None:
+        row_col_text = f" 目标行列=({float(row):.2f},{float(col):.2f})"
+    _put_chinese_text(debug_image, f"低位托盘ROI 候选数量={len(candidates)}{row_col_text}", (20, 30), (255, 0, 0))
+    _put_chinese_text(debug_image, f"像素误差 dx={dx_px:.1f} dy={dy_px:.1f}", (20, 60), (255, 0, 0))
+    return debug_image
+
+
+def detect_nearest_board_dot_in_roi(
+    img,
+    center_point,
+    roi_half_size=LOW_BOARD_ROI_HALF_SIZE,
+    blackhat_kernel_size=LOW_BOARD_BLACKHAT_KERNEL_SIZE,
+    min_area=LOW_BOARD_MIN_DOT_AREA,
+    max_area=LOW_BOARD_MAX_DOT_AREA,
+    min_circularity=LOW_BOARD_MIN_DOT_CIRCULARITY,
+    max_aspect_ratio=LOW_BOARD_MAX_DOT_ASPECT_RATIO,
+    debug_path=None,
+    row=None,
+    col=None,
+):
+    """低位托盘视觉伺服：只在画面中心小 ROI 内找最近圆点。"""
+    if img is None:
+        return {
+            "found": False,
+            "point": None,
+            "candidates": [],
+            "debug_image": None,
+            "message": "没有可用图像",
+            "count": 0,
+        }
+
+    roi_bounds = _clip_roi_bounds(img.shape, center_point, roi_half_size)
+    x1, y1, x2, y2 = roi_bounds
+    if x2 <= x1 or y2 <= y1:
+        debug_image = img.copy()
+        _put_chinese_text(debug_image, "低位ROI为空，无法检测托盘圆点", (20, 30), (0, 0, 255))
+        _save_debug_image(debug_path, debug_image)
+        return {
+            "found": False,
+            "point": None,
+            "candidates": [],
+            "debug_image": debug_image,
+            "message": "低位 ROI 为空，无法检测托盘圆点",
+            "count": 0,
+        }
+
+    roi = img[y1:y2, x1:x2]
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    kernel_size = _make_odd_kernel_size(blackhat_kernel_size)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+    _, threshold_img = cv2.threshold(
+        blackhat,
+        0,
+        255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+    )
+
+    roi_center = (float(center_point[0] - x1), float(center_point[1] - y1))
+    candidates = _extract_low_board_dot_candidates(
+        threshold_img,
+        (x1, y1),
+        roi_center,
+        float(min_area),
+        float(max_area),
+        float(min_circularity),
+        float(max_aspect_ratio),
+    )
+    selected_candidate = min(candidates, key=lambda candidate: candidate["distance"]) if candidates else None
+    debug_image = draw_low_board_roi_debug(
+        img,
+        roi_bounds,
+        center_point,
+        candidates,
+        selected_candidate=selected_candidate,
+        row=row,
+        col=col,
+    )
+    _save_debug_image(debug_path, debug_image)
+
+    if selected_candidate is None:
+        return {
+            "found": False,
+            "point": None,
+            "candidates": candidates,
+            "debug_image": debug_image,
+            "message": "低位 ROI 内未检测到托盘圆点",
+            "count": 0,
+        }
+
+    point = np.array([selected_candidate["px"], selected_candidate["py"]], dtype=np.float32)
+    return {
+        "found": True,
+        "point": point,
+        "candidates": candidates,
+        "debug_image": debug_image,
+        "message": "低位托盘圆点识别成功",
+        "count": len(candidates),
+        "selected": selected_candidate,
+        "threshold_image": threshold_img,
+        "roi_bounds": roi_bounds,
+    }
 
 
 def _get_board_crop(img):

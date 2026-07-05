@@ -1,21 +1,34 @@
 #!/home/zhl/fr3env/fr3env/bin/python
+import os
+import sys
+
 import rospy
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
 
-from std_msgs.msg import Float32MultiArray, MultiArrayDimension
 import yaml
 from ultralytics import YOLO
 
-from image_process_lib.Place_optimization import get_all_cube, make_list, put_fenlei,cube_pocess,optimize_block_assignment,get_cube_location,get_put_pose
+IMAGE_PROCESS_SRC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if IMAGE_PROCESS_SRC_DIR not in sys.path:
+    sys.path.insert(0, IMAGE_PROCESS_SRC_DIR)
+
+from image_process_lib.Place_optimization import (
+    get_all_cube,
+    make_list,
+    put_fenlei,
+    cube_pocess,
+    optimize_block_assignment,
+    get_cube_location as calc_cube_location,
+    get_put_pose as calc_put_pose,
+)
 from image_process_lib.template_config import load_template_geometry
-from image_process_lib.point_calibration import ArmCalibrator, x_predict,y_predict,z_predict
-from image_process_lib.board_detect import board_detect, board_grid_detect, draw_grid_debug, interpolate_grid_point
+from image_process_lib.point_calibration import ArmCalibrator
+from image_process_lib.board_detect import detect_nearest_board_dot_in_roi
 from image_process_lib.single_block_detector import (
     detect_blocks_in_image,
-    detect_single_block_in_image,
     normalize_category_name,
     undistort_bgr_image,
 )
@@ -26,7 +39,36 @@ from image_process.srv import VisualBoardOffset, VisualBoardOffsetResponse
 from image_process.srv import VisualServoOffset, VisualServoOffsetResponse
 from camera.srv import pixel2world, pixel2worldRequest
 
-from ctypes import * 
+from ctypes import CDLL, c_char_p
+
+
+CALIBRATION_MATRIX_PATH = "/home/zhl/SingleArmTetris/SingleArmTetris/src/competition/config/calibration_matrix.yaml"
+DETECTION_MODEL_PATH = "/home/zhl/SingleArmTetris/SingleArmTetris/src/competition/model/best5.14.pt"
+JINJIE_LIB_PATH = "/home/zhl/SingleArmTetris/SingleArmTetris/src/jinjie/jinjie_libtetris.so"
+
+VISUAL_TARGET_BLOCK = "block"
+VISUAL_TARGET_BOARD = "board"
+
+# 高位全场拍摄位姿。competition.py 里也有同一份值，后面应通过服务返回动态规划结果来彻底统一。
+BASE_SHOOTING_ANGLE = [-250.4151306152343, 22.14801216125488, 380.3343505859375, -180, 0, 90]
+
+
+def build_base_pick_list(include_index=False):
+    """基础任务摆放表：col、row、目标角度、方块类别。"""
+    pick_list = [
+        [1, 2, 90, 'L_yellow'], [4, 1.5, 0, 'T'], [7.5, 1, 0, 'line'], [9.5, 2, -90, 'z_green'], [2, 3, 90, 'L_yellow'],
+        [4, 3, 180, 'L_blue'], [7, 2, 0, 'L_yellow'], [1.5, 5, 90, 'T'], [3.5, 5, 90, 'z_blue'], [5, 4.5, 0, 'z_green'],
+        [6.5, 3.5, 0, 'square'], [9, 5, -90, 'L_blue'], [10, 4.5, 90, 'line'], [7.5, 5.5, 0, 'square'], [1.5, 7, -90, 'z_green'],
+        [3.5, 7, 90, 'z_blue'], [6.5, 7, 90, 'T'], [5, 7.5, 90, 'line'], [9, 7, 0, 'L_blue'], [3, 9, -90, 'L_blue'],
+        [7, 8.5, 180, 'T'], [9.5, 8.5, 0, 'square'], [1, 10, 90, 'L_yellow'], [4.5, 10, 90, 'T'], [6.5, 11, 90, 'z_blue'],
+        [8.5, 10, 0, 'line'], [2.5, 11, 90, 'z_blue'], [8, 12, 90, 'L_yellow'], [9.5, 12, -90, 'z_green'], [1.5, 12.5, 0, 'square'],
+        [3.5, 13, -90, 'z_green'], [5, 12.5, 90, 'line'], [6.5, 13, 90, 'z_blue'], [9, 14, 180, 'L_blue']
+    ]
+    if include_index:
+        for index, item in enumerate(pick_list):
+            item.append(index)
+    return pick_list
+
 
 def save_image_to_path(image_path, image):
     """保存调试图像，兼容中文路径，并在失败时输出日志。"""
@@ -45,18 +87,6 @@ def save_image_to_path(image_path, image):
     except Exception as exc:
         rospy.logwarn("调试图像保存失败 %s: %s" % (image_path, exc))
         return False
-
-def make_debug_image_with_mask(debug_image, mask):
-    """把检测结果和二值掩码拼在一起，方便现场调阈值。"""
-    if debug_image is None or mask is None:
-        return debug_image
-    mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-    return np.hstack((debug_image, mask_bgr))
-
-
-VISUAL_TARGET_BLOCK = "block"
-VISUAL_TARGET_BOARD = "board"
-
 
 class ImageProcessor:
     def __init__(self):
@@ -83,9 +113,8 @@ class ImageProcessor:
             self.get_visual_servo_offset,
         )
 
-        model_path="/home/zhl/SingleArmTetris/SingleArmTetris/src/competition/model/best5.14.pt"
-        self.model=YOLO(model_path)
-        with open("/home/zhl/SingleArmTetris/SingleArmTetris/src/competition/config/calibration_matrix.yaml") as f:
+        self.model = YOLO(DETECTION_MODEL_PATH)
+        with open(CALIBRATION_MATRIX_PATH) as f:
             data = yaml.safe_load(f)
         self.camera_matrix = np.array(data['camera_matrix'])
         self.dist_coeff = np.array(data['dist_coeff'])
@@ -105,26 +134,22 @@ class ImageProcessor:
             "~visual_board_debug_path",
             "/home/zhl/桌面/托盘视觉伺服当前检测.jpg"
         )
+        self.board_low_roi_half_size = rospy.get_param("~board_low_roi_half_size", 120)
+        self.board_low_blackhat_kernel_size = rospy.get_param("~board_low_blackhat_kernel_size", 15)
+        self.board_low_min_dot_area = rospy.get_param("~board_low_min_dot_area", 20)
+        self.board_low_max_dot_area = rospy.get_param("~board_low_max_dot_area", 250)
+        self.board_low_min_dot_circularity = rospy.get_param("~board_low_min_dot_circularity", 0.35)
+        self.board_low_max_dot_aspect_ratio = rospy.get_param("~board_low_max_dot_aspect_ratio", 1.8)
 
-        # 机械臂 X 方向每 1 像素误差对应的开环移动量，单位 mm/px。在shooting_angle拍摄下
-        self.HIGH_ROUGH_X_MM_PER_PIXEL = 0.5
-
-        # 机械臂 Y 方向每 1 像素误差对应的开环移动量，单位 mm/px。
-        self.HIGH_ROUGH_Y_MM_PER_PIXEL = 0.5
+        # 高位全场识别后，用像素偏差粗估方块机械臂坐标。
+        self.high_rough_x_mm_per_pixel = 0.5
+        self.high_rough_y_mm_per_pixel = 0.5
 
         self.pixel2world_client = rospy.ServiceProxy("get_world_pos",pixel2world)
         self.pixel2world_client.wait_for_service()
 
-        self.shooting_angle = [-250.4151306152343 , 22.14801216125488, 380.3343505859375 , -180, 0, 90]#competition里还有一个
-        self.pick_list=[
-            [1, 2, 90, 'L_yellow', 0], [4, 1.5, 0, 'T', 1], [7.5, 1, 0, 'line', 2], [9.5, 2, -90, 'z_green', 3], [2, 3, 90, 'L_yellow', 4],
-            [4, 3, 180, 'L_blue', 5], [7, 2, 0, 'L_yellow', 6], [1.5, 5, 90, 'T', 7], [3.5, 5, 90, 'z_blue', 8], [5, 4.5, 0, 'z_green', 9],
-            [6.5, 3.5, 0, 'square', 10], [9, 5, -90, 'L_blue', 11], [10, 4.5, 90, 'line', 12], [7.5, 5.5, 0, 'square', 13], [1.5, 7, -90, 'z_green', 14],
-            [3.5, 7, 90, 'z_blue', 15], [6.5, 7, 90, 'T', 16], [5, 7.5, 90, 'line', 17], [9, 7, 0, 'L_blue', 18], [3, 9, -90, 'L_blue', 19],
-            [7, 8.5, 180, 'T', 20],[9.5, 8.5, 0, 'square', 21], [1, 10, 90, 'L_yellow', 22], [4.5, 10, 90, 'T', 23], [6.5, 11, 90, 'z_blue', 24],
-            [8.5, 10, 0, 'line', 25], [2.5, 11, 90, 'z_blue', 26], [8, 12, 90, 'L_yellow', 27], [9.5, 12, -90, 'z_green', 28], [1.5, 12.5, 0, 'square', 29],
-            [3.5, 13, -90, 'z_green', 30], [5, 12.5, 90, 'line', 31], [6.5, 13, 90, 'z_blue', 32], [9, 14, 180, 'L_blue', 33]
-        ]
+        self.shooting_angle = list(BASE_SHOOTING_ANGLE)
+        self.pick_list = build_base_pick_list(include_index=True)
         rospy.loginfo("图像处理服务已启动")
     def image_callback(self, msg):
         try:
@@ -167,8 +192,8 @@ class ImageProcessor:
             h, w = img_bgr1.shape[:2]
             center_x = w / 2.0
             center_y = h / 2.0
-            predicted_x = self.shooting_angle[0]+(py-center_y)*self.HIGH_ROUGH_Y_MM_PER_PIXEL#这机械臂和相机坐标是反的
-            predicted_y = self.shooting_angle[1]+(px-center_x)*self.HIGH_ROUGH_X_MM_PER_PIXEL#这机械臂和相机坐标是反的
+            predicted_x = self.shooting_angle[0] + (py - center_y) * self.high_rough_y_mm_per_pixel  # 机械臂和相机坐标是反的
+            predicted_y = self.shooting_angle[1] + (px - center_x) * self.high_rough_x_mm_per_pixel  # 机械臂和相机坐标是反的
             predicted_z = 200
             cam_point3d[0]=predicted_x
             cam_point3d[1]=predicted_y
@@ -193,7 +218,7 @@ class ImageProcessor:
                 rospy.logwarn("上表面掩码可视化保存失败: %s" % self.top_surface_mask_vis_path)
         # print("cubelist检查:",cube_list)
         if req.num==-2:
-            test = CDLL("/home/zhl/SingleArmTetris/SingleArmTetris/src/jinjie/jinjie_libtetris.so") 
+            test = CDLL(JINJIE_LIB_PATH)
             test.IDBS.restype = c_char_p
             place_order=list(map(int,input("输入进阶任务顺序").split()))
             self.pick_list,fill_line=self.get_put_table(cube_count,place_order,test)
@@ -232,13 +257,20 @@ class ImageProcessor:
         return GetTargetPosResponse([1.0])
     
     def get_cube_location1(self, req):
+        if self.results is None:
+            rospy.logwarn("尚未完成方块识别，无法返回抓取位置")
+            return GetTargetPosResponse(array=[0.0, 0.0, 0.0, 0.0, 0.0])
+        if req.num < -1 or req.num >= len(self.pick_list):
+            rospy.logwarn("方块序号越界: %s，当前可用数量: %s" % (req.num, len(self.pick_list)))
+            return GetTargetPosResponse(array=[0.0, 0.0, 0.0, 0.0, 0.0])
+
         block2, selected, orig_dists, opt_dists, dist_saving, time_used, total_time, orig_total, opt_total = self.results
         if req.num == -1:
             pick_cube = self.pick_list[0]
-            x,y,z,t = get_cube_location(pick_cube,block2,False)
+            x,y,z,t = calc_cube_location(pick_cube,block2,False)
         else:
             pick_cube = self.pick_list[req.num]
-            x,y,z,t = get_cube_location(pick_cube,block2,True)
+            x,y,z,t = calc_cube_location(pick_cube,block2,True)
         xuanzhuan_angle = pick_cube[2] - t + self.calibrator.board_theta
         #处理旋转角度超过360°的情况（比较极端）-- (-360 ~ 360)
         if xuanzhuan_angle > 360:
@@ -272,13 +304,17 @@ class ImageProcessor:
         return GetTargetPosResponse(array=[x,y,z,t,xuanzhuan_angle])
     
     def get_put_pose(self, req):
+        if req.num < 0 or req.num >= len(self.pick_list):
+            rospy.logwarn("摆放序号越界: %s，当前可用数量: %s" % (req.num, len(self.pick_list)))
+            return GetTargetPosResponse(array=[])
+
         pick_cube = self.pick_list[req.num]
         if(pick_cube[3]=='square'):
-            # put_pose=get_put_pose(pick_cube[0]-0.035,pick_cube[1]+0.06,self.shooting_angle,self.calibrator)
-            put_pose=get_put_pose(pick_cube[0],pick_cube[1],self.shooting_angle,self.calibrator)
+            # put_pose=calc_put_pose(pick_cube[0]-0.035,pick_cube[1]+0.06,self.shooting_angle,self.calibrator)
+            put_pose=calc_put_pose(pick_cube[0],pick_cube[1],self.shooting_angle,self.calibrator)
         else:
-            # put_pose=get_put_pose(pick_cube[0]-0.03,pick_cube[1]+0.03,self.shooting_angle,self.calibrator)
-            put_pose=get_put_pose(pick_cube[0],pick_cube[1],self.shooting_angle,self.calibrator)
+            # put_pose=calc_put_pose(pick_cube[0]-0.03,pick_cube[1]+0.03,self.shooting_angle,self.calibrator)
+            put_pose=calc_put_pose(pick_cube[0],pick_cube[1],self.shooting_angle,self.calibrator)
         return GetTargetPosResponse(array=put_pose)
 
     def make_visual_servo_result(
@@ -340,7 +376,7 @@ class ImageProcessor:
         return self.detect_block_visual_offset(expected_category, **template_options)
 
     def parse_block_template_match_options(self, req):
-        """解析方块低位模板匹配先验；当前低位临时代码暂不使用这些参数。"""
+        """解析方块低位模板匹配先验，用于缩小模板角度和位置搜索范围。"""
         template_profile = (getattr(req, "template_profile", "") or "low").strip() or "low"
         angle_step = float(getattr(req, "angle_step_deg", 1.0) or 1.0)
         if angle_step <= 0:
@@ -386,12 +422,11 @@ class ImageProcessor:
         )
 
     def detect_board_visual_offset(self, row, col):
-        """识别托盘目标格点相对相机中心的像素偏差。
+        """识别低位托盘圆点相对相机中心的像素偏差。
 
-        下一步真正要填或重写的托盘识别代码就在这里。
         这里只负责图像识别和像素偏差计算，不控制机械臂。
-        board_grid_detect 必须识别完整 140 个格点；数量不对时直接返回 found=False。
-        row/col 支持整数格点和半格插值，具体排序和插值在 board_detect.py 内部完成。
+        低位时托盘通常不完整入画，因此只在画面中心小 ROI 内找最近的托盘圆点。
+        row/col 只保留给服务兼容和调试图显示，不参与低位圆点选择。
         """
         img_bgr1 = self.latest_image
         if img_bgr1 is None:
@@ -405,7 +440,21 @@ class ImageProcessor:
             h, w = img_bgr1.shape[:2]
             new_camera_mtx, roi = cv2.getOptimalNewCameraMatrix(self.camera_matrix, self.dist_coeff, (w, h), 1, (w, h))
             board_bgr = cv2.undistort(img_bgr1, self.camera_matrix, self.dist_coeff, None, new_camera_mtx)#去畸变
-            detect_result = board_grid_detect(board_bgr, debug_path=self.visual_board_debug_path)
+            center_x = w / 2.0
+            center_y = h / 2.0
+            detect_result = detect_nearest_board_dot_in_roi(
+                board_bgr,
+                (center_x, center_y),
+                roi_half_size=self.board_low_roi_half_size,
+                blackhat_kernel_size=self.board_low_blackhat_kernel_size,
+                min_area=self.board_low_min_dot_area,
+                max_area=self.board_low_max_dot_area,
+                min_circularity=self.board_low_min_dot_circularity,
+                max_aspect_ratio=self.board_low_max_dot_aspect_ratio,
+                debug_path=self.visual_board_debug_path,
+                row=row,
+                col=col,
+            )
             if not detect_result["found"]:
                 return self.make_visual_servo_result(
                     found=False,
@@ -413,44 +462,21 @@ class ImageProcessor:
                     message=detect_result["message"],
                 )
 
-            target_point = interpolate_grid_point(
-                detect_result["grid_points"],
-                row,
-                col,
-            )
-            center_x = w / 2.0
-            center_y = h / 2.0
+            target_point = detect_result["point"]
             dx_px = float(target_point[0] - center_x)
             dy_px = float(target_point[1] - center_y)
 
-            debug_image = draw_grid_debug(
-                board_bgr,
-                detect_result["grid_points"],
-                target_point=target_point,
-                center_point=(center_x, center_y),
-            )
-            cv2.putText(
-                debug_image,
-                f"row={float(row):.2f} col={float(col):.2f} dx={dx_px:.1f} dy={dy_px:.1f}",
-                (20, 35),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 0, 0),
-                2,
-                cv2.LINE_AA,
-            )
-            save_image_to_path(self.visual_board_debug_path, debug_image)
             return self.make_visual_servo_result(
                 found=True,
                 target_type="board",
-                category="board_grid",
+                category="board_low_dot",
                 px=float(target_point[0]),
                 py=float(target_point[1]),
                 dx_px=dx_px,
                 dy_px=dy_px,
                 theta=0,
                 score=1.0,
-                message="托盘目标格点识别成功",
+                message="低位托盘圆点识别成功",
             )
         except Exception as exc:
             rospy.logerr("托盘视觉伺服目标检测失败: %s" % exc)
@@ -473,10 +499,12 @@ class ImageProcessor:
     ):
         """识别方块目标相对相机中心的像素偏差。
 
-        下一步真正要填或重写的方块识别代码就在这里。
-        当前正式通信接口已经支持 expected_category，但这里仍沿用实测成功的深色旋转矩形检测。
-        也就是说：现在还没有真正按 7 类方块类别筛选目标。
-        正式多方块同框时，需要后续补上类别过滤、ROI 或距离画面中心优先等目标选择策略。
+        低位视觉伺服和高位全场识别使用同一套流程：
+        YOLO 检测候选框，按 expected_category 过滤类别，裁剪候选区域，
+        分割上表面，再用模板匹配得到目标点和角度。
+        如果画面中有多个同类方块，选择离画面中心最近的一个。
+        angle_center/angle_window 和 search_center/search_radius 是模板匹配先验，
+        用来缩小旋转角和局部位置搜索范围。
         """
         img_bgr1 = self.latest_image
         if img_bgr1 is None:
@@ -488,33 +516,25 @@ class ImageProcessor:
 
         try:
             img_bgr = undistort_bgr_image(img_bgr1, self.camera_matrix, self.dist_coeff)
-            debug_image = img_bgr.copy()
             h, w = img_bgr.shape[:2]
             center_x = w / 2.0
             center_y = h / 2.0
+            expected_category = normalize_category_name((expected_category or "").strip())
+            template_geometry = load_template_geometry(template_profile)
 
-            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-            gray = cv2.GaussianBlur(gray, (5, 5), 0)
-            # 相机曝光没调好时，目标会变成灰黑色；用 Otsu 自动阈值找浅色背景上的深色区域。
-            _, dark_mask = cv2.threshold(
-                gray,
-                0,
-                255,
-                cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+            blocks, debug_image = detect_blocks_in_image(
+                img_bgr,
+                self.model,
+                template_geometry=template_geometry,
+                crop_margin=8,
+                save_mask_overlay=self.save_top_surface_mask_vis,
+                angle_step=angle_step,
+                angle_center=angle_center,
+                angle_window=angle_window,
+                search_center=search_center,
+                search_radius=search_radius,
+                expected_category=expected_category,
             )
-
-            # 去掉小噪点并填补目标内部的小孔，保证旋转矩形拟合稳定。
-            kernel = np.ones((5, 5), np.uint8)
-            dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_OPEN, kernel, iterations=1)
-            dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-            contours, _ = cv2.findContours(
-                dark_mask,
-                cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE,
-            )
-            min_area = max(200.0, float(h * w) * 0.0002)
-            valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) >= min_area]
 
             cv2.drawMarker(
                 debug_image,
@@ -525,44 +545,28 @@ class ImageProcessor:
                 thickness=2,
             )
 
-            if not valid_contours:
-                save_image_to_path(self.visual_servo_debug_path, make_debug_image_with_mask(debug_image, dark_mask))
+            if not blocks:
+                category_msg = expected_category if expected_category else "任意类别"
+                save_image_to_path(self.visual_servo_debug_path, debug_image)
                 return self.make_visual_servo_result(
                     found=False,
                     target_type="block",
-                    message="未检测到深色旋转矩形",
+                    category=expected_category,
+                    message=f"没有检测到目标方块，目标类别: {category_msg}",
                 )
 
-            target_contour = max(valid_contours, key=cv2.contourArea)
-            rect = cv2.minAreaRect(target_contour)
-            (px, py), (rect_w, rect_h), raw_angle = rect
-            if rect_w <= 1e-6 or rect_h <= 1e-6:
-                save_image_to_path(self.visual_servo_debug_path, make_debug_image_with_mask(debug_image, dark_mask))
-                return self.make_visual_servo_result(
-                    found=False,
-                    target_type="block",
-                    message="深色区域尺寸异常",
-                )
-
-            # theta 表示旋转矩形长边相对图像 x 轴的角度，范围约为 -90 到 90 度。
-            theta = raw_angle
-            if rect_w < rect_h:
-                theta += 90.0
-            while theta >= 90.0:
-                theta -= 180.0
-            while theta < -90.0:
-                theta += 180.0
-
+            # 低位对准时相机中心附近的同类方块才是目标。
+            target_block = min(
+                blocks,
+                key=lambda block: (block["px"] - center_x) ** 2 + (block["py"] - center_y) ** 2,
+            )
+            px = target_block["px"]
+            py = target_block["py"]
+            theta = target_block["theta"]
             dx_px = px - center_x
             dy_px = py - center_y
-            contour_area = cv2.contourArea(target_contour)
-            rect_area = rect_w * rect_h
-            score = float(contour_area / rect_area) if rect_area > 1e-6 else 0.0
+            score = target_block["score"]
 
-            box = cv2.boxPoints(rect)
-            box = np.intp(box)
-            cv2.drawContours(debug_image, [target_contour], -1, (0, 255, 255), 1)
-            cv2.drawContours(debug_image, [box], 0, (0, 165, 255), 2)
             cv2.drawMarker(
                 debug_image,
                 (int(px), int(py)),
@@ -580,7 +584,7 @@ class ImageProcessor:
             )
             cv2.putText(
                 debug_image,
-                f"dx={dx_px:.1f}px dy={dy_px:.1f}px theta={theta:.1f}",
+                f"{target_block['category']} dx={dx_px:.1f}px dy={dy_px:.1f}px theta={theta:.1f}",
                 (20, 35),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
@@ -588,14 +592,12 @@ class ImageProcessor:
                 2,
                 cv2.LINE_AA,
             )
-            save_image_to_path(self.visual_servo_debug_path, make_debug_image_with_mask(debug_image, dark_mask))
-            message = "检测到深色旋转矩形"
-            if expected_category:
-                message += f"；注意：当前尚未按类别 {expected_category} 筛选目标"
+            save_image_to_path(self.visual_servo_debug_path, debug_image)
+            message = f"方块视觉伺服识别成功，共 {len(blocks)} 个候选，已选择离画面中心最近的 {target_block['category']}"
             return self.make_visual_servo_result(
                 found=True,
                 target_type="block",
-                category="dark_rectangle",
+                category=target_block["category"],
                 px=float(px),
                 py=float(py),
                 dx_px=float(dx_px),

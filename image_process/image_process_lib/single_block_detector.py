@@ -66,6 +66,7 @@ def detect_blocks_in_image(
     angle_values=None,
     search_center=None,
     search_radius=None,
+    expected_category="",
 ):
     """检测当前图像里的所有方块，并返回每个方块的吸取点像素和角度。
 
@@ -78,6 +79,7 @@ def detect_blocks_in_image(
 
     if template_geometry is None:
         template_geometry = load_template_geometry(template_profile)
+    expected_category = normalize_category_name(expected_category.strip()) if expected_category else ""
     block_px = template_geometry["block_px"]
     connector_px = template_geometry["connector_px"]
 
@@ -91,6 +93,8 @@ def detect_blocks_in_image(
         x1, y1, x2, y2, score, cid = det
         category = normalize_category_name(model.names[int(cid)])
         if category == "board":
+            continue
+        if expected_category and category != expected_category:
             continue
 
         crop_x1 = max(0, int(x1) - crop_margin)
@@ -210,10 +214,8 @@ def detect_single_block_in_image(
         angle_values=angle_values,
         search_center=search_center,
         search_radius=search_radius,
+        expected_category=expected_category,
     )
-    if expected_category:
-        expected_category = normalize_category_name(expected_category)
-        blocks = [block for block in blocks if block["category"] == expected_category]
 
     if not blocks:
         return _empty_detection("没有检测到目标方块", debug_image)

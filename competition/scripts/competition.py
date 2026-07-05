@@ -2,14 +2,10 @@
 import os
 import sys
 import time
-import math
-import yaml
 import threading
 import warnings
 
-import numpy as np
 import rospy
-from matplotlib import pyplot as plt
 from sensor_msgs.msg import Image
 
 from control.srv import arm, armRequest, motor, motorRequest, suck, suckRequest
@@ -19,9 +15,8 @@ from image_process.srv import GetTargetPos, GetTargetPosRequest, VisualServoOffs
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-VISUAL_SERVO_DIR = os.path.join(SCRIPT_DIR, "visual_servo")
-if VISUAL_SERVO_DIR not in sys.path:
-    sys.path.insert(0, VISUAL_SERVO_DIR)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 
 try:
     from visual_servo.visual_servo_common import (
@@ -37,69 +32,66 @@ except Exception as exc:
     print(f"\033[91m视觉伺服公共库导入失败，视觉抓取暂不可用: {exc}\033[0m")
 
 
-with open("/home/zhl/SingleArmTetris/SingleArmTetris/src/competition/config/calibration_matrix.yaml") as f:
-    data = yaml.safe_load(f)
-camera_matrix = np.array(data["camera_matrix"])
-dist_coeff = np.array(data["dist_coeff"])
+# 高位全场拍摄位姿。process.py 里也有同一份值，后面如果要彻底整理，应先统一接口再移动。
+BASE_SHOOTING_ANGLE = [-250.4151306152343, 22.14801216125488, 380.3343505859375, -180, 0, 90]
+
+
+def build_base_pick_list(include_index=False):
+    """基础任务摆放表：col、row、目标角度、方块类别。"""
+    pick_list = [
+        [1, 2, 90, "L_yellow"], [4, 1.5, 0, "T"], [7.5, 1, 0, "line"], [9.5, 2, -90, "z_green"], [2, 3, 90, "L_yellow"],
+        [4, 3, 180, "L_blue"], [7, 2, 0, "L_yellow"], [1.5, 5, 90, "T"], [3.5, 5, 90, "z_blue"], [5, 4.5, 0, "z_green"],
+        [6.5, 3.5, 0, "square"], [9, 5, -90, "L_blue"], [10, 4.5, 90, "line"], [7.5, 5.5, 0, "square"], [1.5, 7, -90, "z_green"],
+        [3.5, 7, 90, "z_blue"], [6.5, 7, 90, "T"], [5, 7.5, 90, "line"], [9, 7, 0, "L_blue"], [3, 9, -90, "L_blue"], [7, 8.5, 180, "T"],
+        [9.5, 8.5, 0, "square"], [1, 10, 90, "L_yellow"], [4.5, 10, 90, "T"], [6.5, 11, 90, "z_blue"], [8.5, 10, 0, "line"], [2.5, 11, 90, "z_blue"],
+        [8, 12, 90, "L_yellow"], [9.5, 12, -90, "z_green"], [1.5, 12.5, 0, "square"], [3.5, 13, -90, "z_green"], [5, 12.5, 90, "line"], [6.5, 13, 90, "z_blue"], [9, 14, 180, "L_blue"],
+    ]
+    if include_index:
+        for index, item in enumerate(pick_list):
+            item.append(index)
+    return pick_list
 
 
 if __name__ == "__main__":
     rospy.init_node("competition")
 
     # ========================= 主流程开关和待实测参数 =========================
-    # 默认先走旧开环抓取，避免未填实的视觉伺服占位函数被误调用。
     USE_VISUAL_PICK = False
-
-    # 默认先走旧开环摆放；托盘视觉伺服骨架补齐后，再逐步打开这个开关实测。
     USE_VISUAL_PLACE = False
 
-    # 方块视觉伺服期望类别；空字符串表示不限制类别，当前只作为未来接口参数保留。
     EXPECTED_BLOCK_CATEGORY = ""
+    BLOCK_TEMPLATE_PROFILE = "low"
+    BLOCK_USE_ANGLE_PRIOR = False
+    BLOCK_ANGLE_CENTER_DEG = 0.0
+    BLOCK_ANGLE_WINDOW_DEG = 0.0
+    BLOCK_ANGLE_STEP_DEG = 1.0
+    BLOCK_USE_POSITION_PRIOR = False
+    BLOCK_SEARCH_CENTER_X = 0.0
+    BLOCK_SEARCH_CENTER_Y = 0.0
+    BLOCK_SEARCH_RADIUS_PX = 0.0
 
-    # 粗定位观察高度：后续需要根据全场识别结果和相机视野实测确认。
     ROUGH_LOOK_Z = 220.0
-
-    # 闭环视觉伺服高度：应和 pixel_to_robot_matrix 标定高度一致，当前只是占位参数。
     SERVO_LOOK_Z = 200.0
-
-    # 下探吸取高度：旧流程使用 z-8，新视觉流程先集中成参数，后续按实机重标定。
     PICK_Z = 180.0
-
-    # 吸取后抬起高度：旧流程使用 z+20，新视觉流程先集中成参数，后续按实机重标定。
     LIFT_Z = 200.0
-
-    # 普通移动速度：视觉流程统一从这里取，避免速度散落在各个分支。
     ARM_SPEED = 80
-
-    # 下探吸取速度：正式启用视觉抓取前建议低速实测。
     PICK_SPEED = 60
-
-    # 托盘摆放高位，单位 mm；当前沿用旧开环摆放高度，后续需要按视觉伺服实测确认。
     PLACE_HIGH_Z = 197.0
-
-    # 托盘下放高度，单位 mm；当前沿用旧开环摆放高度，后续需要按视觉伺服实测确认。
     PLACE_DOWN_Z = 188.0
-
-    # 托盘释放后抬起高度增量，单位 mm；当前沿用旧流程的 +20。
     PLACE_LIFT_STEP_MM = 20.0
 
-    # 视觉伺服收敛阈值，单位像素；连续多帧低于该阈值才认为对准成功。
     VISUAL_ERROR_THRESHOLD_PX = 2.0
-
-    # 视觉伺服单次最大 XY 修正距离，单位 mm；防止识别异常导致一次移动过大。
     VISUAL_MAX_STEP_MM = 5.0
-
-    # 视觉伺服最多迭代次数；每轮最多移动一次，也可能只是等待画面稳定。
     VISUAL_MAX_ITER = 40
-
-    # 连续多少帧满足误差阈值才算成功，避免单帧抖动误判。
     VISUAL_SUCCESS_STABLE_FRAMES = 5
-
-    # 连续多少帧未识别到方块才失败；单帧丢失只等待。
     VISUAL_MAX_MISSED_FRAMES = 5
-
-    # 每次视觉伺服移动后的等待时间，单位秒；用于等机械臂和画面稳定。
     VISUAL_SETTLE_SEC = 0.25
+
+    angle_velocity = 270
+    last_angle = 180
+    shooting_angle = list(BASE_SHOOTING_ANGLE)
+    pick_list = build_base_pick_list(include_index=False)
+    is_advanced_task = False
 
     # ========================= ROS 服务初始化 =========================
     rospy.wait_for_service("get_cube_pos")
@@ -139,8 +131,6 @@ if __name__ == "__main__":
 
     # rospy.set_param('/motor_done', 1)
     motor_done = 1
-    angle_velocity = 270
-    last_angle = 180
 
     def apply_pose_compensation(pose, theta_deg, label):
         """预留位姿补偿入口。
@@ -291,14 +281,14 @@ if __name__ == "__main__":
         if xuanzhuan_angle > 0:
             if last_angle + xuanzhuan_angle > 360:
                 motor_req.angle = 350 - xuanzhuan_angle
-                wait_time = (last_angle - motor_req.angle) / angle_velocity
+                wait_time = abs(last_angle - motor_req.angle) / angle_velocity
                 motor_control.call(motor_req)
                 motor_done = 0
                 last_angle = motor_req.angle
         else:
             if last_angle + xuanzhuan_angle < 0:
                 motor_req.angle = 10 - xuanzhuan_angle
-                wait_time = (last_angle - motor_req.angle) / angle_velocity
+                wait_time = abs(last_angle - motor_req.angle) / angle_velocity
                 motor_control.call(motor_req)
                 motor_done = 0
                 last_angle = motor_req.angle
@@ -312,14 +302,13 @@ if __name__ == "__main__":
     def choose_block_rough_camera_pose(x, y, z, t, index_cube):
         """选择方块视觉伺服开始前的相机粗定位位姿。
 
-        输入 x/y/z/t 来自 get_cube_location，目前仍是旧九点预测结果。
-        这个函数要解决的问题是：机械臂先去哪一个高度和 xy 位置，才能让目标方块稳定进入相机视野。
-        该策略需要现场验证不同区域、不同方块姿态下旧预测误差是否足够小，所以当前先保守留空。
-        返回值未来会交给 send_arm_pose 和 align_camera_to_block 使用。
+        输入 x/y/z/t 来自 get_cube_location，目前仍是高位识别后的粗估结果。
+        这里只生成相机观察位，真正的吸盘偏移和下探高度由后续函数处理。
         """
-        message = "粗定位现在只使用1像素=0.5mm"
-        print(f"\033[91m{message}\033[0m")
-        return True, list(shooting_angle), message
+        rough_pose = make_pose_xy_z(shooting_angle, x, y, ROUGH_LOOK_Z)
+        message = f"方块视觉抓取粗观察位: x={x:.2f}, y={y:.2f}, z={ROUGH_LOOK_Z:.2f}"
+        print(message)
+        return True, rough_pose, message
 
     def choose_block_pick_heights(x, y, z, t, index_cube):
         """决定视觉抓取的下探高度和抬起高度。
@@ -348,7 +337,19 @@ if __name__ == "__main__":
         if not visual_servo_config:
             return False, list(start_pose), "视觉伺服配置为空，无法执行闭环对准"
 
-        get_offset_func = lambda: request_block_visual_offset(expected_category)
+        request_kwargs = {
+            "expected_category": expected_category,
+            "template_profile": BLOCK_TEMPLATE_PROFILE,
+            "use_angle_prior": BLOCK_USE_ANGLE_PRIOR,
+            "angle_center_deg": BLOCK_ANGLE_CENTER_DEG,
+            "angle_window_deg": BLOCK_ANGLE_WINDOW_DEG,
+            "angle_step_deg": BLOCK_ANGLE_STEP_DEG,
+            "use_position_prior": BLOCK_USE_POSITION_PRIOR,
+            "search_center_x": BLOCK_SEARCH_CENTER_X,
+            "search_center_y": BLOCK_SEARCH_CENTER_Y,
+            "search_radius_px": BLOCK_SEARCH_RADIUS_PX,
+        }
+        get_offset_func = lambda: request_block_visual_offset(**request_kwargs)
         success, camera_pose, last_resp, message = run_offset_visual_servo_alignment(
             get_offset_func,
             move_pose_for_visual_servo,
@@ -411,10 +412,25 @@ if __name__ == "__main__":
         需要让图像/规划节点显式返回当前 index_cube 对应的 row/col，不能只依赖本地静态表。
         返回顺序固定为 row, col，供 request_board_visual_offset 使用。
         """
+        if is_advanced_task:
+            raise RuntimeError("进阶任务的摆放表由 process.py 动态生成，competition.py 不能使用本地静态 row/col")
+        if index_cube < 0 or index_cube >= len(pick_list):
+            raise IndexError(f"方块序号越界: {index_cube}，当前基础任务摆放表长度: {len(pick_list)}")
         place_item = pick_list[index_cube]
         col = float(place_item[0])
         row = float(place_item[1])
         return row, col
+
+    def get_expected_block_category(index_cube):
+        """获取视觉抓取时传给图像节点的方块类别先验。"""
+        configured_category = EXPECTED_BLOCK_CATEGORY.strip()
+        if configured_category:
+            return configured_category
+        if is_advanced_task:
+            return ""
+        if 0 <= index_cube < len(pick_list):
+            return str(pick_list[index_cube][3])
+        return ""
 
     def choose_board_rough_camera_pose(put_pose, row, col, index_cube):
         """决定托盘视觉伺服开始前相机观察位。
@@ -545,7 +561,6 @@ if __name__ == "__main__":
         send_arm_pose(put_pose, speed=ARM_SPEED, theta_deg=theta_place, label="摆放抬起")
 
     #################################           复位              ################################
-    shooting_angle = [-250.4151306152343, 22.14801216125488, 380.3343505859375, -180, 0, 90]  # process那里还有一个
     send_arm_pose(shooting_angle, speed=ARM_SPEED)
 
     #################################           获取图像与摆放方法             ################################
@@ -553,15 +568,7 @@ if __name__ == "__main__":
     jinjie = input()
     if jinjie == "y":
         GetTargetPos_req.num = -2
-
-    pick_list = [
-        [1, 2, 90, "L_yellow"], [4, 1.5, 0, "T"], [7.5, 1, 0, "line"], [9.5, 2, -90, "z_green"], [2, 3, 90, "L_yellow"],
-        [4, 3, 180, "L_blue"], [7, 2, 0, "L_yellow"], [1.5, 5, 90, "T"], [3.5, 5, 90, "z_blue"], [5, 4.5, 0, "z_green"],
-        [6.5, 3.5, 0, "square"], [9, 5, -90, "L_blue"], [10, 4.5, 90, "line"], [7.5, 5.5, 0, "square"], [1.5, 7, -90, "z_green"],
-        [3.5, 7, 90, "z_blue"], [6.5, 7, 90, "T"], [5, 7.5, 90, "line"], [9, 7, 0, "L_blue"], [3, 9, -90, "L_blue"], [7, 8.5, 180, "T"],
-        [9.5, 8.5, 0, "square"], [1, 10, 90, "L_yellow"], [4.5, 10, 90, "T"], [6.5, 11, 90, "z_blue"], [8.5, 10, 0, "line"], [2.5, 11, 90, "z_blue"],
-        [8, 12, 90, "L_yellow"], [9.5, 12, -90, "z_green"], [1.5, 12.5, 0, "square"], [3.5, 13, -90, "z_green"], [5, 12.5, 90, "line"], [6.5, 13, 90, "z_blue"], [9, 14, 180, "L_blue"],
-    ]
+        is_advanced_task = True
 
     #################################           开始视觉识别             ################################
     rospy.wait_for_message("/camera/image_raw", Image, timeout=30)
@@ -610,7 +617,7 @@ if __name__ == "__main__":
         last_angle = motor_req.angle
         return theta_pick, theta_place, set_angle
 
-    def down_pick_visual(x, y, z, t, xuanzhuan_angle, index_cube):
+    def down_pick_visual(x, y, z, t, xuanzhuan_angle, index_cube, expected_category=""):
         """方块视觉伺服抓取骨架。
 
         这个函数只串联正式流程，不在这里写具体识别算法。
@@ -634,10 +641,15 @@ if __name__ == "__main__":
         # 4. 等待舵机避限位动作结束，再做闭环视觉伺服，避免画面持续变化。
         wait_motor_ready()
 
-        # 5. 调用视觉伺服接口，让相机中心对准方块。
+        # 5. 切到闭环伺服高度，再让相机中心对准方块。
+        servo_start_pose = list(rough_camera_pose)
+        servo_start_pose[2] = SERVO_LOOK_Z
+        if abs(servo_start_pose[2] - rough_camera_pose[2]) > 1e-6:
+            send_arm_pose(servo_start_pose, speed=ARM_SPEED, theta_deg=theta_pick, label="视觉抓取伺服高度")
+
         success, camera_pose, message = align_camera_to_block(
-            rough_camera_pose,
-            expected_category=EXPECTED_BLOCK_CATEGORY,
+            servo_start_pose,
+            expected_category=expected_category,
         )
         if not success:
             handle_block_servo_failed(index_cube, message)
@@ -680,12 +692,23 @@ if __name__ == "__main__":
         x, y, z, t, xuanzhuan_angle = resp.array
 
         if USE_VISUAL_PICK:
-            theta_pick, theta_place, set_angle = down_pick_visual(x, y, z, t, xuanzhuan_angle, i)
+            expected_category = get_expected_block_category(i)
+            theta_pick, theta_place, set_angle = down_pick_visual(
+                x,
+                y,
+                z,
+                t,
+                xuanzhuan_angle,
+                i,
+                expected_category=expected_category,
+            )
         else:
             theta_pick, theta_place, set_angle = down_pick(x, y, z, t, xuanzhuan_angle, i)
 
         # 获取这个方块摆放位置的姿态。托盘视觉伺服后续单独接入，这里暂时保留旧 get_put_pose。
         resp = get_put_pose.call(GetTargetPos_req)
+        if len(resp.array) < 6:
+            raise RuntimeError(f"第 {i} 个方块未获取到有效摆放位姿")
         put_pose = list(resp.array)
 
         if USE_VISUAL_PLACE:

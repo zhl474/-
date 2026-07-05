@@ -320,4 +320,5 @@ def test_competition_module_imports_with_service_stubs(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    assert hasattr(module, "camera_matrix")
+    assert hasattr(module, "build_base_pick_list")
+    assert len(module.build_base_pick_list()) == 34
