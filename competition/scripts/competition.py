@@ -56,8 +56,8 @@ if __name__ == "__main__":
     rospy.init_node("competition")
 
     # ========================= 主流程开关和待实测参数 =========================
-    USE_VISUAL_PICK = False
-    USE_VISUAL_PLACE = False
+    USE_VISUAL_PICK = True
+    USE_VISUAL_PLACE = True
 
     EXPECTED_BLOCK_CATEGORY = ""
     BLOCK_TEMPLATE_PROFILE = "low"
@@ -70,7 +70,7 @@ if __name__ == "__main__":
     BLOCK_SEARCH_CENTER_Y = 0.0
     BLOCK_SEARCH_RADIUS_PX = 0.0
 
-    ROUGH_LOOK_Z = 220.0
+    ROUGH_LOOK_Z = 200.0
     SERVO_LOOK_Z = 200.0
     PICK_Z = 180.0
     LIFT_Z = 200.0

@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import cv2
 from typing import List, Tuple
 import time
+import numpy as np
 from .kernels_create import (
     create_rotation_kernels,
     get_template_rect_size,
