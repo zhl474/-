@@ -1,0 +1,8 @@
+enabled: false
+unit: mm
+angle_unit: deg
+frame: robot_base
+theta0_deg: 0.0
+periodic: true
+interpolation: linear
+table: []

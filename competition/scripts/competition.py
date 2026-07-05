@@ -6,6 +6,7 @@ from matplotlib import pyplot as plt
 import math
 import yaml
 import threading
+import os
 
 with open("/home/zhl/SingleArmTetris/SingleArmTetris/src/competition/config/calibration_matrix.yaml") as f:
     data = yaml.safe_load(f)
@@ -17,6 +18,7 @@ warnings.filterwarnings("ignore",category=RuntimeWarning)
 from image_process.srv import GetTargetPos ,GetTargetPosRequest
 from control.srv import arm,armRequest,motor,motorRequest,suck,suckRequest
 from sensor_msgs.msg import Image
+from servo_eccentric_compensation import ServoEccentricCompensator
 
 
 if __name__ == "__main__":
@@ -43,6 +45,25 @@ if __name__ == "__main__":
     suck_in = 0
     suck_out = 1
     sucker_off = 2
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    servo_compensation_config = os.path.join(
+        script_dir,
+        "servo_eccentric_compensation",
+        "servo_eccentric_compensation.yaml",
+    )
+    servo_compensator = ServoEccentricCompensator(servo_compensation_config, debug=False)
+
+    def apply_servo_compensation(pose, theta_deg, label):
+        # 在抓取/摆放目标点发送前显式补偿，底层 MoveL 不做隐式补偿。
+        pose_before = list(pose)
+        compensation = servo_compensator.get_compensation(theta_deg)
+        pose_after = servo_compensator.apply(pose_before, theta_deg).tolist()
+        print(
+            f"[吸盘偏心补偿/{label}] theta={float(theta_deg):.3f} deg, "
+            f"补偿量(mm)={compensation.tolist()}, "
+            f"补偿前={pose_before}, 补偿后={pose_after}"
+        )
+        return pose_after
 
     # rospy.set_param('/motor_done', 1)
     motor_done = 1
@@ -130,8 +151,9 @@ if __name__ == "__main__":
                 last_angle=motor_req.angle
         timer = threading.Timer(wait_time, timer_callback)
         timer.start()
+        theta_pick = last_angle
         #先运动到方块上方再下去吸取
-        set_angle=shooting_angle
+        set_angle=list(shooting_angle)
         base_x=x
         base_y=y
         set_angle[0]=base_x
@@ -141,7 +163,7 @@ if __name__ == "__main__":
 
         #如果不是第一个方块就先到上方，第一个方块可以计时开始前先过去，节约点时间
         # if(index_cube!=0):
-        arm_req.pose = set_angle
+        arm_req.pose = apply_servo_compensation(set_angle, theta_pick, "抓取上方")
         arm_control.call(arm_req)
         input("按空格继续...")
         #吸方块
@@ -150,6 +172,7 @@ if __name__ == "__main__":
         set_angle[2]=z-8
         arm_req.pose = set_angle
         arm_req.speed = 60
+        # 如果恢复下探 MoveL，发送前也要使用 theta_pick 做吸盘偏心补偿。
         # arm_control.call(arm_req)
         # input("捡")
         suck_req.state = suck_in
@@ -158,7 +181,7 @@ if __name__ == "__main__":
 
         #吸到方块后起来一点
         set_angle[2]=z+20
-        arm_req.pose = set_angle
+        arm_req.pose = apply_servo_compensation(set_angle, theta_pick, "抓取抬起")
         arm_req.speed = 80
         arm_control.call(arm_req)
 
@@ -167,10 +190,11 @@ if __name__ == "__main__":
         #     motor_req.angle = last_angle+xuanzhuan_angle
         #     motor_control.call(motor_req)
         # else:
-        motor_req.angle = last_angle+xuanzhuan_angle
+        theta_place = last_angle+xuanzhuan_angle
+        motor_req.angle = theta_place
         motor_control.call(motor_req)
         last_angle = motor_req.angle
-        return -xuanzhuan_angle,set_angle
+        return theta_pick,theta_place,set_angle
 
     for i in range(cube_num):
         GetTargetPos_req.num = i
@@ -179,7 +203,7 @@ if __name__ == "__main__":
         x,y,z,t,xuanzhuan_angle=resp.array
         #捡方块
         # input("捡")
-        angle,set_angle=down_pick(x,y,z,t,xuanzhuan_angle,i)
+        theta_pick,theta_place,set_angle=down_pick(x,y,z,t,xuanzhuan_angle,i)
 
         #获取这个方块摆放位置的姿态
         resp = get_put_pose.call(GetTargetPos_req)
@@ -191,7 +215,7 @@ if __name__ == "__main__":
         put_pose[2]=197#高度稍微高一点，不然会撞到方块
         put_pose[5]=shooting_angle[5]
         # print("目标位置",put_pose)
-        arm_req.pose = put_pose
+        arm_req.pose = apply_servo_compensation(put_pose, theta_place, "摆放上方")
         arm_control.call(arm_req)
 
         # delayed_suck_out(0.2)
@@ -200,7 +224,7 @@ if __name__ == "__main__":
         # input("回车继续")
         put_pose[2]=188
         put_pose[5]=shooting_angle[5]
-        arm_req.pose = put_pose
+        arm_req.pose = apply_servo_compensation(put_pose, theta_place, "摆放下放")
         arm_req.speed = 60
         arm_control.call(arm_req)
         input("放")
@@ -210,7 +234,7 @@ if __name__ == "__main__":
         # time.sleep(0.1)
         #再上来，准备捡下一个方块
         put_pose[2]=put_pose[2]+20
-        arm_req.pose = put_pose
+        arm_req.pose = apply_servo_compensation(put_pose, theta_place, "摆放抬起")
         arm_req.speed = 80
         arm_control.call(arm_req)
         i=i+1
@@ -219,8 +243,6 @@ if __name__ == "__main__":
 
     suck_req.state = sucker_off
     resp = suck_control.call(suck_req)
-
-
 
 
 
