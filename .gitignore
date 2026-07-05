@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+
+# ROS build output
+build/
+devel/
+install/
+logs/
+
+# AI models
+*.pt
+*.onnx
+*.engine
+*.weights
+
+# YOLO output
+runs/
+
+# datasets
+dataset/
+datasets/
+data/
+
+# system/editor
+.vscode/
+.idea/
+.DS_Store
