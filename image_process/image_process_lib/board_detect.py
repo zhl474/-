@@ -341,7 +341,7 @@ def board_detect(img):
 
     # 新坐标系：
     # [1,1] 是左下角
-    # [BOARD_ROW_COUNT,1] 是左上角
+    # [14,1] 是左上角
     # [1,BOARD_COL_COUNT] 是右下角
     # [BOARD_ROW_COUNT,BOARD_COL_COUNT] 是右上角
     left_bottom = grid_points[1][1]

@@ -24,7 +24,7 @@ if VISUAL_SERVO_DIR not in sys.path:
     sys.path.insert(0, VISUAL_SERVO_DIR)
 
 try:
-    from visual_servo_common import (
+    from visual_servo.visual_servo_common import (
         apply_camera_to_sucker_offset,
         load_visual_servo_config,
         run_visual_servo_alignment,
@@ -70,6 +70,24 @@ if __name__ == "__main__":
 
     # 下探吸取速度：正式启用视觉抓取前建议低速实测。
     PICK_SPEED = 60
+
+    # 视觉伺服收敛阈值，单位像素；连续多帧低于该阈值才认为对准成功。
+    VISUAL_ERROR_THRESHOLD_PX = 2.0
+
+    # 视觉伺服单次最大 XY 修正距离，单位 mm；防止识别异常导致一次移动过大。
+    VISUAL_MAX_STEP_MM = 5.0
+
+    # 视觉伺服最多迭代次数；每轮最多移动一次，也可能只是等待画面稳定。
+    VISUAL_MAX_ITER = 40
+
+    # 连续多少帧满足误差阈值才算成功，避免单帧抖动误判。
+    VISUAL_SUCCESS_STABLE_FRAMES = 5
+
+    # 连续多少帧未识别到方块才失败；单帧丢失只等待。
+    VISUAL_MAX_MISSED_FRAMES = 5
+
+    # 每次视觉伺服移动后的等待时间，单位秒；用于等机械臂和画面稳定。
+    VISUAL_SETTLE_SEC = 0.25
 
     # ========================= ROS 服务初始化 =========================
     rospy.wait_for_service("get_cube_pos")
@@ -205,9 +223,9 @@ if __name__ == "__main__":
         该策略需要现场验证不同区域、不同方块姿态下旧预测误差是否足够小，所以当前先保守留空。
         返回值未来会交给 send_arm_pose 和 align_camera_to_block 使用。
         """
-        message = "choose_block_rough_camera_pose 尚未实测：不能确定视觉伺服起始观察位"
+        message = "粗定位现在只使用1像素=0.5mm"
         print(f"\033[91m{message}\033[0m")
-        return False, list(shooting_angle), message
+        return True, list(shooting_angle), message
 
     def choose_block_pick_heights(x, y, z, t, index_cube):
         """决定视觉抓取的下探高度和抬起高度。
@@ -224,26 +242,49 @@ if __name__ == "__main__":
         """用方块视觉伺服把相机中心对准目标方块。
 
         start_pose 是 choose_block_rough_camera_pose 输出的观察位姿。
-        未来这里会调用 get_visual_target_offset 和 run_visual_servo_alignment。
-        当前故意返回失败，避免未验证闭环逻辑被误认为已经可以自动下探。
+        这里正式委托 visual_servo_common.run_visual_servo_alignment 执行闭环：
+        图像节点负责 get_visual_target_offset，公共函数负责像素误差到机械臂 XY 修正。
         返回格式固定为 success, camera_pose, message，供 down_pick_visual 统一处理。
         """
         if visual_target_offset is None:
             return False, list(start_pose), "视觉抓取未启用，未创建 get_visual_target_offset 服务代理"
         if run_visual_servo_alignment is None:
             return False, list(start_pose), "视觉伺服公共函数不可用，无法执行闭环对准"
-        return False, list(start_pose), "align_camera_to_block 尚未填实：暂不执行真实视觉闭环"
+        if not visual_servo_config:
+            return False, list(start_pose), "视觉伺服配置为空，无法执行闭环对准"
+
+        success, camera_pose, last_resp, message = run_visual_servo_alignment(
+            arm_control,
+            visual_target_offset,
+            start_pose,
+            visual_servo_config,
+            expected_category=expected_category,
+            speed=ARM_SPEED,
+            error_threshold_px=VISUAL_ERROR_THRESHOLD_PX,
+            max_step_mm=VISUAL_MAX_STEP_MM,
+            max_iter=VISUAL_MAX_ITER,
+            success_stable_frames=VISUAL_SUCCESS_STABLE_FRAMES,
+            max_missed_frames=VISUAL_MAX_MISSED_FRAMES,
+            settle_sec=VISUAL_SETTLE_SEC,
+        )
+        if not success:
+            return False, list(camera_pose), message
+        return True, list(camera_pose), message
 
     def make_sucker_pose_from_camera_pose(camera_pose):
         """相机中心对准方块后，换算吸盘中心应该到达的高位。
 
         输入 camera_pose 来自 align_camera_to_block。
-        未来这里会读取 visual_servo.yaml 的 camera_to_sucker_offset_mm。
-        当前故意返回失败，避免相机到吸盘偏移未复核时自动运动。
+        这里调用 visual_servo_common.apply_camera_to_sucker_offset，
+        使用 visual_servo.yaml 中的 camera_to_sucker_offset_mm。
+        该偏移是否适合当前吸取高度仍需要现场复核。
         """
         if apply_camera_to_sucker_offset is None:
             return False, list(camera_pose), "相机到吸盘偏移函数不可用"
-        return False, list(camera_pose), "make_sucker_pose_from_camera_pose 尚未实测：暂不应用相机到吸盘偏移"
+        if not visual_servo_config:
+            return False, list(camera_pose), "视觉伺服配置为空，无法应用相机到吸盘偏移"
+        sucker_pose = apply_camera_to_sucker_offset(camera_pose, visual_servo_config)
+        return True, list(sucker_pose), "已根据相机到吸盘偏移生成吸盘高位"
 
     def handle_block_servo_failed(index_cube, message):
         """处理方块视觉伺服失败。

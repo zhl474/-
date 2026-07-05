@@ -95,6 +95,12 @@ class ImageProcessor:
             "/home/zhl/桌面/托盘视觉伺服当前检测.jpg"
         )
 
+        # 机械臂 X 方向每 1 像素误差对应的开环移动量，单位 mm/px。在shooting_angle拍摄下
+        self.HIGH_ROUGH_X_MM_PER_PIXEL = 0.5
+
+        # 机械臂 Y 方向每 1 像素误差对应的开环移动量，单位 mm/px。
+        self.HIGH_ROUGH_Y_MM_PER_PIXEL = 0.5
+
         self.pixel2world_client = rospy.ServiceProxy("get_world_pos",pixel2world)
         self.pixel2world_client.wait_for_service()
 
@@ -146,10 +152,13 @@ class ImageProcessor:
             theta = block["theta"]
 
             cam_point3d = [0,0,0]
-################################################       9点标定法(托盘标定那里也要同步改)      #########################################################
-            predicted_x = x_predict(px,py)
-            predicted_y = y_predict(px,py)
-            predicted_z = z_predict(px,py)
+################################################       粗定位，移动到大概位置即可      #########################################################
+            h, w = img_bgr1.shape[:2]
+            center_x = w / 2.0
+            center_y = h / 2.0
+            predicted_x = self.shooting_angle[0]+(py-center_y)*self.HIGH_ROUGH_Y_MM_PER_PIXEL#这机械臂和相机坐标是反的
+            predicted_y = self.shooting_angle[1]+(px-center_x)*self.HIGH_ROUGH_X_MM_PER_PIXEL#这机械臂和相机坐标是反的
+            predicted_z = 200
             cam_point3d[0]=predicted_x
             cam_point3d[1]=predicted_y
             cam_point3d[2]=predicted_z
