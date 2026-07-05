@@ -7,8 +7,4 @@ arm.set_tcf(1, tcf)
 # ret, tool_pose = arm.get_tool_pose()
 # print(f"工具坐标系姿态 [XYZRPY]: {tool_pose}")
 shooting_angle = [-9,-351.252,320.273, 180, 0, -170]
-x=shooting_angle[1]
-for i in range(30):
-    shooting_angle = [-9,x,320.273, 180, 0, -170]
-    arm.set_tool_pose(shooting_angle)
-    x=x-1
+arm.set_tool_pose(shooting_angle)
