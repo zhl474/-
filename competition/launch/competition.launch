@@ -1,6 +1,9 @@
 <launch>
     <node pkg="camera" type="camera_node.py" name="camera_node" output="screen" />
-    <node pkg="image_process" type="process.py" name="image_process_node" output="screen"/>
+    <node pkg="image_process" type="process.py" name="image_process_node" output="screen">
+        <param name="save_top_surface_mask_vis" value="true"/>
+        <param name="top_surface_mask_vis_path" value="/home/zhl/桌面/top_surface_masks.jpg"/>
+    </node>
     <node pkg="control" type="controller.py" name="control_node" output="screen">
         <param name="servo_port" value="/dev/servo_motor"/>
         <param name="servo_baudrate" value="115200"/>

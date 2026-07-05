@@ -11,7 +11,7 @@ from ultralytics import YOLO
 import torch
 
 from image_process_lib.Place_optimization import get_all_cube, make_list, put_fenlei,cube_pocess,optimize_block_assignment,get_cube_location,get_put_pose
-from image_process_lib.block_detection import get_mask, coreect_LL_location
+from image_process_lib.block_detection import get_mask, coreect_LL_location, draw_mask_on_full_image
 from image_process_lib.template_config import load_template_sizes, get_template_size
 from image_process_lib.template_match.template_match import get_rect
 from image_process_lib.point_calibration import ArmCalibrator, x_predict,y_predict,z_predict
@@ -52,6 +52,11 @@ class ImageProcessor:
 
         self.results = None
         self.calibrator = ArmCalibrator()
+        self.save_top_surface_mask_vis = rospy.get_param("~save_top_surface_mask_vis", False)
+        self.top_surface_mask_vis_path = rospy.get_param(
+            "~top_surface_mask_vis_path",
+            "/home/zhl/桌面/top_surface_masks.jpg"
+        )
 
         self.pixel2world_client = rospy.ServiceProxy("get_world_pos",pixel2world)
         self.pixel2world_client.wait_for_service()
@@ -82,6 +87,7 @@ class ImageProcessor:
         new_camera_mtx, roi = cv2.getOptimalNewCameraMatrix(self.camera_matrix, self.dist_coeff, (w, h), 1, (w, h))
         img_bgr = cv2.undistort(img_bgr1, self.camera_matrix, self.dist_coeff, None, new_camera_mtx)#去畸变
         img_bgr2=np.copy(img_bgr)#复制一个数组，我们会在检测到的图片中画黑框开辅助判断，但黑框会影响颜色分割，所以复制一个数组，img_bgr用来检测画黑框，img_bgr2用来颜色分割
+        mask_vis_img = np.copy(img_bgr) if self.save_top_surface_mask_vis else None#用于把每个 ROI 的上表面掩码叠加回大图
         result = self.model(img_bgr,iou=0.5,conf=0.45)#yolo检测
         template_sizes = load_template_sizes()#每次服务调用读取一次模板尺寸配置，便于标定后直接生效
         # cv2.imwrite('/home/zhl/桌面/yolo识别.jpg', result[0].plot())
@@ -108,6 +114,8 @@ class ImageProcessor:
                 continue
             cropped_img = img_bgr[crop_y1:crop_y2, crop_x1:crop_x2]#根据裁剪边距调整后的 YOLO 框取出图像
             mask,hsv=get_mask(cropped_img,category)#颜色分割，mask是分割的图片二值化图
+            if self.save_top_surface_mask_vis:
+                draw_mask_on_full_image(mask_vis_img, mask, crop_x1, crop_y1)
             # cv2.imshow("mask",mask)
             # cv2.imshow("cropped_img",cropped_img)
             try:
@@ -160,6 +168,11 @@ class ImageProcessor:
         # cv2.waitKey(2000)
         # cv2.destroyAllWindows()
         cv2.imwrite('/home/zhl/桌面/cube_pos_image.jpg', img_bgr2)
+        if self.save_top_surface_mask_vis:
+            if cv2.imwrite(self.top_surface_mask_vis_path, mask_vis_img):
+                rospy.loginfo("上表面掩码可视化已保存: %s" % self.top_surface_mask_vis_path)
+            else:
+                rospy.logwarn("上表面掩码可视化保存失败: %s" % self.top_surface_mask_vis_path)
         # print("cubelist检查:",cube_list)
         if req.num==-2:
             test = CDLL("/home/zhl/SingleArmTetris/SingleArmTetris/src/jinjie/jinjie_libtetris.so") 

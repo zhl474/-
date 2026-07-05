@@ -196,6 +196,47 @@ def get_mask(img_input,category):
         return _get_mask_by_color(img_input,category)
 
 
+def draw_mask_on_full_image(full_image, mask, crop_x1, crop_y1, color=(0, 255, 0), alpha=0.35, draw_contour=True):
+    """把 ROI 内的上表面掩码叠加回大图对应位置。"""
+    if full_image is None or full_image.size == 0:
+        raise ValueError("输入大图为空")
+    if mask is None or mask.size == 0:
+        raise ValueError("输入掩码为空")
+
+    mask_h, mask_w = mask.shape[:2]
+    image_h, image_w = full_image.shape[:2]
+    crop_x1 = int(crop_x1)
+    crop_y1 = int(crop_y1)
+    x1 = max(0, crop_x1)
+    y1 = max(0, crop_y1)
+    x2 = min(image_w, crop_x1 + mask_w)
+    y2 = min(image_h, crop_y1 + mask_h)
+    if x2 <= x1 or y2 <= y1:
+        return full_image
+
+    # 大图边界裁剪后，需要同步裁剪 ROI 掩码，防止靠边方块越界。
+    mask_x1 = x1 - crop_x1
+    mask_y1 = y1 - crop_y1
+    mask_x2 = mask_x1 + (x2 - x1)
+    mask_y2 = mask_y1 + (y2 - y1)
+    roi = full_image[y1:y2, x1:x2]
+    mask_roi = mask[mask_y1:mask_y2, mask_x1:mask_x2] > 0
+    if not np.any(mask_roi):
+        return full_image
+
+    colored_roi = roi.copy()
+    colored_roi[mask_roi] = color
+    blended_roi = cv2.addWeighted(roi, 1.0 - alpha, colored_roi, alpha, 0)
+    roi[mask_roi] = blended_roi[mask_roi]
+
+    if draw_contour:
+        contour_mask = (mask_roi.astype(np.uint8) * 255)
+        contours, _ = cv2.findContours(contour_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(roi, contours, -1, color, 1)
+
+    return full_image
+
+
 def get_length(point1,point2):
         return math.sqrt((point1[0]-point2[0])**2+(point1[1]-point2[1])**2)
 def coreect_LL_location(box,mask,rect):#获取L方块长边偏下的位置，L方块系中间吸不到（不用细看）

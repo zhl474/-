@@ -9,7 +9,7 @@ base_L_yellow = np.zeros((37+5+37, 37+5+37+5+37), dtype=np.float32)
 base_L_yellow[0:37+5,37+5+37+5:] = 1
 base_L_yellow[37+5:,:] = 1
 
-base_L_blue = np.zeros((37+5+37, 37+5+37+5+37+2), dtype=np.float32)
+base_L_blue = np.zeros((37+5+37, 37+5+37+5+37), dtype=np.float32)
 base_L_blue[0:37+5,:37] = 1
 base_L_blue[37+5:,:] = 1
 
