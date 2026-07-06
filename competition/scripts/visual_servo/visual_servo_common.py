@@ -64,6 +64,24 @@ def pixel_error_to_robot_delta(dx_px, dy_px, pixel_to_robot_matrix, max_step_mm)
     return limit_xy_step(delta_xy, max_step_mm)
 
 
+def print_visual_servo_timing(iter_idx, loop_start_time, request_sec, move_sec=None, sleep_sec=0.0, last_loop_start_time=None):
+    """打印每轮视觉伺服耗时，方便判断闭环控制频率和慢点。"""
+    loop_sec = time.monotonic() - loop_start_time
+    period_text = "首轮"
+    if last_loop_start_time is not None:
+        period_text = f"{loop_start_time - last_loop_start_time:.3f}s/轮"
+
+    move_text = "无移动"
+    if move_sec is not None:
+        move_text = f"移动={move_sec:.3f}s"
+
+    print(
+        f"[视觉伺服计时] 第 {iter_idx + 1} 轮: "
+        f"周期={period_text}，本轮耗时={loop_sec:.3f}s，"
+        f"识别={request_sec:.3f}s，{move_text}，等待={sleep_sec:.3f}s"
+    )
+
+
 def run_offset_visual_servo_alignment(
     get_offset_func,
     move_pose_func,
@@ -89,17 +107,35 @@ def run_offset_visual_servo_alignment(
     missed_count = 0
     last_resp = None
     pixel_to_robot_matrix = config["pixel_to_robot_matrix"]
+    last_loop_start_time = None
 
     for iter_idx in range(max_iter):
+        loop_start_time = time.monotonic()
+        request_start_time = time.monotonic()
         resp = get_offset_func()
+        request_sec = time.monotonic() - request_start_time
         last_resp = resp
         if not resp.found:
             missed_count += 1
             stable_count = 0
             print(f"[视觉伺服] 第 {iter_idx + 1} 轮未识别，连续丢失 {missed_count}/{max_missed_frames}: {resp.message}")
             if missed_count >= max_missed_frames:
+                print_visual_servo_timing(
+                    iter_idx,
+                    loop_start_time,
+                    request_sec,
+                    last_loop_start_time=last_loop_start_time,
+                )
                 return False, pose, last_resp, "连续多帧未识别到目标"
             time.sleep(settle_sec)
+            print_visual_servo_timing(
+                iter_idx,
+                loop_start_time,
+                request_sec,
+                sleep_sec=settle_sec,
+                last_loop_start_time=last_loop_start_time,
+            )
+            last_loop_start_time = loop_start_time
             continue
 
         missed_count = 0
@@ -113,8 +149,22 @@ def run_offset_visual_servo_alignment(
                 f"连续成功 {stable_count}/{success_stable_frames}"
             )
             if stable_count >= success_stable_frames:
+                print_visual_servo_timing(
+                    iter_idx,
+                    loop_start_time,
+                    request_sec,
+                    last_loop_start_time=last_loop_start_time,
+                )
                 return True, pose, last_resp, "视觉伺服对准成功"
             time.sleep(settle_sec)
+            print_visual_servo_timing(
+                iter_idx,
+                loop_start_time,
+                request_sec,
+                sleep_sec=settle_sec,
+                last_loop_start_time=last_loop_start_time,
+            )
+            last_loop_start_time = loop_start_time
             continue
 
         stable_count = 0
@@ -131,7 +181,18 @@ def run_offset_visual_servo_alignment(
             f"误差=({resp.dx_px:.2f},{resp.dy_px:.2f})px，"
             f"修正=({delta_xy[0]:.3f},{delta_xy[1]:.3f})mm，目标pose={pose}"
         )
+        move_start_time = time.monotonic()
         move_pose_func(pose, speed=speed, wait_sec=settle_sec)
+        move_sec = time.monotonic() - move_start_time
+        print_visual_servo_timing(
+            iter_idx,
+            loop_start_time,
+            request_sec,
+            move_sec=move_sec,
+            sleep_sec=settle_sec,
+            last_loop_start_time=last_loop_start_time,
+        )
+        last_loop_start_time = loop_start_time
 
     return False, pose, last_resp, "达到最大迭代次数仍未连续稳定"
 

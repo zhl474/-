@@ -495,16 +495,6 @@ if __name__ == "__main__":
             return False, list(camera_pose), message
         return True, list(camera_pose), message
 
-    def make_place_pose_from_camera_pose(camera_pose, theta_place, index_cube):
-        """相机对准目标格点后，计算吸盘/持块中心摆放位。
-
-        当前 camera_to_sucker_offset_mm 标定的是相机中心到吸盘中心的 XY 偏移。
-        托盘摆放时手上拿着方块，真正需要对准的可能是“持块中心”而不是裸吸盘中心，
-        不同方块形状和舵机角度也可能影响偏移。因此这里先保守占位，后续实测后再填。
-        """
-        message = "make_place_pose_from_camera_pose 尚未实测：不能确定持块中心相对相机的摆放偏移"
-        print(f"\033[91m{message}\033[0m")
-        return False, list(camera_pose), message
 
     def choose_board_place_heights(index_cube, row, col):
         """集中管理托盘摆放高位、下放高度和抬起高度。
@@ -541,7 +531,7 @@ if __name__ == "__main__":
         if not success:
             handle_place_servo_failed(index_cube, message)
 
-        success, place_pose, message = make_place_pose_from_camera_pose(camera_pose, theta_place, index_cube)
+        success, place_pose, message = make_sucker_pose_from_camera_pose(camera_pose)
         if not success:
             handle_place_servo_failed(index_cube, message)
 

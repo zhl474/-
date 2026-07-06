@@ -206,6 +206,9 @@ class ImageProcessor:
     def __init__(self):
         self.bridge = CvBridge()
         self.latest_image = None
+        self.board_grid_points = None
+        self.board_grid_image_shape = None
+        self.board_grid_image = None
         self.image_sub = rospy.Subscriber("/camera/image_raw", Image, self.image_callback)
         self.service1 = rospy.Service("get_cube_pos", GetTargetPos,self.get_cube_pos)
         self.service2 = rospy.Service("get_board_pos", GetTargetPos,self.get_board_pos)
@@ -260,14 +263,26 @@ class ImageProcessor:
             "~visual_board_debug_path",
             "/home/zhl/桌面/托盘视觉伺服当前检测.jpg"
         )
+        default_visual_board_debug_video_path = os.path.splitext(self.visual_board_debug_path)[0] + ".avi"
+        self.visual_board_debug_video_path = rospy.get_param(
+            "~visual_board_debug_video_path",
+            default_visual_board_debug_video_path,
+        )
+        self.visual_board_debug_video_fps = rospy.get_param("~visual_board_debug_video_fps", 10.0)
+        self.visual_board_debug_video_enabled = rospy.get_param("~visual_board_debug_video_enabled", True)
+        self.visual_board_debug_recorder = DebugVideoRecorder(
+            self.visual_board_debug_video_path,
+            fps=self.visual_board_debug_video_fps,
+            enabled=self.visual_board_debug_video_enabled,
+        )
         self.visual_board_grid_debug_path = rospy.get_param(
             "~visual_board_grid_debug_path",
             "/home/zhl/桌面/托盘格点粗定位.jpg"
         )
-        self.board_low_roi_half_size = rospy.get_param("~board_low_roi_half_size", 120)
-        self.board_low_blackhat_kernel_size = rospy.get_param("~board_low_blackhat_kernel_size", 15)
-        self.board_low_min_dot_area = rospy.get_param("~board_low_min_dot_area", 20)
-        self.board_low_max_dot_area = rospy.get_param("~board_low_max_dot_area", 250)
+        self.board_low_roi_half_size = rospy.get_param("~board_low_roi_half_size", 90)
+        self.board_low_blackhat_kernel_size = rospy.get_param("~board_low_blackhat_kernel_size", 27)
+        self.board_low_min_dot_area = rospy.get_param("~board_low_min_dot_area", 200)
+        self.board_low_max_dot_area = rospy.get_param("~board_low_max_dot_area", 800)
         self.board_low_min_dot_circularity = rospy.get_param("~board_low_min_dot_circularity", 0.35)
         self.board_low_max_dot_aspect_ratio = rospy.get_param("~board_low_max_dot_aspect_ratio", 1.8)
         self.block_low_roi_expand_px = rospy.get_param("~block_low_roi_expand_px", 50)
@@ -291,6 +306,8 @@ class ImageProcessor:
         """节点退出时释放视频文件句柄，避免最后几帧没有写入文件。"""
         if hasattr(self, "visual_servo_debug_recorder"):
             self.visual_servo_debug_recorder.release()
+        if hasattr(self, "visual_board_debug_recorder"):
+            self.visual_board_debug_recorder.release()
 
     def save_visual_servo_debug_frame(self, debug_image, video_image=None):
         """保存当前调试图，同时把关键调试拼图追加到视觉伺服视频。"""
@@ -298,6 +315,13 @@ class ImageProcessor:
         video_frame = video_image if video_image is not None else debug_image
         video_saved = self.visual_servo_debug_recorder.write(video_frame)
         return image_saved and (video_saved or not self.visual_servo_debug_video_enabled)
+
+    def save_visual_board_debug_frame(self, debug_image, video_image=None):
+        """保存托盘当前调试图，同时把关键调试拼图追加到托盘伺服视频。"""
+        image_saved = save_image_to_path(self.visual_board_debug_path, debug_image)
+        video_frame = video_image if video_image is not None else debug_image
+        video_saved = self.visual_board_debug_recorder.write(video_frame)
+        return image_saved and (video_saved or not self.visual_board_debug_video_enabled)
 
     def image_callback(self, msg):
         try:
@@ -381,6 +405,9 @@ class ImageProcessor:
         return GetTargetPosResponse([len(self.pick_list)])
     
     def get_board_pos(self, req):
+        self.board_grid_points = None
+        self.board_grid_image_shape = None
+        self.board_grid_image = None
         img_bgr1 = self.latest_image
         if img_bgr1 is None:
             rospy.logwarn("没有可用图像，无法识别托盘")
@@ -393,9 +420,23 @@ class ImageProcessor:
             print("没有图片")
             return GetTargetPosResponse([0.0])
         try:
-            self.calibrator.board_detector(board_bgr,self.pixel2world_client)
+            detect_result = board_grid_detect(board_bgr, debug_path=self.visual_board_grid_debug_path)
+            if not detect_result["found"]:
+                raise RuntimeError(detect_result["message"])
+
+            self.board_grid_points = detect_result["grid_points"]
+            self.board_grid_image_shape = board_bgr.shape[:2]
+            self.board_grid_image = board_bgr.copy()
+            center_point = (board_bgr.shape[1] / 2.0, board_bgr.shape[0] / 2.0)
+            debug_image = draw_grid_debug(board_bgr, self.board_grid_points, center_point=center_point)
+            save_image_to_path(self.visual_board_grid_debug_path, debug_image)
+
+            self.calibrator.board_detector_from_grid_points(self.board_grid_points)
             self.calibrator.calibrate()#托盘识别结束
         except Exception as exc:
+            self.board_grid_points = None
+            self.board_grid_image_shape = None
+            self.board_grid_image = None
             rospy.logerr("托盘识别失败: %s" % exc)
             print("\033[91m托盘识别失败，请重新识别。\033[0m")
             return GetTargetPosResponse([0.0])
@@ -457,10 +498,9 @@ class ImageProcessor:
             rospy.logwarn("摆放序号越界: %s，当前可用数量: %s" % (req.num, len(self.pick_list)))
             return GetTargetPosResponse(array=[])
 
-        img_bgr1 = self.latest_image
-        if img_bgr1 is None:
-            rospy.logwarn("没有可用图像，无法计算托盘粗观察位")
-            print("\033[91m没有可用图像，无法计算托盘粗观察位。\033[0m")
+        if self.board_grid_points is None or self.board_grid_image_shape is None:
+            rospy.logwarn("尚未缓存托盘格点，无法计算托盘粗观察位")
+            print("\033[91m尚未缓存托盘格点，请先在高位完成托盘识别。\033[0m")
             return GetTargetPosResponse(array=[])
 
         pick_cube = self.pick_list[req.num]
@@ -468,31 +508,12 @@ class ImageProcessor:
         row = float(pick_cube[1])
 
         try:
-            h, w = img_bgr1.shape[:2]
-            new_camera_mtx, roi = cv2.getOptimalNewCameraMatrix(
-                self.camera_matrix,
-                self.dist_coeff,
-                (w, h),
-                1,
-                (w, h),
-            )
-            board_bgr = cv2.undistort(img_bgr1, self.camera_matrix, self.dist_coeff, None, new_camera_mtx)#去畸变
-            if board_bgr is None:
-                raise RuntimeError("去畸变后图像为空")
-
-            detect_result = board_grid_detect(board_bgr, debug_path=self.visual_board_grid_debug_path)
-            if not detect_result["found"]:
-                message = detect_result["message"]
-                rospy.logwarn("托盘粗定位格点识别失败: %s" % message)
-                print(f"\033[91m托盘粗定位格点识别失败: {message}\033[0m")
-                return GetTargetPosResponse(array=[])
-
-            grid_points = detect_result["grid_points"]
+            grid_points = self.board_grid_points
             target_point = interpolate_grid_point(grid_points, row, col)
             px = float(target_point[0])
             py = float(target_point[1])
 
-            h, w = board_bgr.shape[:2]
+            h, w = self.board_grid_image_shape
             center_x = w / 2.0
             center_y = h / 2.0
             predicted_x = self.shooting_angle[0] + (py - center_y) * self.high_rough_y_mm_per_pixel  # 机械臂和相机坐标是反的
@@ -507,13 +528,14 @@ class ImageProcessor:
                 float(self.shooting_angle[5]),
             ]
 
-            debug_image = draw_grid_debug(
-                board_bgr,
-                grid_points,
-                target_point=target_point,
-                center_point=(center_x, center_y),
-            )
-            save_image_to_path(self.visual_board_grid_debug_path, debug_image)
+            if self.board_grid_image is not None:
+                debug_image = draw_grid_debug(
+                    self.board_grid_image,
+                    grid_points,
+                    target_point=target_point,
+                    center_point=(center_x, center_y),
+                )
+                save_image_to_path(self.visual_board_grid_debug_path, debug_image)
             print(
                 "托盘粗观察位",
                 "序号", req.num,
@@ -674,7 +696,10 @@ class ImageProcessor:
                 row=row,
                 col=col,
             )
+            debug_image = detect_result.get("debug_image")
+            debug_panel = detect_result.get("debug_panel")
             if not detect_result["found"]:
+                self.save_visual_board_debug_frame(debug_image, debug_panel)
                 return self.make_visual_servo_result(
                     found=False,
                     target_type="board",
@@ -684,6 +709,7 @@ class ImageProcessor:
             target_point = detect_result["point"]
             dx_px = float(target_point[0] - center_x)
             dy_px = float(target_point[1] - center_y)
+            self.save_visual_board_debug_frame(debug_image, debug_panel)
 
             return self.make_visual_servo_result(
                 found=True,

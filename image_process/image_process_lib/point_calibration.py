@@ -1,7 +1,7 @@
 from scipy.optimize import linear_sum_assignment
 import numpy as np
 import cv2
-from image_process_lib.board_detect import board_detect
+from image_process_lib.board_detect import BOARD_COL_COUNT, BOARD_ROW_COUNT, board_detect
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
 
@@ -199,9 +199,9 @@ class ArmCalibrator:
             raise ValueError("托盘标定投影结果包含无效数值，请重新标定托盘")
         return u, v
 
-    def board_detector(self,board_bgr,pixel2world_client):
+    def _set_board_calibration_points(self, board_cam_4_points):
+        """根据托盘四角像素点更新托盘角度和标定目标点。"""
         self.dst_points = []
-        board_cam_4_points = board_detect(board_bgr)
         if len(board_cam_4_points) != 4 or not np.all(np.isfinite(board_cam_4_points)):
             raise ValueError("托盘角点识别结果无效，请检查托盘是否完整进入画面")
         print("托盘像素坐标",board_cam_4_points)
@@ -230,6 +230,18 @@ class ArmCalibrator:
         # cv2.waitKey(2000)
         # cv2.destroyAllWindows()
 
+    def board_detector(self,board_bgr,pixel2world_client):
+        board_cam_4_points = board_detect(board_bgr)
+        self._set_board_calibration_points(board_cam_4_points)
+
+    def board_detector_from_grid_points(self, grid_points):
+        """使用已经识别出的 140 个托盘格点更新旧托盘标定。"""
+        left_bottom = grid_points[1][1]
+        left_top = grid_points[BOARD_ROW_COUNT][1]
+        right_bottom = grid_points[1][BOARD_COL_COUNT]
+        right_top = grid_points[BOARD_ROW_COUNT][BOARD_COL_COUNT]
+        board_cam_4_points = np.array([left_top, left_bottom, right_top, right_bottom], dtype=np.float32)
+        self._set_board_calibration_points(board_cam_4_points)
 
 
 

@@ -113,6 +113,116 @@ def _put_chinese_text(image, text, org, color, font_size=22):
         )
 
 
+def _to_bgr(image):
+    """把灰度图或透明图统一转成 BGR，便于拼接视频帧。"""
+    if image is None:
+        return np.zeros((1, 1, 3), dtype=np.uint8)
+    if len(image.shape) == 2:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    return image.copy()
+
+
+def _fit_image_to_cell(image, cell_w, cell_h):
+    """等比例缩放图像并放进固定大小单元格，保持视频帧尺寸稳定。"""
+    image = _to_bgr(image)
+    h, w = image.shape[:2]
+    if h <= 0 or w <= 0:
+        return np.zeros((cell_h, cell_w, 3), dtype=np.uint8)
+
+    scale = min(float(cell_w) / float(w), float(cell_h) / float(h))
+    resized_w = max(1, int(round(w * scale)))
+    resized_h = max(1, int(round(h * scale)))
+    resized = cv2.resize(image, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
+    canvas = np.zeros((cell_h, cell_w, 3), dtype=np.uint8)
+    x = (cell_w - resized_w) // 2
+    y = (cell_h - resized_h) // 2
+    canvas[y:y + resized_h, x:x + resized_w] = resized
+    return canvas
+
+
+def _make_panel_cell(title, image, cell_w=360, cell_h=260, title_h=34):
+    """生成带中文标题的托盘调试拼图单元。"""
+    cell = np.zeros((cell_h, cell_w, 3), dtype=np.uint8)
+    cell[:title_h, :] = (35, 35, 35)
+    _put_chinese_text(cell, title, (10, 6), (255, 255, 255), font_size=22)
+    cell[title_h:, :] = _fit_image_to_cell(image, cell_w, cell_h - title_h)
+    cv2.rectangle(cell, (0, 0), (cell_w - 1, cell_h - 1), (80, 80, 80), 1)
+    return cell
+
+
+def _draw_low_board_roi_local_debug(roi, threshold_img, candidates, selected_candidate, roi_offset):
+    """在 ROI 局部坐标上画候选圆点，便于检查筛选条件。"""
+    debug = _to_bgr(roi)
+    offset_x, offset_y = roi_offset
+    for candidate in candidates:
+        x, y, width, height = candidate["bbox"]
+        local_x = int(round(float(x) - float(offset_x)))
+        local_y = int(round(float(y) - float(offset_y)))
+        cv2.rectangle(debug, (local_x, local_y), (local_x + int(width), local_y + int(height)), (0, 180, 0), 1)
+        px = int(round(float(candidate["px"]) - float(offset_x)))
+        py = int(round(float(candidate["py"]) - float(offset_y)))
+        cv2.circle(debug, (px, py), 4, (0, 255, 0), 1)
+
+    if selected_candidate is not None:
+        px = int(round(float(selected_candidate["px"]) - float(offset_x)))
+        py = int(round(float(selected_candidate["py"]) - float(offset_y)))
+        cv2.drawMarker(
+            debug,
+            (px, py),
+            (0, 0, 255),
+            markerType=cv2.MARKER_CROSS,
+            markerSize=22,
+            thickness=2,
+        )
+
+    threshold_debug = _to_bgr(threshold_img)
+    blended = cv2.addWeighted(debug, 0.65, threshold_debug, 0.35, 0)
+    return blended
+
+
+def make_low_board_debug_panel(
+    image,
+    roi_bounds,
+    roi,
+    gray,
+    blackhat,
+    threshold_img,
+    candidates,
+    selected_candidate,
+    final_debug,
+    message="",
+):
+    """把低位托盘伺服关键阶段拼成一帧视频图。"""
+    x1, y1, x2, y2 = roi_bounds
+    roi_source = image.copy() if image is not None else None
+    if roi_source is not None:
+        cv2.rectangle(roi_source, (x1, y1), (x2, y2), (0, 255, 255), 2)
+
+    candidates_debug = _draw_low_board_roi_local_debug(
+        roi,
+        threshold_img,
+        candidates,
+        selected_candidate,
+        (x1, y1),
+    )
+    cells = [
+        _make_panel_cell("1 原图与中心ROI", roi_source),
+        _make_panel_cell("2 裁剪ROI原图", roi),
+        _make_panel_cell("3 ROI灰度图", gray),
+        _make_panel_cell("4 黑帽增强图", blackhat),
+        _make_panel_cell("5 Otsu二值与候选", candidates_debug),
+        _make_panel_cell("6 最终选点结果", final_debug),
+    ]
+    top = np.hstack(cells[:3])
+    bottom = np.hstack(cells[3:])
+    panel = np.vstack([top, bottom])
+    if message:
+        _put_chinese_text(panel, message, (12, panel.shape[0] - 30), (0, 255, 255), font_size=22)
+    return panel
+
+
 def _make_blob_detector():
     """创建托盘格点 blob 检测器，用于检测白色圆点。"""
     params = cv2.SimpleBlobDetector_Params()
@@ -335,6 +445,22 @@ def detect_nearest_board_dot_in_roi(
         row=row,
         col=col,
     )
+    row_col_text = f"目标行列=({float(row):.2f},{float(col):.2f})" if row is not None and col is not None else ""
+    selected_text = "未选中圆点" if selected_candidate is None else (
+        f"选中圆点 面积={selected_candidate['area']:.1f} 圆度={selected_candidate['circularity']:.2f}"
+    )
+    debug_panel = make_low_board_debug_panel(
+        img,
+        roi_bounds,
+        roi,
+        gray,
+        blackhat,
+        threshold_img,
+        candidates,
+        selected_candidate,
+        debug_image,
+        message=f"候选数量={len(candidates)} {selected_text} {row_col_text}",
+    )
     _save_debug_image(debug_path, debug_image)
 
     if selected_candidate is None:
@@ -343,8 +469,12 @@ def detect_nearest_board_dot_in_roi(
             "point": None,
             "candidates": candidates,
             "debug_image": debug_image,
+            "debug_panel": debug_panel,
             "message": "低位 ROI 内未检测到托盘圆点",
             "count": 0,
+            "blackhat_image": blackhat,
+            "threshold_image": threshold_img,
+            "roi_bounds": roi_bounds,
         }
 
     point = np.array([selected_candidate["px"], selected_candidate["py"]], dtype=np.float32)
@@ -356,6 +486,8 @@ def detect_nearest_board_dot_in_roi(
         "message": "低位托盘圆点识别成功",
         "count": len(candidates),
         "selected": selected_candidate,
+        "debug_panel": debug_panel,
+        "blackhat_image": blackhat,
         "threshold_image": threshold_img,
         "roi_bounds": roi_bounds,
     }
