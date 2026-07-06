@@ -103,7 +103,7 @@ if __name__ == "__main__":
 
     ROUGH_LOOK_Z = 200.0
     SERVO_LOOK_Z = 200.0
-    PICK_Z = 180.0
+    PICK_Z = 170.0
     LIFT_Z = 205.0
     ARM_SPEED = 40
     PICK_SPEED = 25
@@ -112,6 +112,7 @@ if __name__ == "__main__":
     PLACE_LIFT_STEP_MM = 20.0
 
     VISUAL_ERROR_THRESHOLD_PX = 2.0
+    VISUAL_MIN_STEP_MM = 0.1
     VISUAL_MAX_STEP_MM = 5.0
     VISUAL_MAX_ITER = 40
     VISUAL_SUCCESS_STABLE_FRAMES = 5
@@ -390,6 +391,7 @@ if __name__ == "__main__":
             speed=ARM_SPEED,
             error_threshold_px=VISUAL_ERROR_THRESHOLD_PX,
             max_step_mm=VISUAL_MAX_STEP_MM,
+            min_step_mm=VISUAL_MIN_STEP_MM,
             max_iter=VISUAL_MAX_ITER,
             success_stable_frames=VISUAL_SUCCESS_STABLE_FRAMES,
             max_missed_frames=VISUAL_MAX_MISSED_FRAMES,
@@ -486,6 +488,7 @@ if __name__ == "__main__":
             speed=ARM_SPEED,
             error_threshold_px=VISUAL_ERROR_THRESHOLD_PX,
             max_step_mm=VISUAL_MAX_STEP_MM,
+            min_step_mm=VISUAL_MIN_STEP_MM,
             max_iter=VISUAL_MAX_ITER,
             success_stable_frames=VISUAL_SUCCESS_STABLE_FRAMES,
             max_missed_frames=VISUAL_MAX_MISSED_FRAMES,
@@ -541,8 +544,8 @@ if __name__ == "__main__":
         place_high_pose[5] = shooting_angle[5]
         send_arm_pose(place_high_pose, speed=ARM_SPEED, theta_deg=theta_place, label="托盘视觉摆放高位")
 
-        if not verify_place_before_down(place_high_pose, index_cube):
-            handle_place_servo_failed(index_cube, "人工取消托盘下放")
+        # if not verify_place_before_down(place_high_pose, index_cube):
+        #     handle_place_servo_failed(index_cube, "人工取消托盘下放")
 
         place_down_pose = list(place_high_pose)
         place_down_pose[2] = place_down_z

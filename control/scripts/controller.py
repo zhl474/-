@@ -104,9 +104,9 @@ class Control:
 
     def arm_control(self,req):
         pose = req.pose
-        if req.pose[2]<157:
-            pose[2] = 157
-            rospy.logerr("高度小于160过低,拒绝运动")
+        if req.pose[2]<165:
+            pose[2] = 165
+            rospy.logerr("高度小于165过低,拒绝运动")
             print("目标高度",req.pose)
         # else:
         self.arm.set_speed(req.speed)

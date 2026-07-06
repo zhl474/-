@@ -42,26 +42,36 @@ def save_visual_servo_config(config, config_path=VISUAL_SERVO_CONFIG_PATH):
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
 
 
-def limit_xy_step(delta_xy, max_step_mm):
-    """限制单次 XY 修正量，防止一次识别错误导致机械臂大幅运动。"""
+def limit_xy_step(delta_xy, max_step_mm, min_step_mm=0.0):
+    """限制单次 XY 修正量，让每轮移动保持在最小和最大步长之间。"""
     delta_xy = np.array(delta_xy, dtype=float)
     norm = float(np.linalg.norm(delta_xy))
-    if norm <= max_step_mm or norm <= 1e-9:
-        return delta_xy
-    return delta_xy / norm * max_step_mm
+    max_step_mm = float(max_step_mm)
+    min_step_mm = max(0.0, float(min_step_mm))
+    if max_step_mm <= 0.0 or norm <= 1e-9:
+        return delta_xy * 0.0
+
+    min_step_mm = min(min_step_mm, max_step_mm)
+    if norm > max_step_mm:
+        return delta_xy / norm * max_step_mm
+    if norm < min_step_mm:
+        return delta_xy / norm * min_step_mm
+    return delta_xy
 
 
-def pixel_error_to_robot_delta(dx_px, dy_px, pixel_to_robot_matrix, max_step_mm):
-    """把像素误差换算成机械臂 XY 修正量，并做限幅。
+def pixel_error_to_robot_delta(dx_px, dy_px, pixel_to_robot_matrix, max_step_mm, min_step_mm=0.0):
+    """把像素误差换算成机械臂 XY 修正量，并做步长限幅。
 
     pixel_to_robot_matrix 表示 [dx_px, dy_px] 到 [dx_mm, dy_mm] 的局部线性映射。
+    min_step_mm 只在误差超过对准阈值、确实需要移动时生效，避免小修正被机械臂分辨率或噪声吃掉。
+    max_step_mm 防止一次识别错误导致机械臂大幅运动。
     方块和托盘暂时共用同一矩阵；如果后续实测发现高度或目标不同导致映射不同，
     再把配置拆成 block_pixel_to_robot_matrix 和 board_pixel_to_robot_matrix。
     """
     matrix = np.array(pixel_to_robot_matrix, dtype=float)
     pixel_error = np.array([float(dx_px), float(dy_px)], dtype=float)
     delta_xy = matrix @ pixel_error
-    return limit_xy_step(delta_xy, max_step_mm)
+    return limit_xy_step(delta_xy, max_step_mm, min_step_mm=min_step_mm)
 
 
 def print_visual_servo_timing(iter_idx, loop_start_time, request_sec, move_sec=None, sleep_sec=0.0, last_loop_start_time=None):
@@ -94,6 +104,7 @@ def run_offset_visual_servo_alignment(
     success_stable_frames,
     max_missed_frames,
     settle_sec,
+    min_step_mm=0.0,
 ):
     """通用视觉伺服闭环。
 
@@ -173,6 +184,7 @@ def run_offset_visual_servo_alignment(
             resp.dy_px,
             pixel_to_robot_matrix,
             max_step_mm,
+            min_step_mm=min_step_mm,
         )
         pose[0] += float(delta_xy[0])
         pose[1] += float(delta_xy[1])
