@@ -35,6 +35,17 @@ except Exception as exc:
 # 高位全场拍摄位姿。process.py 里也有同一份值，后面如果要彻底整理，应先统一接口再移动。
 BASE_SHOOTING_ANGLE = [-250.4151306152343, 22.14801216125488, 380.3343505859375, -180, 0, 90]
 
+# 与 image_process_lib.block_category.BLOCK_CATEGORY_NAMES 保持一致。
+BLOCK_CATEGORY_NAMES = (
+    "L_blue",
+    "L_yellow",
+    "z_blue",
+    "z_green",
+    "square",
+    "T",
+    "line",
+)
+
 
 def build_base_pick_list(include_index=False):
     """基础任务摆放表：col、row、目标角度、方块类别。"""
@@ -50,6 +61,29 @@ def build_base_pick_list(include_index=False):
         for index, item in enumerate(pick_list):
             item.append(index)
     return pick_list
+
+
+def decode_category_code(category_code):
+    """把图像节点返回的类别码转换成方块类别名。"""
+    try:
+        index = int(round(float(category_code)))
+    except (TypeError, ValueError):
+        return ""
+    if 0 <= index < len(BLOCK_CATEGORY_NAMES):
+        return BLOCK_CATEGORY_NAMES[index]
+    return ""
+
+
+def parse_cube_location_response(array, fallback_category=""):
+    """解析 get_cube_location 响应，兼容旧版 5 项返回。"""
+    values = list(array)
+    if len(values) < 5:
+        raise ValueError(f"get_cube_location 返回长度不足: {len(values)}")
+    x, y, z, t, xuanzhuan_angle = [float(value) for value in values[:5]]
+    high_category = decode_category_code(values[5]) if len(values) >= 6 else ""
+    if not high_category:
+        high_category = str(fallback_category or "").strip()
+    return x, y, z, t, xuanzhuan_angle, high_category
 
 
 if __name__ == "__main__":
@@ -430,17 +464,6 @@ if __name__ == "__main__":
             return str(pick_list[index_cube][3])
         return ""
 
-    def choose_board_rough_camera_pose(put_pose, row, col, index_cube):
-        """决定托盘视觉伺服开始前相机观察位。
-
-        put_pose 来自旧 get_put_pose，含义更接近吸盘/末端摆放位，不一定是相机观察位。
-        这里后续要解决：机械臂先去哪里，才能让目标 row/col 进入相机视野且不被手上方块遮挡。
-        当前没有实测策略，因此保守失败，不让托盘视觉摆放直接运动。
-        """
-        message = "choose_board_rough_camera_pose 尚未实测：不能确定托盘视觉伺服起始观察位"
-        print(f"\033[91m{message}\033[0m")
-        return False, list(put_pose), message
-
     def align_camera_to_board_target(start_pose, row, col):
         """用托盘视觉伺服把相机中心对准目标格点。
 
@@ -508,12 +531,11 @@ if __name__ == "__main__":
         """托盘视觉伺服摆放骨架。
 
         流程：粗观察位 -> 对准托盘目标格点 -> 换算持块摆放位 -> 下放 -> 喷气 -> 抬起。
-        当前观察位和持块中心偏移仍是占位函数，USE_VISUAL_PLACE 默认 False。
+        put_pose 由 get_put_pose 返回，是基于高位托盘140格点计算出的相机粗观察位。
+        当前持块中心偏移仍是占位函数，闭环成功后仍会保守中断，不自动下放。
         """
-        rough_ok, rough_camera_pose, message = choose_board_rough_camera_pose(put_pose, row, col, index_cube)
-        if not rough_ok:
-            handle_place_servo_failed(index_cube, message)
-
+        rough_camera_pose = list(put_pose)
+        print(f"第 {index_cube} 个方块托盘视觉摆放粗观察位: {rough_camera_pose}，目标行列=({row}, {col})")
         send_arm_pose(rough_camera_pose, speed=ARM_SPEED, theta_deg=theta_place, label="托盘视觉摆放粗定位")
         success, camera_pose, message = align_camera_to_board_target(rough_camera_pose, row, col)
         if not success:
@@ -683,10 +705,15 @@ if __name__ == "__main__":
         GetTargetPos_req.num = i
         # 先获取方块粗坐标和角度。视觉抓取启用后，这里只作为粗定位输入。
         resp = get_cube_location.call(GetTargetPos_req)
-        x, y, z, t, xuanzhuan_angle = resp.array
+        fallback_category = get_expected_block_category(i)
+        x, y, z, t, xuanzhuan_angle, high_category = parse_cube_location_response(
+            resp.array,
+            fallback_category=fallback_category,
+        )
 
         if USE_VISUAL_PICK:
-            expected_category = get_expected_block_category(i)
+            # 显式配置优先；正常比赛流程优先使用 process.py 当前任务返回的高位类别。
+            expected_category = EXPECTED_BLOCK_CATEGORY.strip() or high_category
             theta_pick, theta_place, set_angle = down_pick_visual(
                 x,
                 y,
@@ -699,17 +726,16 @@ if __name__ == "__main__":
         else:
             theta_pick, theta_place, set_angle = down_pick(x, y, z, t, xuanzhuan_angle, i)
 
-        # 获取这个方块摆放位置的姿态。托盘视觉伺服后续单独接入，这里暂时保留旧 get_put_pose。
-        resp = get_put_pose.call(GetTargetPos_req)
-        if len(resp.array) < 6:
-            raise RuntimeError(f"第 {i} 个方块未获取到有效摆放位姿")
-        put_pose = list(resp.array)
-
         if USE_VISUAL_PLACE:
+            # get_put_pose 当前返回托盘目标格点粗观察位，是视觉摆放的相机起始观察位。
+            resp = get_put_pose.call(GetTargetPos_req)
+            if len(resp.array) < 6:
+                raise RuntimeError(f"第 {i} 个方块未获取到有效托盘粗观察位")
+            put_pose = list(resp.array)
             row, col = get_place_target_grid(i)
             down_place_visual(put_pose, row, col, theta_place, i)
         else:
-            down_place_open_loop(put_pose, theta_place)
+            raise RuntimeError("旧开环摆放已停用：get_put_pose 当前返回托盘视觉粗观察位")
 
         i = i + 1
         if i == 34:  # 捡完34个方块结束。

@@ -12,6 +12,17 @@ PACKAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PACKAGE_DIR not in sys.path:
     sys.path.insert(0, PACKAGE_DIR)
 
+if "ultralytics" not in sys.modules:
+    ultralytics_stub = types.ModuleType("ultralytics")
+    ultralytics_stub.YOLO = object
+    sys.modules["ultralytics"] = ultralytics_stub
+
+from image_process_lib.block_category import (
+    BLOCK_CATEGORY_NAMES,
+    category_from_code,
+    category_to_code,
+)
+from image_process_lib.single_block_detector import detect_block_with_high_prior_roi
 from image_process_lib.template_config import load_template_geometry
 from image_process_lib.template_match.kernels_create import (
     build_angle_values,
@@ -127,6 +138,28 @@ def test_rotation_kernels_are_binary_without_edge_weighting():
     assert set(np.unique(kernels.detach().cpu().numpy()).tolist()).issubset({0.0, 1.0})
 
 
+def test_block_category_code_roundtrip_is_stable():
+    assert BLOCK_CATEGORY_NAMES == (
+        "L_blue",
+        "L_yellow",
+        "z_blue",
+        "z_green",
+        "square",
+        "T",
+        "line",
+    )
+    for index, category in enumerate(BLOCK_CATEGORY_NAMES):
+        assert category_to_code(category) == index
+        assert category_from_code(index) == category
+        assert category_from_code(float(index)) == category
+
+    assert category_to_code("LL") == 1
+    assert category_to_code("O") == 4
+    assert category_to_code("unknown") == -1
+    assert category_from_code(-1) == ""
+    assert category_from_code("bad") == ""
+
+
 def test_cropped_search_matches_full_search_center():
     category = "T"
     block_px = 8
@@ -165,6 +198,49 @@ def test_cropped_search_matches_full_search_center():
 
     np.testing.assert_allclose(cropped_rect[0], full_rect[0], atol=1.0)
     assert cropped_rect[2] == full_rect[2]
+
+
+def test_low_prior_roi_template_match_removes_white_background():
+    category = "T"
+    block_px = 12
+    connector_px = 3
+    template_angle = 18.0
+    high_theta = -template_angle
+    target_center = (165, 116)
+    image = np.full((240, 320, 3), 255, dtype=np.uint8)
+
+    kernels, _, _ = create_rotation_kernels(
+        block_px,
+        connector_px,
+        category,
+        device="cpu",
+        angle_values=[template_angle],
+    )
+    shape_mask = (kernels[0, 0].detach().cpu().numpy() > 0.5).astype(np.uint8)
+    mask_h, mask_w = shape_mask.shape
+    x1 = target_center[0] - mask_w // 2
+    y1 = target_center[1] - mask_h // 2
+    roi = image[y1:y1 + mask_h, x1:x1 + mask_w]
+    roi[shape_mask > 0] = (35, 60, 210)
+
+    result = detect_block_with_high_prior_roi(
+        image,
+        template_geometry={"block_px": block_px, "connector_px": connector_px},
+        category=category,
+        high_theta_deg=high_theta,
+        angle_window=3,
+        angle_step=1,
+        roi_expand_px=30,
+        white_s_max=45,
+        white_v_min=180,
+        min_foreground_area=50,
+    )
+
+    assert result["found"] is True
+    assert result["category"] == category
+    assert abs(result["px"] - target_center[0]) <= 2.0
+    assert abs(result["py"] - target_center[1]) <= 2.0
+    assert abs(result["theta"] - high_theta) <= 1.0
 
 
 def test_load_template_geometry_reads_active_and_named_profiles(tmp_path):
@@ -422,3 +498,11 @@ def test_competition_module_imports_with_service_stubs(monkeypatch):
 
     assert hasattr(module, "build_base_pick_list")
     assert len(module.build_base_pick_list()) == 34
+    assert module.decode_category_code(2) == "z_blue"
+    assert module.decode_category_code(-1) == ""
+
+    parsed = module.parse_cube_location_response([1, 2, 3, 4, 5, 6])
+    assert parsed == (1.0, 2.0, 3.0, 4.0, 5.0, "line")
+
+    parsed_old = module.parse_cube_location_response([1, 2, 3, 4, 5], fallback_category="T")
+    assert parsed_old == (1.0, 2.0, 3.0, 4.0, 5.0, "T")

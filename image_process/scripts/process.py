@@ -22,12 +22,18 @@ from image_process_lib.Place_optimization import (
     cube_pocess,
     optimize_block_assignment,
     get_cube_location as calc_cube_location,
-    get_put_pose as calc_put_pose,
 )
 from image_process_lib.template_config import load_template_geometry
 from image_process_lib.point_calibration import ArmCalibrator
-from image_process_lib.board_detect import detect_nearest_board_dot_in_roi
+from image_process_lib.board_detect import (
+    board_grid_detect,
+    detect_nearest_board_dot_in_roi,
+    draw_grid_debug,
+    interpolate_grid_point,
+)
+from image_process_lib.block_category import category_to_code
 from image_process_lib.single_block_detector import (
+    detect_block_with_high_prior_roi,
     detect_blocks_in_image,
     normalize_category_name,
     undistort_bgr_image,
@@ -88,6 +94,114 @@ def save_image_to_path(image_path, image):
         rospy.logwarn("调试图像保存失败 %s: %s" % (image_path, exc))
         return False
 
+
+class DebugVideoRecorder:
+    """把每次视觉伺服调试图追加写入视频，便于回看闭环过程。"""
+
+    def __init__(self, video_path, fps=10.0, enabled=True):
+        self.requested_video_path = video_path
+        self.video_path = video_path
+        self.fps = max(0.1, float(fps))
+        self.enabled = bool(enabled)
+        self.writer = None
+        self.frame_size = None
+        self.codec_name = None
+        self.open_failed = False
+
+    def _make_writer_candidates(self):
+        """按文件后缀选择编码器，优先使用本机最稳的 MJPG/AVI。"""
+        if not self.requested_video_path:
+            return []
+
+        base_path, ext = os.path.splitext(self.requested_video_path)
+        ext = ext.lower()
+        candidates = []
+        if ext in (".mp4", ".m4v", ".mov"):
+            candidates.extend([
+                (base_path + ".avi", "MJPG"),
+                (base_path + ".avi", "XVID"),
+                (self.requested_video_path, "mp4v"),
+                (self.requested_video_path, "avc1"),
+            ])
+        elif ext == ".avi":
+            candidates.extend([
+                (self.requested_video_path, "MJPG"),
+                (self.requested_video_path, "XVID"),
+            ])
+        else:
+            video_path = self.requested_video_path + ".avi"
+            candidates.extend([
+                (video_path, "MJPG"),
+                (video_path, "XVID"),
+            ])
+
+        unique_candidates = []
+        seen = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            unique_candidates.append(candidate)
+        return unique_candidates
+
+    def _open(self, frame_size):
+        if not self.enabled or self.open_failed:
+            return False
+
+        for video_path, codec_name in self._make_writer_candidates():
+            try:
+                video_dir = os.path.dirname(video_path)
+                if video_dir:
+                    os.makedirs(video_dir, exist_ok=True)
+
+                fourcc = cv2.VideoWriter_fourcc(*codec_name)
+                writer = cv2.VideoWriter(video_path, fourcc, self.fps, frame_size)
+                if writer.isOpened():
+                    self.writer = writer
+                    self.video_path = video_path
+                    self.frame_size = frame_size
+                    self.codec_name = codec_name
+                    rospy.loginfo("视觉伺服调试视频开始录制: %s, fps=%.1f, codec=%s" % (
+                        self.video_path,
+                        self.fps,
+                        self.codec_name,
+                    ))
+                    return True
+                writer.release()
+            except Exception as exc:
+                rospy.logwarn("视觉伺服调试视频初始化失败 %s: %s" % (video_path, exc))
+
+        self.open_failed = True
+        rospy.logwarn("视觉伺服调试视频打开失败: %s" % self.requested_video_path)
+        return False
+
+    def write(self, image):
+        """追加一帧调试图；灰度图会自动转成 BGR。"""
+        if not self.enabled or self.open_failed or image is None:
+            return False
+
+        frame = image
+        if len(frame.shape) == 2:
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        elif frame.shape[2] == 4:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+
+        frame_size = (int(frame.shape[1]), int(frame.shape[0]))
+        if self.writer is None:
+            if not self._open(frame_size):
+                return False
+        elif self.frame_size != frame_size:
+            frame = cv2.resize(frame, self.frame_size, interpolation=cv2.INTER_AREA)
+
+        self.writer.write(frame)
+        return True
+
+    def release(self):
+        if self.writer is not None:
+            self.writer.release()
+            self.writer = None
+
+
 class ImageProcessor:
     def __init__(self):
         self.bridge = CvBridge()
@@ -130,9 +244,25 @@ class ImageProcessor:
             "~visual_servo_debug_path",
             "/home/zhl/桌面/视觉伺服当前检测.jpg"
         )
+        default_visual_servo_debug_video_path = os.path.splitext(self.visual_servo_debug_path)[0] + ".avi"
+        self.visual_servo_debug_video_path = rospy.get_param(
+            "~visual_servo_debug_video_path",
+            default_visual_servo_debug_video_path,
+        )
+        self.visual_servo_debug_video_fps = rospy.get_param("~visual_servo_debug_video_fps", 10.0)
+        self.visual_servo_debug_video_enabled = rospy.get_param("~visual_servo_debug_video_enabled", True)
+        self.visual_servo_debug_recorder = DebugVideoRecorder(
+            self.visual_servo_debug_video_path,
+            fps=self.visual_servo_debug_video_fps,
+            enabled=self.visual_servo_debug_video_enabled,
+        )
         self.visual_board_debug_path = rospy.get_param(
             "~visual_board_debug_path",
             "/home/zhl/桌面/托盘视觉伺服当前检测.jpg"
+        )
+        self.visual_board_grid_debug_path = rospy.get_param(
+            "~visual_board_grid_debug_path",
+            "/home/zhl/桌面/托盘格点粗定位.jpg"
         )
         self.board_low_roi_half_size = rospy.get_param("~board_low_roi_half_size", 120)
         self.board_low_blackhat_kernel_size = rospy.get_param("~board_low_blackhat_kernel_size", 15)
@@ -140,6 +270,10 @@ class ImageProcessor:
         self.board_low_max_dot_area = rospy.get_param("~board_low_max_dot_area", 250)
         self.board_low_min_dot_circularity = rospy.get_param("~board_low_min_dot_circularity", 0.35)
         self.board_low_max_dot_aspect_ratio = rospy.get_param("~board_low_max_dot_aspect_ratio", 1.8)
+        self.block_low_roi_expand_px = rospy.get_param("~block_low_roi_expand_px", 50)
+        self.block_low_white_s_max = rospy.get_param("~block_low_white_s_max", 45)
+        self.block_low_white_v_min = rospy.get_param("~block_low_white_v_min", 180)
+        self.block_low_min_foreground_area = rospy.get_param("~block_low_min_foreground_area", 200)
 
         # 高位全场识别后，用像素偏差粗估方块机械臂坐标。
         self.high_rough_x_mm_per_pixel = 0.5
@@ -150,7 +284,21 @@ class ImageProcessor:
 
         self.shooting_angle = list(BASE_SHOOTING_ANGLE)
         self.pick_list = build_base_pick_list(include_index=True)
+        rospy.on_shutdown(self.close_debug_video_recorders)
         rospy.loginfo("图像处理服务已启动")
+
+    def close_debug_video_recorders(self):
+        """节点退出时释放视频文件句柄，避免最后几帧没有写入文件。"""
+        if hasattr(self, "visual_servo_debug_recorder"):
+            self.visual_servo_debug_recorder.release()
+
+    def save_visual_servo_debug_frame(self, debug_image, video_image=None):
+        """保存当前调试图，同时把关键调试拼图追加到视觉伺服视频。"""
+        image_saved = save_image_to_path(self.visual_servo_debug_path, debug_image)
+        video_frame = video_image if video_image is not None else debug_image
+        video_saved = self.visual_servo_debug_recorder.write(video_frame)
+        return image_saved and (video_saved or not self.visual_servo_debug_video_enabled)
+
     def image_callback(self, msg):
         try:
             self.latest_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
@@ -252,17 +400,17 @@ class ImageProcessor:
             print("\033[91m托盘识别失败，请重新识别。\033[0m")
             return GetTargetPosResponse([0.0])
 
-        save_image_to_path('/home/zhl/桌面/board_bgr.jpg', board_bgr)
+        # save_image_to_path('/home/zhl/桌面/board_bgr.jpg', board_bgr)
         
         return GetTargetPosResponse([1.0])
     
     def get_cube_location1(self, req):
         if self.results is None:
             rospy.logwarn("尚未完成方块识别，无法返回抓取位置")
-            return GetTargetPosResponse(array=[0.0, 0.0, 0.0, 0.0, 0.0])
+            return GetTargetPosResponse(array=[0.0, 0.0, 0.0, 0.0, 0.0, -1.0])
         if req.num < -1 or req.num >= len(self.pick_list):
             rospy.logwarn("方块序号越界: %s，当前可用数量: %s" % (req.num, len(self.pick_list)))
-            return GetTargetPosResponse(array=[0.0, 0.0, 0.0, 0.0, 0.0])
+            return GetTargetPosResponse(array=[0.0, 0.0, 0.0, 0.0, 0.0, -1.0])
 
         block2, selected, orig_dists, opt_dists, dist_saving, time_used, total_time, orig_total, opt_total = self.results
         if req.num == -1:
@@ -300,22 +448,84 @@ class ImageProcessor:
                 xuanzhuan_angle -= 90
             elif xuanzhuan_angle < -45:
                 xuanzhuan_angle += 90
+        category_code = category_to_code(pick_cube[3])
         print("方块种类", pick_cube[3], "目标角度：", pick_cube[2],"识别到的角度：", t,"需要旋转的角度：", xuanzhuan_angle,"位置",x,y,z)
-        return GetTargetPosResponse(array=[x,y,z,t,xuanzhuan_angle])
+        return GetTargetPosResponse(array=[x,y,z,t,xuanzhuan_angle,float(category_code)])
     
     def get_put_pose(self, req):
         if req.num < 0 or req.num >= len(self.pick_list):
             rospy.logwarn("摆放序号越界: %s，当前可用数量: %s" % (req.num, len(self.pick_list)))
             return GetTargetPosResponse(array=[])
 
+        img_bgr1 = self.latest_image
+        if img_bgr1 is None:
+            rospy.logwarn("没有可用图像，无法计算托盘粗观察位")
+            print("\033[91m没有可用图像，无法计算托盘粗观察位。\033[0m")
+            return GetTargetPosResponse(array=[])
+
         pick_cube = self.pick_list[req.num]
-        if(pick_cube[3]=='square'):
-            # put_pose=calc_put_pose(pick_cube[0]-0.035,pick_cube[1]+0.06,self.shooting_angle,self.calibrator)
-            put_pose=calc_put_pose(pick_cube[0],pick_cube[1],self.shooting_angle,self.calibrator)
-        else:
-            # put_pose=calc_put_pose(pick_cube[0]-0.03,pick_cube[1]+0.03,self.shooting_angle,self.calibrator)
-            put_pose=calc_put_pose(pick_cube[0],pick_cube[1],self.shooting_angle,self.calibrator)
-        return GetTargetPosResponse(array=put_pose)
+        col = float(pick_cube[0])
+        row = float(pick_cube[1])
+
+        try:
+            h, w = img_bgr1.shape[:2]
+            new_camera_mtx, roi = cv2.getOptimalNewCameraMatrix(
+                self.camera_matrix,
+                self.dist_coeff,
+                (w, h),
+                1,
+                (w, h),
+            )
+            board_bgr = cv2.undistort(img_bgr1, self.camera_matrix, self.dist_coeff, None, new_camera_mtx)#去畸变
+            if board_bgr is None:
+                raise RuntimeError("去畸变后图像为空")
+
+            detect_result = board_grid_detect(board_bgr, debug_path=self.visual_board_grid_debug_path)
+            if not detect_result["found"]:
+                message = detect_result["message"]
+                rospy.logwarn("托盘粗定位格点识别失败: %s" % message)
+                print(f"\033[91m托盘粗定位格点识别失败: {message}\033[0m")
+                return GetTargetPosResponse(array=[])
+
+            grid_points = detect_result["grid_points"]
+            target_point = interpolate_grid_point(grid_points, row, col)
+            px = float(target_point[0])
+            py = float(target_point[1])
+
+            h, w = board_bgr.shape[:2]
+            center_x = w / 2.0
+            center_y = h / 2.0
+            predicted_x = self.shooting_angle[0] + (py - center_y) * self.high_rough_y_mm_per_pixel  # 机械臂和相机坐标是反的
+            predicted_y = self.shooting_angle[1] + (px - center_x) * self.high_rough_x_mm_per_pixel  # 机械臂和相机坐标是反的
+            predicted_z = 200.0
+            rough_pose = [
+                float(predicted_x),
+                float(predicted_y),
+                predicted_z,
+                float(self.shooting_angle[3]),
+                float(self.shooting_angle[4]),
+                float(self.shooting_angle[5]),
+            ]
+
+            debug_image = draw_grid_debug(
+                board_bgr,
+                grid_points,
+                target_point=target_point,
+                center_point=(center_x, center_y),
+            )
+            save_image_to_path(self.visual_board_grid_debug_path, debug_image)
+            print(
+                "托盘粗观察位",
+                "序号", req.num,
+                "目标行列", (row, col),
+                "目标像素", (px, py),
+                "pose", rough_pose,
+            )
+            return GetTargetPosResponse(array=rough_pose)
+        except Exception as exc:
+            rospy.logerr("托盘粗观察位计算失败: %s" % exc)
+            print(f"\033[91m托盘粗观察位计算失败: {exc}\033[0m")
+            return GetTargetPosResponse(array=[])
 
     def make_visual_servo_result(
         self,
@@ -508,12 +718,9 @@ class ImageProcessor:
     ):
         """识别方块目标相对相机中心的像素偏差。
 
-        低位视觉伺服和高位全场识别使用同一套流程：
-        YOLO 检测候选框，按 expected_category 过滤类别，裁剪候选区域，
-        分割上表面，再用模板匹配得到目标点和角度。
-        如果画面中有多个同类方块，选择离画面中心最近的一个。
-        angle_center/angle_window 和 search_center/search_radius 是模板匹配先验，
-        用来缩小旋转角和局部位置搜索范围。
+        template_profile="low" 时使用高位传来的类别和角度先验：
+        按低位模板尺寸在画面中心生成旋转 ROI，去白背景后直接模板匹配。
+        其它 profile 仍保留旧 YOLO 检测流程，供高位或历史调试调用。
         """
         angle_prior_message = self.make_block_angle_prior_message(angle_center, angle_window, angle_step)
         img_bgr1 = self.latest_image
@@ -531,6 +738,83 @@ class ImageProcessor:
             center_y = h / 2.0
             expected_category = normalize_category_name((expected_category or "").strip())
             template_geometry = load_template_geometry(template_profile)
+
+            if template_profile == "low":
+                if not expected_category:
+                    debug_image = np.copy(img_bgr)
+                    self.save_visual_servo_debug_frame(debug_image)
+                    return self.make_visual_servo_result(
+                        found=False,
+                        target_type="block",
+                        message=f"低位先验 ROI 缺少高位类别，{angle_prior_message}",
+                    )
+                if angle_center is None or angle_window is None:
+                    debug_image = np.copy(img_bgr)
+                    self.save_visual_servo_debug_frame(debug_image)
+                    return self.make_visual_servo_result(
+                        found=False,
+                        target_type="block",
+                        category=expected_category,
+                        message=f"低位先验 ROI 缺少高位角度，{angle_prior_message}",
+                    )
+
+                target_block = detect_block_with_high_prior_roi(
+                    img_bgr,
+                    template_geometry=template_geometry,
+                    category=expected_category,
+                    high_theta_deg=angle_center,
+                    angle_window=angle_window,
+                    angle_step=angle_step,
+                    roi_expand_px=self.block_low_roi_expand_px,
+                    white_s_max=self.block_low_white_s_max,
+                    white_v_min=self.block_low_white_v_min,
+                    min_foreground_area=self.block_low_min_foreground_area,
+                )
+                debug_image = target_block.get("debug_image", np.copy(img_bgr))
+                debug_panel = target_block.get("debug_panel")
+                cv2.drawMarker(
+                    debug_image,
+                    (int(center_x), int(center_y)),
+                    (255, 0, 0),
+                    markerType=cv2.MARKER_CROSS,
+                    markerSize=24,
+                    thickness=2,
+                )
+
+                if not target_block["found"]:
+                    self.save_visual_servo_debug_frame(debug_image, debug_panel)
+                    return self.make_visual_servo_result(
+                        found=False,
+                        target_type="block",
+                        category=expected_category,
+                        message=f"{target_block['message']}，{angle_prior_message}",
+                    )
+
+                px = target_block["px"]
+                py = target_block["py"]
+                theta = target_block["theta"]
+                dx_px = px - center_x
+                dy_px = py - center_y
+                cv2.line(
+                    debug_image,
+                    (int(center_x), int(center_y)),
+                    (int(px), int(py)),
+                    (255, 0, 0),
+                    1,
+                )
+                self.save_visual_servo_debug_frame(debug_image, debug_panel)
+                return self.make_visual_servo_result(
+                    found=True,
+                    target_type="block",
+                    category=target_block["category"],
+                    px=float(px),
+                    py=float(py),
+                    dx_px=float(dx_px),
+                    dy_px=float(dy_px),
+                    theta=float(theta),
+                    score=float(target_block["score"]),
+                    message=f"低位先验 ROI 模板匹配成功，{angle_prior_message}",
+                )
 
             blocks, debug_image = detect_blocks_in_image(
                 img_bgr,
@@ -557,7 +841,7 @@ class ImageProcessor:
 
             if not blocks:
                 category_msg = expected_category if expected_category else "任意类别"
-                save_image_to_path(self.visual_servo_debug_path, debug_image)
+                self.save_visual_servo_debug_frame(debug_image)
                 return self.make_visual_servo_result(
                     found=False,
                     target_type="block",
@@ -602,7 +886,7 @@ class ImageProcessor:
                 2,
                 cv2.LINE_AA,
             )
-            save_image_to_path(self.visual_servo_debug_path, debug_image)
+            self.save_visual_servo_debug_frame(debug_image)
             message = (
                 f"方块视觉伺服识别成功，共 {len(blocks)} 个候选，"
                 f"已选择离画面中心最近的 {target_block['category']}，{angle_prior_message}"
