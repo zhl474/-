@@ -404,6 +404,15 @@ class ImageProcessor:
 
         return options
 
+    def make_block_angle_prior_message(self, angle_center, angle_window, angle_step):
+        """生成低位模板角度先验摘要，便于确认 competition.py 的 t 已通信到图像节点。"""
+        if angle_center is None or angle_window is None:
+            return "角度先验: 未启用"
+        return (
+            f"角度先验: center={float(angle_center):.1f}, "
+            f"window={float(angle_window):.1f}, step={float(angle_step):.1f}"
+        )
+
     def handle_board_visual_servo_request(self, req):
         """托盘视觉伺服服务分支。
 
@@ -506,12 +515,13 @@ class ImageProcessor:
         angle_center/angle_window 和 search_center/search_radius 是模板匹配先验，
         用来缩小旋转角和局部位置搜索范围。
         """
+        angle_prior_message = self.make_block_angle_prior_message(angle_center, angle_window, angle_step)
         img_bgr1 = self.latest_image
         if img_bgr1 is None:
             return self.make_visual_servo_result(
                 found=False,
                 target_type="block",
-                message="没有可用图像",
+                message=f"没有可用图像，{angle_prior_message}",
             )
 
         try:
@@ -552,7 +562,7 @@ class ImageProcessor:
                     found=False,
                     target_type="block",
                     category=expected_category,
-                    message=f"没有检测到目标方块，目标类别: {category_msg}",
+                    message=f"没有检测到目标方块，目标类别: {category_msg}，{angle_prior_message}",
                 )
 
             # 低位对准时相机中心附近的同类方块才是目标。
@@ -593,7 +603,10 @@ class ImageProcessor:
                 cv2.LINE_AA,
             )
             save_image_to_path(self.visual_servo_debug_path, debug_image)
-            message = f"方块视觉伺服识别成功，共 {len(blocks)} 个候选，已选择离画面中心最近的 {target_block['category']}"
+            message = (
+                f"方块视觉伺服识别成功，共 {len(blocks)} 个候选，"
+                f"已选择离画面中心最近的 {target_block['category']}，{angle_prior_message}"
+            )
             return self.make_visual_servo_result(
                 found=True,
                 target_type="block",
@@ -611,7 +624,7 @@ class ImageProcessor:
             return self.make_visual_servo_result(
                 found=False,
                 target_type="block",
-                message=str(exc),
+                message=f"{exc}，{angle_prior_message}",
             )
 
     def get_visual_servo_offset(self, req):

@@ -59,23 +59,20 @@ if __name__ == "__main__":
     USE_VISUAL_PICK = True
     USE_VISUAL_PLACE = True
 
-    EXPECTED_BLOCK_CATEGORY = ""
+    EXPECTED_BLOCK_CATEGORY = ""#指定抓取某个类别方块，留空则正常运行
     BLOCK_TEMPLATE_PROFILE = "low"
-    BLOCK_USE_ANGLE_PRIOR = False
-    BLOCK_ANGLE_CENTER_DEG = 0.0
-    BLOCK_ANGLE_WINDOW_DEG = 0.0
+    BLOCK_USE_ANGLE_PRIOR = True
+    BLOCK_ANGLE_WINDOW_DEG = 10.0
     BLOCK_ANGLE_STEP_DEG = 1.0
     BLOCK_USE_POSITION_PRIOR = False
-    BLOCK_SEARCH_CENTER_X = 0.0
-    BLOCK_SEARCH_CENTER_Y = 0.0
     BLOCK_SEARCH_RADIUS_PX = 0.0
 
     ROUGH_LOOK_Z = 200.0
     SERVO_LOOK_Z = 200.0
     PICK_Z = 180.0
-    LIFT_Z = 200.0
-    ARM_SPEED = 80
-    PICK_SPEED = 60
+    LIFT_Z = 205.0
+    ARM_SPEED = 40
+    PICK_SPEED = 25
     PLACE_HIGH_Z = 197.0
     PLACE_DOWN_Z = 188.0
     PLACE_LIFT_STEP_MM = 20.0
@@ -85,7 +82,7 @@ if __name__ == "__main__":
     VISUAL_MAX_ITER = 40
     VISUAL_SUCCESS_STABLE_FRAMES = 5
     VISUAL_MAX_MISSED_FRAMES = 5
-    VISUAL_SETTLE_SEC = 0.25
+    VISUAL_SETTLE_SEC = 0.0
 
     angle_velocity = 270
     last_angle = 180
@@ -321,13 +318,14 @@ if __name__ == "__main__":
         print(f"\033[93m{message}\033[0m")
         return float(PICK_Z), float(LIFT_Z)
 
-    def align_camera_to_block(start_pose, expected_category=""):
+    def align_camera_to_block(start_pose, expected_category="", high_angle_deg=0.0):
         """用方块视觉伺服把相机中心对准目标方块。
 
         start_pose 是 choose_block_rough_camera_pose 输出的观察位姿。
         这里委托 visual_servo_common.run_offset_visual_servo_alignment 执行闭环：
         图像节点负责 get_visual_servo_offset(target_type="block")，
         公共函数负责像素误差到机械臂 XY 修正。
+        high_angle_deg 来自高位识别返回的模板角度 t，用于低位只生成 t 附近的少量模板。
         返回格式固定为 success, camera_pose, message，供 down_pick_visual 统一处理。
         """
         if visual_servo_offset is None:
@@ -341,12 +339,12 @@ if __name__ == "__main__":
             "expected_category": expected_category,
             "template_profile": BLOCK_TEMPLATE_PROFILE,
             "use_angle_prior": BLOCK_USE_ANGLE_PRIOR,
-            "angle_center_deg": BLOCK_ANGLE_CENTER_DEG,
+            "angle_center_deg": float(high_angle_deg),
             "angle_window_deg": BLOCK_ANGLE_WINDOW_DEG,
             "angle_step_deg": BLOCK_ANGLE_STEP_DEG,
             "use_position_prior": BLOCK_USE_POSITION_PRIOR,
-            "search_center_x": BLOCK_SEARCH_CENTER_X,
-            "search_center_y": BLOCK_SEARCH_CENTER_Y,
+            "search_center_x": 0.0,
+            "search_center_y": 0.0,
             "search_radius_px": BLOCK_SEARCH_RADIUS_PX,
         }
         get_offset_func = lambda: request_block_visual_offset(**request_kwargs)
@@ -641,15 +639,11 @@ if __name__ == "__main__":
         # 4. 等待舵机避限位动作结束，再做闭环视觉伺服，避免画面持续变化。
         wait_motor_ready()
 
-        # 5. 切到闭环伺服高度，再让相机中心对准方块。
-        servo_start_pose = list(rough_camera_pose)
-        servo_start_pose[2] = SERVO_LOOK_Z
-        if abs(servo_start_pose[2] - rough_camera_pose[2]) > 1e-6:
-            send_arm_pose(servo_start_pose, speed=ARM_SPEED, theta_deg=theta_pick, label="视觉抓取伺服高度")
-
+        # 5. 闭环伺服相机中心对准方块。
         success, camera_pose, message = align_camera_to_block(
-            servo_start_pose,
+            rough_camera_pose,
             expected_category=expected_category,
+            high_angle_deg=t,
         )
         if not success:
             handle_block_servo_failed(index_cube, message)

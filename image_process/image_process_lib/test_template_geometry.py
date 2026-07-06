@@ -102,6 +102,25 @@ def test_angle_values_use_center_window_and_wrap_zero():
     assert angles == [357.0, 358.0, 359.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
 
 
+def test_angle_values_center_window_reduces_template_count_by_category():
+    assert len(build_angle_values("T", angle_step=1, angle_center=37, angle_window=10)) == 21
+
+    z_angles = build_angle_values("z_blue", angle_step=1, angle_center=185, angle_window=10)
+    assert len(z_angles) == 21
+    assert z_angles[0] == 175.0
+    assert z_angles[-1] == 15.0
+
+    line_angles = build_angle_values("line", angle_step=1, angle_center=-5, angle_window=10)
+    assert len(line_angles) == 21
+    assert line_angles[0] == 165.0
+    assert line_angles[-1] == 5.0
+
+    square_angles = build_angle_values("square", angle_step=1, angle_center=95, angle_window=10)
+    assert len(square_angles) == 21
+    assert square_angles[0] == 85.0
+    assert square_angles[-1] == 15.0
+
+
 def test_rotation_kernels_are_binary_without_edge_weighting():
     kernels, _, angles = create_rotation_kernels(37, 5, "T", angle_values=[0, 45], device="cpu")
     assert angles == [0.0, 45.0]
@@ -233,6 +252,54 @@ def _install_module_stub(monkeypatch, name):
     return module
 
 
+def _load_process_module_with_stubs(monkeypatch, module_name):
+    rospy = _install_module_stub(monkeypatch, "rospy")
+    rospy.Service = object
+    rospy.Subscriber = object
+    rospy.ServiceProxy = object
+    rospy.get_param = lambda _name, default=None: default
+    rospy.loginfo = lambda *_args, **_kwargs: None
+    rospy.logwarn = lambda *_args, **_kwargs: None
+    rospy.logerr = lambda *_args, **_kwargs: None
+    rospy.init_node = lambda *_args, **_kwargs: None
+    rospy.spin = lambda: None
+
+    sensor_msgs = _install_module_stub(monkeypatch, "sensor_msgs")
+    sensor_msgs.msg = _install_module_stub(monkeypatch, "sensor_msgs.msg")
+    sensor_msgs.msg.Image = type("Image", (), {})
+
+    cv_bridge = _install_module_stub(monkeypatch, "cv_bridge")
+    cv_bridge.CvBridge = type("CvBridge", (), {})
+
+    ultralytics = _install_module_stub(monkeypatch, "ultralytics")
+    ultralytics.YOLO = object
+
+    image_process = _install_module_stub(monkeypatch, "image_process")
+    image_process.srv = _install_module_stub(monkeypatch, "image_process.srv")
+    for name in (
+        "GetTargetPos",
+        "GetTargetPosResponse",
+        "VisualTargetOffset",
+        "VisualTargetOffsetResponse",
+        "VisualBoardOffset",
+        "VisualBoardOffsetResponse",
+        "VisualServoOffset",
+        "VisualServoOffsetResponse",
+    ):
+        setattr(image_process.srv, name, type(name, (), {}))
+
+    camera = _install_module_stub(monkeypatch, "camera")
+    camera.srv = _install_module_stub(monkeypatch, "camera.srv")
+    camera.srv.pixel2world = type("pixel2world", (), {})
+    camera.srv.pixel2worldRequest = type("pixel2worldRequest", (), {})
+
+    process_path = os.path.join(PACKAGE_DIR, "scripts", "process.py")
+    spec = importlib.util.spec_from_file_location(module_name, process_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_process_module_imports_with_ros_stubs(monkeypatch):
     rospy = _install_module_stub(monkeypatch, "rospy")
     rospy.Service = object
@@ -283,6 +350,39 @@ def test_process_module_imports_with_ros_stubs(monkeypatch):
 
     assert hasattr(module, "ImageProcessor")
     assert module.load_template_geometry.__name__ == "load_template_geometry"
+
+
+def test_process_block_template_options_use_request_angle_prior(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_parse_smoke")
+    processor = object.__new__(module.ImageProcessor)
+    req = types.SimpleNamespace(
+        template_profile="low",
+        angle_step_deg=1.0,
+        use_angle_prior=True,
+        angle_center_deg=37.0,
+        angle_window_deg=10.0,
+        use_position_prior=False,
+        search_center_x=0.0,
+        search_center_y=0.0,
+        search_radius_px=0.0,
+    )
+
+    options = processor.parse_block_template_match_options(req)
+
+    assert options["template_profile"] == "low"
+    assert options["angle_step"] == 1.0
+    assert options["angle_center"] == 37.0
+    assert options["angle_window"] == 10.0
+    assert options["search_center"] is None
+    assert options["search_radius"] is None
+    assert (
+        processor.make_block_angle_prior_message(
+            options["angle_center"],
+            options["angle_window"],
+            options["angle_step"],
+        )
+        == "角度先验: center=37.0, window=10.0, step=1.0"
+    )
 
 
 def test_competition_module_imports_with_service_stubs(monkeypatch):

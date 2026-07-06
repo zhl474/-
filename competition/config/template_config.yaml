@@ -7,5 +7,5 @@ template_sizes:
       block_px: 37
       connector_px: 5
     low:
-      block_px: 37
-      connector_px: 5
+      block_px: 78
+      connector_px: 11
