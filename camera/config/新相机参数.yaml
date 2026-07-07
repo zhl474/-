@@ -10,18 +10,20 @@ rgb_camera:
   # gain: 16
   # 相机亮度
   #   注意事项: 当auto_exposure=True时有效
-  brightness: 64
+  brightness: 35
   # 自动白平衡
   auto_white_balance: True
   # 手动设置白平衡
   #   注意事项: 当auto_white_balance=False时有效
   white_balance: 5000
-  # 锐度
-  sharpness: 0
+  # 锐度默认
+  sharpness: 50
+  # 伽马默认
+  gamma: 300
   # 饱和度
-  saturation: 60
+  saturation: 70
   # 对比度
-  contrast: 70
+  contrast: 50
   # 电力线频率
   power_line_frequency: 0
 # 深度相机

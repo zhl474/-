@@ -419,17 +419,22 @@ class ImageProcessor:
         if board_bgr is None:
             print("没有图片")
             return GetTargetPosResponse([0.0])
+        board_debug_image = board_bgr
         try:
-            detect_result = board_grid_detect(board_bgr, debug_path=self.visual_board_grid_debug_path)
+            detect_result = board_grid_detect(board_bgr, debug_path=None)
+            board_debug_image = detect_result.get("debug_image")
+            if board_debug_image is None:
+                board_debug_image = board_bgr
             if not detect_result["found"]:
+                save_image_to_path(self.visual_board_grid_debug_path, board_debug_image)
                 raise RuntimeError(detect_result["message"])
 
             self.board_grid_points = detect_result["grid_points"]
             self.board_grid_image_shape = board_bgr.shape[:2]
             self.board_grid_image = board_bgr.copy()
             center_point = (board_bgr.shape[1] / 2.0, board_bgr.shape[0] / 2.0)
-            debug_image = draw_grid_debug(board_bgr, self.board_grid_points, center_point=center_point)
-            save_image_to_path(self.visual_board_grid_debug_path, debug_image)
+            board_debug_image = draw_grid_debug(board_bgr, self.board_grid_points, center_point=center_point)
+            save_image_to_path(self.visual_board_grid_debug_path, board_debug_image)
 
             self.calibrator.board_detector_from_grid_points(self.board_grid_points)
             self.calibrator.calibrate()#托盘识别结束
@@ -663,11 +668,11 @@ class ImageProcessor:
         )
 
     def detect_board_visual_offset(self, row, col):
-        """识别低位托盘圆点相对相机中心的像素偏差。
+        """识别低位托盘目标点相对相机中心的像素偏差。
 
         这里只负责图像识别和像素偏差计算，不控制机械臂。
-        低位时托盘通常不完整入画，因此只在画面中心小 ROI 内找最近的托盘圆点。
-        row/col 只保留给服务兼容和调试图显示，不参与低位圆点选择。
+        低位时托盘通常不完整入画，因此只在画面中心小 ROI 内找托盘圆点。
+        row/col 支持整数和 .5，小数目标会用相邻圆点平均成虚拟目标点。
         """
         img_bgr1 = self.latest_image
         if img_bgr1 is None:
@@ -721,7 +726,7 @@ class ImageProcessor:
                 dy_px=dy_px,
                 theta=0,
                 score=1.0,
-                message="低位托盘圆点识别成功",
+                message=detect_result.get("message", "低位托盘目标点识别成功"),
             )
         except Exception as exc:
             rospy.logerr("托盘视觉伺服目标检测失败: %s" % exc)

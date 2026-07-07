@@ -19,4 +19,5 @@ def suck_off():
     sucker.set_pump_motor(False)
 
 # suck_in()
+# suck_out()
 suck_off()

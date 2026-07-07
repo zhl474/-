@@ -112,7 +112,7 @@ if __name__ == "__main__":
     PLACE_LIFT_STEP_MM = 20.0
 
     VISUAL_ERROR_THRESHOLD_PX = 2.0
-    VISUAL_MIN_STEP_MM = 0.1
+    VISUAL_MIN_STEP_MM = 0.05
     VISUAL_MAX_STEP_MM = 5.0
     VISUAL_MAX_ITER = 40
     VISUAL_SUCCESS_STABLE_FRAMES = 5
@@ -349,7 +349,7 @@ if __name__ == "__main__":
         但最终吸盘下探高度是否还能沿用旧 z-8，需要现场重新确认。
         返回 pick_z 和 lift_z，分别供下探吸取和吸后抬起使用。
         """
-        message = "choose_block_pick_heights 尚未实测：暂用集中配置 PICK_Z/LIFT_Z"
+        message = f"抓方块高度{PICK_Z},抬起高度{LIFT_Z}"
         print(f"\033[93m{message}\033[0m")
         return float(PICK_Z), float(LIFT_Z)
 
@@ -505,7 +505,7 @@ if __name__ == "__main__":
         当前先沿用旧开环摆放高度：高位 PLACE_HIGH_Z、下放 PLACE_DOWN_Z、释放后抬起 PLACE_LIFT_STEP_MM。
         后续如果不同层数、不同方块或不同 row/col 需要不同高度，只改这里。
         """
-        print("\033[93mchoose_board_place_heights 尚未实测：暂用旧开环摆放高度\033[0m")
+        print("\033[93摆放采用旧高度\033[0m")
         return float(PLACE_HIGH_Z), float(PLACE_DOWN_Z), float(PLACE_LIFT_STEP_MM)
 
     def verify_place_before_down(place_high_pose, index_cube):

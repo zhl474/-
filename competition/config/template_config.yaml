@@ -7,5 +7,15 @@ template_sizes:
       block_px: 37
       connector_px: 5
     low:
-      block_px: 78
+      block_px: 81
       connector_px: 11
+
+#真实长度测量
+# line:   17.8  78.2
+# buleL:  58.3  37.8
+# yellowL:58.1  38.0
+# T:      58.0  38.1  
+# greenZ: 58.0  38.0
+# buleZ:  58.2  38.1
+# square: 38.1  38.1 
+

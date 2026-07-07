@@ -53,6 +53,115 @@ def test_low_board_roi_chooses_candidate_nearest_to_center():
     assert result["count"] == 3
 
 
+def test_low_board_roi_detects_horizontal_midpoint():
+    image = _make_board_image()
+    _draw_dot(image, (145, 120))
+    _draw_dot(image, (175, 120))
+
+    result = detect_nearest_board_dot_in_roi(
+        image,
+        center_point=(160, 120),
+        roi_half_size=80,
+        row=1,
+        col=1.5,
+    )
+
+    assert result["found"] is True
+    assert result["target_mode"] == "horizontal_mid"
+    np.testing.assert_allclose(result["point"], [160, 120], atol=1.0)
+    assert len(result["selected_candidates"]) == 2
+
+
+def test_low_board_roi_detects_vertical_midpoint():
+    image = _make_board_image()
+    _draw_dot(image, (160, 105))
+    _draw_dot(image, (160, 135))
+
+    result = detect_nearest_board_dot_in_roi(
+        image,
+        center_point=(160, 120),
+        roi_half_size=80,
+        row=1.5,
+        col=1,
+    )
+
+    assert result["found"] is True
+    assert result["target_mode"] == "vertical_mid"
+    np.testing.assert_allclose(result["point"], [160, 120], atol=1.0)
+    assert len(result["selected_candidates"]) == 2
+
+
+def test_low_board_roi_detects_cell_center():
+    image = _make_board_image()
+    _draw_dot(image, (145, 105))
+    _draw_dot(image, (175, 105))
+    _draw_dot(image, (145, 135))
+    _draw_dot(image, (175, 135))
+
+    result = detect_nearest_board_dot_in_roi(
+        image,
+        center_point=(160, 120),
+        roi_half_size=80,
+        row=1.5,
+        col=1.5,
+    )
+
+    assert result["found"] is True
+    assert result["target_mode"] == "cell_center"
+    np.testing.assert_allclose(result["point"], [160, 120], atol=1.0)
+    assert len(result["selected_candidates"]) == 4
+
+
+def test_low_board_roi_reports_missing_right_neighbor():
+    image = _make_board_image()
+    _draw_dot(image, (145, 120))
+
+    result = detect_nearest_board_dot_in_roi(
+        image,
+        center_point=(160, 120),
+        roi_half_size=80,
+        row=1,
+        col=1.5,
+    )
+
+    assert result["found"] is False
+    assert result["message"] == "未找到右侧邻点"
+
+
+def test_low_board_roi_reports_missing_top_neighbor():
+    image = _make_board_image()
+    _draw_dot(image, (160, 135))
+
+    result = detect_nearest_board_dot_in_roi(
+        image,
+        center_point=(160, 120),
+        roi_half_size=80,
+        row=1.5,
+        col=1,
+    )
+
+    assert result["found"] is False
+    assert result["message"] == "未找到上方邻点"
+
+
+def test_low_board_roi_reports_missing_cell_quadrant():
+    image = _make_board_image()
+    _draw_dot(image, (145, 105))
+    _draw_dot(image, (175, 105))
+    _draw_dot(image, (145, 135))
+
+    result = detect_nearest_board_dot_in_roi(
+        image,
+        center_point=(160, 120),
+        roi_half_size=80,
+        row=1.5,
+        col=1.5,
+    )
+
+    assert result["found"] is False
+    assert result["message"] == "未找到右下邻点"
+
+
 def test_low_board_roi_ignores_dots_outside_roi():
     image = _make_board_image()
     _draw_dot(image, (250, 120))

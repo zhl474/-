@@ -15,9 +15,9 @@ class CameraNode:
         rospy.init_node('camera_node')
         
         # 相机初始化
-        self.cap = AkaiGemini335(yaml_path="/home/zhl/SingleArmTetris/SingleArmTetris/新相机参数.yaml")
+        self.cap = AkaiGemini335(yaml_path="/home/zhl/SingleArmTetris/SingleArmTetris/src/camera/config/新相机参数.yaml")
         self.arm = AkaiFr()
-        T_wrist2camera_mm = np.load('/home/zhl/SingleArmTetris/SingleArmTetris/测试/Log/T_wrist2camera.npy')
+        T_wrist2camera_mm = np.load('/home/zhl/SingleArmTetris/SingleArmTetris/src/camera/config/T_wrist2camera.npy')
         self.arm.set_tmat_wrist2camera(T_wrist2camera_mm)
         self.tcf_biasx = -9.3
         self.tcf_biasy = -4
