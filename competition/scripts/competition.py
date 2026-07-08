@@ -101,7 +101,6 @@ if __name__ == "__main__":
     BLOCK_USE_POSITION_PRIOR = False
     BLOCK_SEARCH_RADIUS_PX = 0.0
 
-    ROUGH_LOOK_Z = 200.0
     SERVO_LOOK_Z = 200.0
     PICK_Z = 170.0
     LIFT_Z = 205.0
@@ -160,6 +159,7 @@ if __name__ == "__main__":
     sucker_off = 2
 
     visual_servo_config = load_visual_servo_config() if load_visual_servo_config is not None else {}
+    SERVO_LOOK_Z = float(visual_servo_config.get("servo_look_z", SERVO_LOOK_Z))
 
     # rospy.set_param('/motor_done', 1)
     motor_done = 1
@@ -334,11 +334,11 @@ if __name__ == "__main__":
     def choose_block_rough_camera_pose(x, y, z, t, index_cube):
         """选择方块视觉伺服开始前的相机粗定位位姿。
 
-        输入 x/y/z/t 来自 get_cube_location，目前仍是高位识别后的粗估结果。
-        这里只生成相机观察位，真正的吸盘偏移和下探高度由后续函数处理。
+        输入 x/y/z/t 来自 get_cube_location，x/y/z 已经是图像节点生成的伺服观察位。
+        这里保留姿态字段，真正的吸盘偏移和下探高度由后续函数处理。
         """
-        rough_pose = make_pose_xy_z(shooting_angle, x, y, ROUGH_LOOK_Z)
-        message = f"方块视觉抓取粗观察位: x={x:.2f}, y={y:.2f}, z={ROUGH_LOOK_Z:.2f}"
+        rough_pose = make_pose_xy_z(shooting_angle, x, y, z)
+        message = f"方块视觉抓取伺服观察位: x={x:.2f}, y={y:.2f}, z={z:.2f}"
         print(message)
         return True, rough_pose, message
 
@@ -595,9 +595,8 @@ if __name__ == "__main__":
             # 红色提示托盘识别失败，本轮跳过方块识别，等待人工确认后重新执行循环。
             print("\033[91m托盘识别失败，已跳过方块识别，请调整后重新识别。\033[0m")
             cube_num = 0
-        if input("识别结果满意扣1") == "1":
+        if input("\033[93m识别结果满意扣1\033[0m") == "1":
             break
-
     #################################           捡所有方块             ################################
     input("按回车后捡所有方块...")
 

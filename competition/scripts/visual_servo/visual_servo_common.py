@@ -13,6 +13,7 @@ VISUAL_SERVO_CONFIG_PATH = os.path.join(SRC_DIR, "competition", "config", "visua
 DEFAULT_CONFIG = {
     "pixel_to_robot_matrix": [[0.0, 0.5], [0.5, 0.0]],
     "camera_to_sucker_offset_mm": [0.0, 0.0],
+    "servo_look_z": 200.0,
     "last_calibration": {
         "pixel_motion": "未标定",
         "camera_sucker_offset": "未标定",

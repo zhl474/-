@@ -506,3 +506,49 @@ def test_competition_module_imports_with_service_stubs(monkeypatch):
 
     parsed_old = module.parse_cube_location_response([1, 2, 3, 4, 5], fallback_category="T")
     assert parsed_old == (1.0, 2.0, 3.0, 4.0, 5.0, "T")
+
+
+def test_depth_first_servo_pose_uses_world_point_when_depth_valid(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_depth_success")
+    module.pixel2worldRequest = lambda x, y: (x, y)
+
+    processor = object.__new__(module.ImageProcessor)
+    processor.shooting_angle = [0, 0, 0, 0, 0, 0]
+    processor.servo_look_z = 200.0
+    processor.high_rough_x_mm_per_pixel = 0.5
+    processor.high_rough_y_mm_per_pixel = 0.5
+    processor.T_wrist2camera_mm = np.array([
+        [1.0, 0.0, 0.0, 10.0],
+        [0.0, 1.0, 0.0, 20.0],
+        [0.0, 0.0, 1.0, 30.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+    processor.pixel2world_client = lambda _req: types.SimpleNamespace(world_position=[100.0, 200.0, 50.0])
+
+    pose, source, world_position = processor.make_depth_first_servo_pose(12.2, 33.8, (720, 1280, 3), "测试")
+
+    assert source == "depth"
+    assert world_position == [100.0, 200.0, 50.0]
+    assert pose == [90.0, 180.0, 200.0, 0.0, 0.0, 0.0]
+
+
+def test_depth_first_servo_pose_falls_back_when_depth_invalid(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_depth_fallback")
+    module.pixel2worldRequest = lambda x, y: (x, y)
+
+    processor = object.__new__(module.ImageProcessor)
+    processor.shooting_angle = [100.0, 200.0, 0.0, 0.0, 0.0, 0.0]
+    processor.servo_look_z = 200.0
+    processor.high_rough_x_mm_per_pixel = 0.5
+    processor.high_rough_y_mm_per_pixel = 0.25
+    processor.T_wrist2camera_mm = np.eye(4)
+    processor.pixel2world_client = lambda _req: types.SimpleNamespace(world_position=[0.0, 0.0, 0.0])
+    warnings = []
+    processor.print_yellow_warning = warnings.append
+
+    pose, source, world_position = processor.make_depth_first_servo_pose(150.0, 40.0, (100, 200, 3), "测试")
+
+    assert source == "fallback"
+    assert world_position == []
+    assert pose == [97.5, 225.0, 200.0, 0.0, 0.0, 0.0]
+    assert warnings and "回退旧粗估" in warnings[0]

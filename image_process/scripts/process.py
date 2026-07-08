@@ -18,20 +18,20 @@ if IMAGE_PROCESS_SRC_DIR not in sys.path:
 from image_process_lib.Place_optimization import (
     get_all_cube,
     make_list,
-    put_fenlei,
     cube_pocess,
     optimize_block_assignment,
     get_cube_location as calc_cube_location,
 )
 from image_process_lib.template_config import load_template_geometry
-from image_process_lib.point_calibration import ArmCalibrator
 from image_process_lib.board_detect import (
+    BOARD_COL_COUNT,
+    BOARD_ROW_COUNT,
     board_grid_detect,
     detect_nearest_board_dot_in_roi,
     draw_grid_debug,
     interpolate_grid_point,
 )
-from image_process_lib.block_category import category_to_code
+from image_process_lib.block_category import BLOCK_CATEGORY_NAMES, category_to_code
 from image_process_lib.single_block_detector import (
     detect_block_with_high_prior_roi,
     detect_blocks_in_image,
@@ -49,6 +49,8 @@ from ctypes import CDLL, c_char_p
 
 
 CALIBRATION_MATRIX_PATH = "/home/zhl/SingleArmTetris/SingleArmTetris/src/competition/config/calibration_matrix.yaml"
+VISUAL_SERVO_CONFIG_PATH = "/home/zhl/SingleArmTetris/SingleArmTetris/src/competition/config/visual_servo.yaml"
+T_WRIST2CAMERA_PATH = "/home/zhl/SingleArmTetris/SingleArmTetris/src/camera/config/T_wrist2camera.npy"
 DETECTION_MODEL_PATH = "/home/zhl/SingleArmTetris/SingleArmTetris/src/competition/model/best5.14.pt"
 JINJIE_LIB_PATH = "/home/zhl/SingleArmTetris/SingleArmTetris/src/jinjie/jinjie_libtetris.so"
 
@@ -57,6 +59,43 @@ VISUAL_TARGET_BOARD = "board"
 
 # 高位全场拍摄位姿。competition.py 里也有同一份值，后面应通过服务返回动态规划结果来彻底统一。
 BASE_SHOOTING_ANGLE = [-250.4151306152343, 22.14801216125488, 380.3343505859375, -180, 0, 90]
+
+
+def load_servo_look_z(config_path=VISUAL_SERVO_CONFIG_PATH):
+    """从视觉伺服配置读取相机观察高度。"""
+    if not os.path.exists(config_path):
+        return 200.0
+    with open(config_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    return float(data.get("servo_look_z", 200.0))
+
+
+def rpy_degrees_to_rotation_matrix(roll_deg, pitch_deg, yaw_deg):
+    """按常用 Rz(yaw) * Ry(pitch) * Rx(roll) 生成旋转矩阵。"""
+    roll = np.deg2rad(float(roll_deg))
+    pitch = np.deg2rad(float(pitch_deg))
+    yaw = np.deg2rad(float(yaw_deg))
+
+    cr, sr = np.cos(roll), np.sin(roll)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    cy, sy = np.cos(yaw), np.sin(yaw)
+
+    rx = np.array([
+        [1.0, 0.0, 0.0],
+        [0.0, cr, -sr],
+        [0.0, sr, cr],
+    ])
+    ry = np.array([
+        [cp, 0.0, sp],
+        [0.0, 1.0, 0.0],
+        [-sp, 0.0, cp],
+    ])
+    rz = np.array([
+        [cy, -sy, 0.0],
+        [sy, cy, 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    return rz @ ry @ rx
 
 
 def build_base_pick_list(include_index=False):
@@ -237,7 +276,11 @@ class ImageProcessor:
         self.dist_coeff = np.array(data['dist_coeff'])
 
         self.results = None
-        self.calibrator = ArmCalibrator()
+        self.board_theta = 0.0
+        self.servo_look_z = load_servo_look_z()
+        self.T_wrist2camera_mm = np.load(T_WRIST2CAMERA_PATH)
+        if self.T_wrist2camera_mm.shape != (4, 4) or not np.all(np.isfinite(self.T_wrist2camera_mm)):
+            raise ValueError("手眼标定矩阵 T_wrist2camera.npy 无效，请重新标定")
         self.save_top_surface_mask_vis = rospy.get_param("~save_top_surface_mask_vis", False)
         self.top_surface_mask_vis_path = rospy.get_param(
             "~top_surface_mask_vis_path",
@@ -302,6 +345,11 @@ class ImageProcessor:
         rospy.on_shutdown(self.close_debug_video_recorders)
         rospy.loginfo("图像处理服务已启动")
 
+    def print_yellow_warning(self, message):
+        """输出黄色警告，现场调试时用于区分深度回退。"""
+        rospy.logwarn(message)
+        print(f"\033[93m{message}\033[0m")
+
     def close_debug_video_recorders(self):
         """节点退出时释放视频文件句柄，避免最后几帧没有写入文件。"""
         if hasattr(self, "visual_servo_debug_recorder"):
@@ -329,6 +377,135 @@ class ImageProcessor:
         except Exception as e:
             rospy.logerr("图像转换失败: %s" % e)
 
+    def make_high_rough_servo_pose(self, px, py, image_shape):
+        """深度不可用时沿用旧像素比例粗估，返回视觉伺服观察位姿。"""
+        h, w = image_shape[:2]
+        center_x = w / 2.0
+        center_y = h / 2.0
+        predicted_x = self.shooting_angle[0] + (float(py) - center_y) * self.high_rough_y_mm_per_pixel
+        predicted_y = self.shooting_angle[1] + (float(px) - center_x) * self.high_rough_x_mm_per_pixel
+        return [
+            float(predicted_x),
+            float(predicted_y),
+            float(self.servo_look_z),
+            float(self.shooting_angle[3]),
+            float(self.shooting_angle[4]),
+            float(self.shooting_angle[5]),
+        ]
+
+    def query_world_position_from_depth(self, px, py):
+        """调用深度相机服务，把 Gemini335 对齐像素转成世界坐标点。"""
+        pixel_x = int(round(float(px)))
+        pixel_y = int(round(float(py)))
+        resp = self.pixel2world_client(pixel2worldRequest(pixel_x, pixel_y))
+        world_position = np.array(list(resp.world_position), dtype=float)
+        if world_position.shape[0] != 3:
+            raise ValueError(f"深度服务返回长度错误: {world_position.tolist()}")
+        if not np.all(np.isfinite(world_position)):
+            raise ValueError(f"深度服务返回非有限坐标: {world_position.tolist()}")
+        if np.allclose(world_position, np.zeros(3), atol=1e-6):
+            raise ValueError("深度服务返回失败占位坐标 [0, 0, 0]")
+        return world_position
+
+    def make_servo_pose_from_camera_world_point(self, world_position):
+        """根据目标世界点生成相机中心对准目标的 MoveL 工具位姿。"""
+        desired_camera_xy = np.array([
+            float(world_position[0]),
+            float(world_position[1]),
+        ], dtype=float)
+        tool_rotation = rpy_degrees_to_rotation_matrix(
+            self.shooting_angle[3],
+            self.shooting_angle[4],
+            self.shooting_angle[5],
+        )
+        camera_offset_in_tool = np.array(self.T_wrist2camera_mm[:3, 3], dtype=float)
+        camera_offset_in_base = tool_rotation @ camera_offset_in_tool
+        tool_position = np.array([
+            desired_camera_xy[0] - camera_offset_in_base[0],
+            desired_camera_xy[1] - camera_offset_in_base[1],
+            float(self.servo_look_z),
+        ], dtype=float)
+        if not np.all(np.isfinite(tool_position)):
+            raise ValueError(f"计算出的工具位姿坐标无效: {tool_position.tolist()}")
+        return [
+            float(tool_position[0]),
+            float(tool_position[1]),
+            float(tool_position[2]),
+            float(self.shooting_angle[3]),
+            float(self.shooting_angle[4]),
+            float(self.shooting_angle[5]),
+        ]
+
+    def make_depth_first_servo_pose(self, px, py, image_shape, label):
+        """优先用深度相机生成观察位；失败时回退旧高位粗估。"""
+        try:
+            world_position = self.query_world_position_from_depth(px, py)
+            servo_pose = self.make_servo_pose_from_camera_world_point(world_position)
+            print(
+                f"{label}深度观察位",
+                "像素", (float(px), float(py)),
+                "世界点", world_position.tolist(),
+                "pose", servo_pose,
+            )
+            return servo_pose, "depth", world_position.tolist()
+        except Exception as exc:
+            self.print_yellow_warning(f"{label}深度定位失败，回退旧粗估: {exc}")
+            servo_pose = self.make_high_rough_servo_pose(px, py, image_shape)
+            print(
+                f"{label}回退观察位",
+                "像素", (float(px), float(py)),
+                "pose", servo_pose,
+            )
+            return servo_pose, "fallback", []
+
+    def compute_board_theta_from_grid_points(self, grid_points):
+        """只根据托盘四角像素计算托盘旋转角，不再依赖九点坐标标定。"""
+        left_top = grid_points[BOARD_ROW_COUNT][1]
+        left_bottom = grid_points[1][1]
+        right_top = grid_points[BOARD_ROW_COUNT][BOARD_COL_COUNT]
+        right_bottom = grid_points[1][BOARD_COL_COUNT]
+        dx1 = right_top[0] - left_top[0]
+        dx2 = right_bottom[0] - left_bottom[0]
+        dy1 = right_top[1] - left_top[1]
+        dy2 = right_bottom[1] - left_bottom[1]
+        dx = (dx1 + dx2) / 2.0
+        dy = (dy1 + dy2) / 2.0
+        if abs(dx) < 1e-6:
+            return 0.0
+        return float(np.degrees(np.arctan2(dy, dx)))
+
+    def build_pick_target_lists(self):
+        """用托盘格点像素生成任务分配目标坐标，深度失败时自动回退旧粗估。"""
+        if self.board_grid_points is None or self.board_grid_image_shape is None:
+            raise RuntimeError("尚未缓存托盘格点，无法生成任务分配目标坐标")
+
+        category_index_by_name = {
+            category: index
+            for index, category in enumerate(BLOCK_CATEGORY_NAMES)
+        }
+        out_list = [[] for _ in BLOCK_CATEGORY_NAMES]
+        for item in self.pick_list:
+            col = float(item[0])
+            row = float(item[1])
+            category = str(item[3])
+            target_index = int(item[4])
+            target_point = interpolate_grid_point(self.board_grid_points, row, col)
+            px = float(target_point[0])
+            py = float(target_point[1])
+            servo_pose, source, _ = self.make_depth_first_servo_pose(
+                px,
+                py,
+                self.board_grid_image_shape,
+                f"托盘目标{target_index}",
+            )
+            category_index = category_index_by_name.get(category)
+            if category_index is None:
+                self.print_yellow_warning(f"未知托盘目标类别，已跳过: {category}")
+                continue
+            out_list[category_index].append([servo_pose[0], servo_pose[1], target_index])
+            print("托盘任务分配目标", "序号", target_index, "来源", source, "坐标", servo_pose[:3])
+        return out_list
+
     def get_cube_pos(self, req):
         img_bgr1 = self.latest_image
         if img_bgr1 is None:
@@ -337,7 +514,7 @@ class ImageProcessor:
         # 裁剪边距：正数向外扩展 YOLO 框，负数向内收缩 YOLO 框，单位是像素。
         crop_margin = 8
         cube_count=[0,0,0,0,0,0,0]#记录每个方块的放置个数
-        img_bgr = undistort_bgr_image(img_bgr1, self.camera_matrix, self.dist_coeff)#去畸变
+        img_bgr = img_bgr1
         template_geometry = load_template_geometry("high")#每次服务调用读取一次模板几何配置，便于标定后直接生效
         cube_list=[]#检测到方块储存在这个列表中
         for i in range(7):
@@ -359,20 +536,20 @@ class ImageProcessor:
             #获取角度，不用看
             theta = block["theta"]
 
-            cam_point3d = [0,0,0]
-################################################       粗定位，移动到大概位置即可      #########################################################
-            h, w = img_bgr1.shape[:2]
-            center_x = w / 2.0
-            center_y = h / 2.0
-            predicted_x = self.shooting_angle[0] + (py - center_y) * self.high_rough_y_mm_per_pixel  # 机械臂和相机坐标是反的
-            predicted_y = self.shooting_angle[1] + (px - center_x) * self.high_rough_x_mm_per_pixel  # 机械臂和相机坐标是反的
-            predicted_z = 200
-            cam_point3d[0]=predicted_x
-            cam_point3d[1]=predicted_y
-            cam_point3d[2]=predicted_z
-################################################       深度相机法        #########################################################
-            # resp = self.pixel2world_client(pixel2worldRequest(px,py))
-            # cam_point3d = list(resp.world_position)
+            servo_pose, source, world_position = self.make_depth_first_servo_pose(
+                px,
+                py,
+                img_bgr1.shape,
+                f"方块{category}",
+            )
+            cam_point3d = servo_pose[:3]
+            print(
+                "方块伺服观察位",
+                "类别", category,
+                "来源", source,
+                "世界点", world_position,
+                "pose", servo_pose,
+            )
 
             cube_list=make_list(cube_list,category,cam_point3d,theta)
 
@@ -398,7 +575,12 @@ class ImageProcessor:
             print(self.pick_list)
             for idx, sublist in enumerate(self.pick_list):
                 sublist.append(idx)
-        pick_list2=put_fenlei(self.pick_list,self.shooting_angle,self.calibrator)
+        try:
+            pick_list2 = self.build_pick_target_lists()
+        except Exception as exc:
+            rospy.logerr("生成托盘任务分配目标失败: %s" % exc)
+            print(f"\033[91m生成托盘任务分配目标失败: {exc}\033[0m")
+            return GetTargetPosResponse([0])
         block=cube_pocess(cube_list)
         self.results = optimize_block_assignment(block, pick_list2,self.pick_list)
         
@@ -412,10 +594,7 @@ class ImageProcessor:
         if img_bgr1 is None:
             rospy.logwarn("没有可用图像，无法识别托盘")
             return GetTargetPosResponse([0.0])
-        h, w = img_bgr1.shape[:2]
         board_bgr = img_bgr1
-        new_camera_mtx, roi = cv2.getOptimalNewCameraMatrix(self.camera_matrix, self.dist_coeff, (w, h), 1, (w, h))
-        board_bgr = cv2.undistort(img_bgr1, self.camera_matrix, self.dist_coeff, None, new_camera_mtx)#去畸变
         if board_bgr is None:
             print("没有图片")
             return GetTargetPosResponse([0.0])
@@ -436,8 +615,8 @@ class ImageProcessor:
             board_debug_image = draw_grid_debug(board_bgr, self.board_grid_points, center_point=center_point)
             save_image_to_path(self.visual_board_grid_debug_path, board_debug_image)
 
-            self.calibrator.board_detector_from_grid_points(self.board_grid_points)
-            self.calibrator.calibrate()#托盘识别结束
+            self.board_theta = self.compute_board_theta_from_grid_points(self.board_grid_points)
+            print(f"托盘像素角度: {self.board_theta:.2f}")
         except Exception as exc:
             self.board_grid_points = None
             self.board_grid_image_shape = None
@@ -465,7 +644,7 @@ class ImageProcessor:
         else:
             pick_cube = self.pick_list[req.num]
             x,y,z,t = calc_cube_location(pick_cube,block2,True)
-        xuanzhuan_angle = pick_cube[2] - t + self.calibrator.board_theta
+        xuanzhuan_angle = pick_cube[2] - t + self.board_theta
         #处理旋转角度超过360°的情况（比较极端）-- (-360 ~ 360)
         if xuanzhuan_angle > 360:
             xuanzhuan_angle -= 360
@@ -521,17 +700,12 @@ class ImageProcessor:
             h, w = self.board_grid_image_shape
             center_x = w / 2.0
             center_y = h / 2.0
-            predicted_x = self.shooting_angle[0] + (py - center_y) * self.high_rough_y_mm_per_pixel  # 机械臂和相机坐标是反的
-            predicted_y = self.shooting_angle[1] + (px - center_x) * self.high_rough_x_mm_per_pixel  # 机械臂和相机坐标是反的
-            predicted_z = 200.0
-            rough_pose = [
-                float(predicted_x),
-                float(predicted_y),
-                predicted_z,
-                float(self.shooting_angle[3]),
-                float(self.shooting_angle[4]),
-                float(self.shooting_angle[5]),
-            ]
+            rough_pose, source, world_position = self.make_depth_first_servo_pose(
+                px,
+                py,
+                self.board_grid_image_shape,
+                f"托盘摆放{req.num}",
+            )
 
             if self.board_grid_image is not None:
                 debug_image = draw_grid_debug(
@@ -546,6 +720,8 @@ class ImageProcessor:
                 "序号", req.num,
                 "目标行列", (row, col),
                 "目标像素", (px, py),
+                "来源", source,
+                "世界点", world_position,
                 "pose", rough_pose,
             )
             return GetTargetPosResponse(array=rough_pose)

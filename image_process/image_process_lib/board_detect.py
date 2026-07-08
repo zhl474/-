@@ -966,17 +966,35 @@ def board_grid_detect(img, debug_path=DEFAULT_DEBUG_PATH):
 
     try:
         crop_img, matrix = _get_board_crop(img)
-        keypoints, crop_debug_image, _ = _detect_grid_keypoints(crop_img)
+        keypoints, _crop_debug_image, _ = _detect_grid_keypoints(crop_img)
         point_count = len(keypoints)
-        _save_debug_image(debug_path, crop_debug_image)
 
         if point_count != BOARD_POINT_COUNT:
             message = f"托盘格点识别数量不是140个，请重新识别；当前识别到{point_count}个"
             _red_error(message)
+            debug_image = img.copy()
+            if point_count > 0:
+                crop_points = np.array([kp.pt for kp in keypoints], dtype=np.float32)
+                orig_points = _transform_points_to_origin(crop_points, matrix)
+                for point_index, (px, py) in enumerate(orig_points, start=1):
+                    center = (int(round(float(px))), int(round(float(py))))
+                    cv2.circle(debug_image, center, 4, (0, 255, 255), -1)
+                    cv2.putText(
+                        debug_image,
+                        str(point_index),
+                        (center[0] + 5, center[1] - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.4,
+                        (0, 255, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
+            _put_chinese_text(debug_image, message, (20, 30), (0, 0, 255))
+            _save_debug_image(debug_path, debug_image)
             return {
                 "found": False,
                 "grid_points": None,
-                "debug_image": crop_debug_image,
+                "debug_image": debug_image,
                 "message": message,
                 "count": point_count,
             }
@@ -996,11 +1014,14 @@ def board_grid_detect(img, debug_path=DEFAULT_DEBUG_PATH):
     except Exception as exc:
         message = f"托盘格点识别失败: {exc}"
         _red_error(message)
-        _save_debug_image(debug_path, img)
+        debug_image = img.copy() if img is not None else None
+        if debug_image is not None:
+            _put_chinese_text(debug_image, message, (20, 30), (0, 0, 255))
+        _save_debug_image(debug_path, debug_image)
         return {
             "found": False,
             "grid_points": None,
-            "debug_image": img.copy() if img is not None else None,
+            "debug_image": debug_image,
             "message": message,
             "count": 0,
         }

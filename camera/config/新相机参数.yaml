@@ -1,5 +1,6 @@
 # RGB相机
 rgb_camera:
+  fps: 30
   # 自动曝光
   auto_exposure: True
   # 手动设置曝光值
@@ -28,6 +29,7 @@ rgb_camera:
   power_line_frequency: 0
 # 深度相机
 depth_camera:
+  fps: 30
   # 自动曝光
   auto_exposure: True
   # 手动设置曝光值

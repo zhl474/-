@@ -19,9 +19,10 @@ class CameraNode:
         self.arm = AkaiFr()
         T_wrist2camera_mm = np.load('/home/zhl/SingleArmTetris/SingleArmTetris/src/camera/config/T_wrist2camera.npy')
         self.arm.set_tmat_wrist2camera(T_wrist2camera_mm)
-        self.tcf_biasx = -9.3
-        self.tcf_biasy = -4
-        self.tcf_biasz = 169
+        self.world_bias_mm = np.array(
+            rospy.get_param("~world_bias_mm", [0.0, 0.0, 0.0]),
+            dtype=float,
+        )
         # 创建发布者
         self.image_pub = rospy.Publisher('/camera/image_raw', Image, queue_size=10)
         self.bridge = CvBridge()
@@ -45,20 +46,32 @@ class CameraNode:
             
             depth_img = self.latest_depth_img.copy()
         
-        # 使用深度图像计算世界坐标
         try:
-            depth_value = depth_img[req.y, req.x]
-            if depth_value == 0: 
-                raise ValueError("无效深度0")
+            height, width = depth_img.shape[:2]
+            x = int(req.x)
+            y = int(req.y)
+            if x < 0 or x >= width or y < 0 or y >= height:
+                raise ValueError(f"像素坐标越界: ({x}, {y}), 图像尺寸=({width}, {height})")
+
+            # Gemini335 的彩图和深度图默认已经对齐；这里只取目标单点深度。
+            depth_value = float(depth_img[y, x])
+            if not np.isfinite(depth_value) or depth_value == 0:
+                raise ValueError(f"无效深度: {depth_value}")
             
             # 获取相机位姿
             ret, pose_base2camera = self.arm.get_camera_pose()
+            if ret is False:
+                raise RuntimeError("获取相机位姿失败")
+            if pose_base2camera is None or not np.all(np.isfinite(pose_base2camera)):
+                raise RuntimeError(f"相机位姿无效: {pose_base2camera}")
             T_base2camera_mm = tf3d.XYZRPY2TransformMatrix(pose_base2camera, xyz_unit=MM, rpy_unit=DEG, T_unit=MM)
             
             # 像素坐标转世界坐标
-            target = self.cap.depth_pixel2cam_point3d(req.x, req.y, depth_value=depth_value)
+            target = self.cap.depth_pixel2cam_point3d(x, y, depth_value=depth_value)
             base = tf3d.VectorTransform(T_base2camera_mm, target)
-            base = [base[0]+self.tcf_biasx,base[1]+self.tcf_biasy,base[2]+self.tcf_biasz]
+            if not np.all(np.isfinite(base)):
+                raise RuntimeError(f"世界坐标无效: {base}")
+            base = (np.array(base, dtype=float) + self.world_bias_mm).tolist()
             return pixel2worldResponse(world_position=base)
             
         except Exception as e:
@@ -67,7 +80,7 @@ class CameraNode:
     
     def publish_images(self):
         """发布图像的主循环"""
-        rate = rospy.Rate(30)  # 30Hz
+        rate = rospy.Rate(60)  # 30Hz
         
         while not rospy.is_shutdown():
             try:
