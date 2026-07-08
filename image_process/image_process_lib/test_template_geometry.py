@@ -6,6 +6,7 @@ import importlib.util
 import cv2
 import numpy as np
 import pytest
+import yaml
 
 
 PACKAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -22,8 +23,14 @@ from image_process_lib.block_category import (
     category_from_code,
     category_to_code,
 )
-from image_process_lib.single_block_detector import detect_block_with_high_prior_roi
-from image_process_lib.template_config import load_template_geometry
+from image_process_lib.single_block_detector import (
+    _segment_roi_by_local_rgb_color,
+    detect_block_with_high_prior_roi,
+)
+from image_process_lib.template_config import (
+    load_color_segmentation_config,
+    load_template_geometry,
+)
 from image_process_lib.template_match.kernels_create import (
     build_angle_values,
     create_base_shape,
@@ -183,6 +190,18 @@ def test_cropped_search_matches_full_search_center():
         0,
         angle_values=[0],
     )
+    debug_output = {}
+    debug_rect = get_rect(
+        image,
+        block_px,
+        connector_px,
+        category,
+        debug_full.copy(),
+        0,
+        0,
+        angle_values=[0],
+        debug_output=debug_output,
+    )
     cropped_rect = get_rect(
         image,
         block_px,
@@ -196,11 +215,27 @@ def test_cropped_search_matches_full_search_center():
         search_radius=15,
     )
 
+    np.testing.assert_allclose(debug_rect[0], full_rect[0], atol=1.0)
+    assert debug_output["best_kernel"].ndim == 2
+    assert debug_output["match_center"] == (float(full_rect[0][0]), float(full_rect[0][1]))
+    assert "template_top_left" in debug_output
+    assert "score" in debug_output
     np.testing.assert_allclose(cropped_rect[0], full_rect[0], atol=1.0)
     assert cropped_rect[2] == full_rect[2]
 
 
-def test_low_prior_roi_template_match_removes_white_background():
+def _bgr_from_rgb(r_value, g_value, b_value):
+    return np.array(
+        [
+            int(np.clip(round(float(b_value)), 0, 255)),
+            int(np.clip(round(float(g_value)), 0, 255)),
+            int(np.clip(round(float(r_value)), 0, 255)),
+        ],
+        dtype=np.uint8,
+    )
+
+
+def test_low_prior_roi_template_match_uses_local_rgb_color_seed():
     category = "T"
     block_px = 12
     connector_px = 3
@@ -208,6 +243,8 @@ def test_low_prior_roi_template_match_removes_white_background():
     high_theta = -template_angle
     target_center = (165, 116)
     image = np.full((240, 320, 3), 255, dtype=np.uint8)
+    color_config = load_color_segmentation_config(category)
+    target_bgr = _bgr_from_rgb(*color_config["rgb"])
 
     kernels, _, _ = create_rotation_kernels(
         block_px,
@@ -221,7 +258,7 @@ def test_low_prior_roi_template_match_removes_white_background():
     x1 = target_center[0] - mask_w // 2
     y1 = target_center[1] - mask_h // 2
     roi = image[y1:y1 + mask_h, x1:x1 + mask_w]
-    roi[shape_mask > 0] = (35, 60, 210)
+    roi[shape_mask > 0] = target_bgr
 
     result = detect_block_with_high_prior_roi(
         image,
@@ -241,6 +278,154 @@ def test_low_prior_roi_template_match_removes_white_background():
     assert abs(result["px"] - target_center[0]) <= 2.0
     assert abs(result["py"] - target_center[1]) <= 2.0
     assert abs(result["theta"] - high_theta) <= 1.0
+    assert result["debug_panel"] is not None
+    assert result["debug_panel"].size > 0
+
+
+def test_local_rgb_segment_returns_seed_debug_boxes():
+    image = np.full((90, 90, 3), 255, dtype=np.uint8)
+    image[25:70, 25:70] = _bgr_from_rgb(0, 0, 0)
+
+    mask, stages = _segment_roi_by_local_rgb_color(image, "T", return_stages=True)
+
+    assert mask.shape == image.shape[:2]
+    assert "seed_search_box" in stages
+    assert "seed_patch_box" in stages
+    assert "local_color" in stages
+    assert cv2.countNonZero(mask) > 0
+
+
+def _valid_template_size_config():
+    return {
+        "active_profile": "high",
+        "profiles": {
+            "high": {
+                "block_px": 37,
+                "connector_px": 5,
+            },
+        },
+    }
+
+
+def _valid_color_segmentation_config():
+    return {
+        "seed_search_half_size": 40,
+        "seed_patch_size": 7,
+        "seed_stride": 8,
+        "local_dist_thresh": 45,
+        "categories": {
+            "T": {
+                "rgb": [10, 20, 30],
+            },
+        },
+    }
+
+
+def _write_template_config(tmp_path, color_segmentation):
+    config_data = {
+        "template_sizes": _valid_template_size_config(),
+    }
+    if color_segmentation is not None:
+        config_data["color_segmentation"] = color_segmentation
+
+    config_path = tmp_path / "template_config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def test_load_color_segmentation_config_reads_category_prior(tmp_path):
+    config_path = _write_template_config(tmp_path, _valid_color_segmentation_config())
+
+    config = load_color_segmentation_config("T", config_path=str(config_path))
+
+    assert config == {
+        "seed_search_half_size": 40,
+        "seed_patch_size": 7,
+        "seed_stride": 8,
+        "local_dist_thresh": 45.0,
+        "rgb": (10.0, 20.0, 30.0),
+    }
+
+
+def test_load_color_segmentation_config_rejects_missing_section(tmp_path):
+    config_path = _write_template_config(tmp_path, None)
+
+    with pytest.raises(ValueError, match="color_segmentation"):
+        load_color_segmentation_config("T", config_path=str(config_path))
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    [
+        "seed_search_half_size",
+        "seed_patch_size",
+        "seed_stride",
+        "local_dist_thresh",
+    ],
+)
+def test_load_color_segmentation_config_rejects_missing_global_field(tmp_path, missing_key):
+    color_config = _valid_color_segmentation_config()
+    del color_config[missing_key]
+    config_path = _write_template_config(tmp_path, color_config)
+
+    with pytest.raises(ValueError, match=missing_key):
+        load_color_segmentation_config("T", config_path=str(config_path))
+
+
+@pytest.mark.parametrize(
+    ("bad_key", "bad_value"),
+    [
+        ("seed_search_half_size", 0),
+        ("seed_patch_size", -1),
+        ("seed_stride", "bad"),
+        ("local_dist_thresh", 0),
+    ],
+)
+def test_load_color_segmentation_config_rejects_bad_global_value(tmp_path, bad_key, bad_value):
+    color_config = _valid_color_segmentation_config()
+    color_config[bad_key] = bad_value
+    config_path = _write_template_config(tmp_path, color_config)
+
+    with pytest.raises(ValueError, match=bad_key):
+        load_color_segmentation_config("T", config_path=str(config_path))
+
+
+def test_load_color_segmentation_config_rejects_missing_category(tmp_path):
+    color_config = _valid_color_segmentation_config()
+    color_config["categories"] = {}
+    config_path = _write_template_config(tmp_path, color_config)
+
+    with pytest.raises(KeyError, match="T"):
+        load_color_segmentation_config("T", config_path=str(config_path))
+
+
+def test_load_color_segmentation_config_rejects_missing_rgb_prior(tmp_path):
+    color_config = _valid_color_segmentation_config()
+    del color_config["categories"]["T"]["rgb"]
+    config_path = _write_template_config(tmp_path, color_config)
+
+    with pytest.raises(ValueError, match="rgb"):
+        load_color_segmentation_config("T", config_path=str(config_path))
+
+
+@pytest.mark.parametrize("bad_rgb", [[1, 2], [1, 2, "bad"]])
+def test_load_color_segmentation_config_rejects_bad_rgb_prior(tmp_path, bad_rgb):
+    color_config = _valid_color_segmentation_config()
+    color_config["categories"]["T"]["rgb"] = bad_rgb
+    config_path = _write_template_config(tmp_path, color_config)
+
+    with pytest.raises(ValueError, match="rgb"):
+        load_color_segmentation_config("T", config_path=str(config_path))
+
+
+def test_local_rgb_segment_rejects_window_without_patch():
+    image = np.full((5, 5, 3), 255, dtype=np.uint8)
+
+    with pytest.raises(ValueError, match="无法枚举 seed patch"):
+        _segment_roi_by_local_rgb_color(image, "T")
 
 
 def test_load_template_geometry_reads_active_and_named_profiles(tmp_path):
@@ -552,3 +737,66 @@ def test_depth_first_servo_pose_falls_back_when_depth_invalid(monkeypatch):
     assert world_position == []
     assert pose == [97.5, 225.0, 200.0, 0.0, 0.0, 0.0]
     assert warnings and "回退旧粗估" in warnings[0]
+
+
+class _ProcessResponse:
+    def __init__(self, array=None, *args, **kwargs):
+        if array is None and args:
+            array = args[0]
+        self.array = array
+
+
+def _make_test_board_grid(module, step=10.0):
+    grid_points = [[None for _ in range(module.BOARD_COL_COUNT + 1)] for _ in range(module.BOARD_ROW_COUNT + 1)]
+    for row in range(1, module.BOARD_ROW_COUNT + 1):
+        for col in range(1, module.BOARD_COL_COUNT + 1):
+            grid_points[row][col] = np.array([col * step, row * step], dtype=np.float32)
+    return grid_points
+
+
+def _make_get_put_pose_processor(module, depth_calls):
+    processor = object.__new__(module.ImageProcessor)
+    processor.pick_list = [[1, 2, 90, "L_yellow", 0]]
+    processor.board_grid_points = _make_test_board_grid(module)
+    processor.board_grid_image_shape = (100, 100)
+    processor.board_grid_image = None
+    processor.visual_board_grid_debug_path = ""
+    processor.shooting_angle = [100.0, 200.0, 0.0, -180.0, 0.0, 90.0]
+    processor.servo_look_z = 200.0
+    processor.high_rough_x_mm_per_pixel = 0.5
+    processor.high_rough_y_mm_per_pixel = 0.25
+
+    def fail_on_depth(_req):
+        depth_calls.append(_req)
+        raise AssertionError("低位托盘 get_put_pose 不应调用深度相机")
+
+    processor.pixel2world_client = fail_on_depth
+    return processor
+
+
+def test_get_put_pose_uses_cached_high_place_pose_without_depth(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_put_pose_cached")
+    module.GetTargetPosResponse = _ProcessResponse
+    depth_calls = []
+    processor = _make_get_put_pose_processor(module, depth_calls)
+    processor.place_pose_by_index = {
+        0: [11.0, 22.0, 200.0, -180.0, 0.0, 90.0],
+    }
+
+    resp = processor.get_put_pose(types.SimpleNamespace(num=0))
+
+    assert resp.array == [11.0, 22.0, 200.0, -180.0, 0.0, 90.0]
+    assert depth_calls == []
+
+
+def test_get_put_pose_falls_back_to_pixel_rough_pose_without_depth(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_put_pose_no_cache")
+    module.GetTargetPosResponse = _ProcessResponse
+    depth_calls = []
+    processor = _make_get_put_pose_processor(module, depth_calls)
+    processor.place_pose_by_index = {}
+
+    resp = processor.get_put_pose(types.SimpleNamespace(num=0))
+
+    assert resp.array == [92.5, 180.0, 200.0, -180.0, 0.0, 90.0]
+    assert depth_calls == []

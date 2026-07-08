@@ -108,6 +108,7 @@ def get_rect(
     angle_values=None,
     search_center=None,
     search_radius=None,
+    debug_output=None,
 ):
     # 2. 加载模板（可以是一个或多个）
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -151,6 +152,15 @@ def get_rect(
 
     start_x = center[0] - (best_kernel.shape[1] // 2)
     start_y = center[1] - (best_kernel.shape[0] // 2)
+    if debug_output is not None:
+        debug_output.update({
+            "best_kernel": best_kernel.copy(),
+            "match_center": (float(center[0]), float(center[1])),
+            "template_top_left": (float(start_x), float(start_y)),
+            "search_offset": (int(offset_x), int(offset_y)),
+            "angle": float(positions["angle"]),
+            "score": float(positions["score"]),
+        })
     contours, _ = cv2.findContours(best_kernel, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(img_bgr2, contours, -1, (0, 255, 0), 1, offset=(int(crop_x)+int(start_x), int(crop_y)+int(start_y)))
     # cv2.imshow("match", vis_img)

@@ -129,6 +129,7 @@ if __name__ == "__main__":
     rospy.wait_for_service("get_board_pos")
     rospy.wait_for_service("get_cube_location")
     rospy.wait_for_service("get_put_pose")
+    rospy.wait_for_service("suck_control")
     if USE_VISUAL_PICK or USE_VISUAL_PLACE:
         rospy.wait_for_service("get_visual_servo_offset")
 

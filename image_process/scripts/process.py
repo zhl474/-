@@ -248,6 +248,7 @@ class ImageProcessor:
         self.board_grid_points = None
         self.board_grid_image_shape = None
         self.board_grid_image = None
+        self.place_pose_by_index = {}
         self.image_sub = rospy.Subscriber("/camera/image_raw", Image, self.image_callback)
         self.service1 = rospy.Service("get_cube_pos", GetTargetPos,self.get_cube_pos)
         self.service2 = rospy.Service("get_board_pos", GetTargetPos,self.get_board_pos)
@@ -475,10 +476,11 @@ class ImageProcessor:
         return float(np.degrees(np.arctan2(dy, dx)))
 
     def build_pick_target_lists(self):
-        """用托盘格点像素生成任务分配目标坐标，深度失败时自动回退旧粗估。"""
+        """高位生成托盘目标坐标，并缓存给低位摆放阶段直接复用。"""
         if self.board_grid_points is None or self.board_grid_image_shape is None:
             raise RuntimeError("尚未缓存托盘格点，无法生成任务分配目标坐标")
 
+        self.place_pose_by_index = {}
         category_index_by_name = {
             category: index
             for index, category in enumerate(BLOCK_CATEGORY_NAMES)
@@ -498,6 +500,7 @@ class ImageProcessor:
                 self.board_grid_image_shape,
                 f"托盘目标{target_index}",
             )
+            self.place_pose_by_index[target_index] = list(servo_pose)
             category_index = category_index_by_name.get(category)
             if category_index is None:
                 self.print_yellow_warning(f"未知托盘目标类别，已跳过: {category}")
@@ -590,6 +593,7 @@ class ImageProcessor:
         self.board_grid_points = None
         self.board_grid_image_shape = None
         self.board_grid_image = None
+        self.place_pose_by_index = {}
         img_bgr1 = self.latest_image
         if img_bgr1 is None:
             rospy.logwarn("没有可用图像，无法识别托盘")
@@ -700,12 +704,13 @@ class ImageProcessor:
             h, w = self.board_grid_image_shape
             center_x = w / 2.0
             center_y = h / 2.0
-            rough_pose, source, world_position = self.make_depth_first_servo_pose(
-                px,
-                py,
-                self.board_grid_image_shape,
-                f"托盘摆放{req.num}",
-            )
+            cached_pose = getattr(self, "place_pose_by_index", {}).get(int(req.num))
+            if cached_pose is not None:
+                rough_pose = list(cached_pose)
+                source = "高位缓存"
+            else:
+                rough_pose = self.make_high_rough_servo_pose(px, py, self.board_grid_image_shape)
+                source = "无深度粗估"
 
             if self.board_grid_image is not None:
                 debug_image = draw_grid_debug(
@@ -721,7 +726,6 @@ class ImageProcessor:
                 "目标行列", (row, col),
                 "目标像素", (px, py),
                 "来源", source,
-                "世界点", world_position,
                 "pose", rough_pose,
             )
             return GetTargetPosResponse(array=rough_pose)
@@ -925,7 +929,7 @@ class ImageProcessor:
         """识别方块目标相对相机中心的像素偏差。
 
         template_profile="low" 时使用高位传来的类别和角度先验：
-        按低位模板尺寸在画面中心生成旋转 ROI，去白背景后直接模板匹配。
+        按低位模板尺寸在画面中心生成旋转 ROI，RGB 局部颜色分割后直接模板匹配。
         其它 profile 仍保留旧 YOLO 检测流程，供高位或历史调试调用。
         """
         angle_prior_message = self.make_block_angle_prior_message(angle_center, angle_window, angle_step)

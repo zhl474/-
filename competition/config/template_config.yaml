@@ -10,6 +10,27 @@ template_sizes:
       block_px: 81
       connector_px: 11
 
+color_segmentation:
+  seed_search_half_size: 40
+  seed_patch_size: 7
+  seed_stride: 8
+  local_dist_thresh: 45
+  categories:
+    line:
+      rgb: [63, 44, 47]
+    square:
+      rgb: [129, 65, 53]
+    T:
+      rgb: [55, 67, 63]
+    L_yellow:
+      rgb: [115, 117, 40]
+    L_blue:
+      rgb: [49, 62, 83]
+    z_green:
+      rgb: [45, 84, 64]
+    z_blue:
+      rgb: [48, 77, 107]
+
 #真实长度测量
 # line:   17.8  78.2
 # buleL:  58.3  37.8
@@ -18,4 +39,3 @@ template_sizes:
 # greenZ: 58.0  38.0
 # buleZ:  58.2  38.1
 # square: 38.1  38.1 
-

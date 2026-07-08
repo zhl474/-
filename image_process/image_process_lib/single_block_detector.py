@@ -7,7 +7,7 @@ from image_process_lib.block_detection import (
     get_mask,
 )
 from image_process_lib.block_category import normalize_category_name
-from image_process_lib.template_config import load_template_geometry
+from image_process_lib.template_config import load_color_segmentation_config, load_template_geometry
 from image_process_lib.template_match.kernels_create import get_template_rect_size
 from image_process_lib.template_match.template_match import get_rect
 
@@ -130,20 +130,20 @@ def _make_panel_cell(title, image, cell_w=360, cell_h=260, title_h=34):
 
 def _make_block_debug_panel(
     original_debug,
-    roi_bgr=None,
+    roi_seed_debug=None,
     raw_mask=None,
-    morph_mask=None,
     final_mask=None,
+    match_mask_debug=None,
     match_debug=None,
     message="",
 ):
     """把低位方块视觉伺服关键阶段拼成一帧视频图。"""
     cells = [
         _make_panel_cell("1 原图与先验ROI", original_debug),
-        _make_panel_cell("2 裁剪ROI原图", roi_bgr),
-        _make_panel_cell("3 去白原始二值", raw_mask),
-        _make_panel_cell("4 开闭运算后", morph_mask),
-        _make_panel_cell("5 最终匹配mask", final_mask),
+        _make_panel_cell("2 ROI与seed取色范围", roi_seed_debug),
+        _make_panel_cell("3 RGB原始二值", raw_mask),
+        _make_panel_cell("4 最终匹配mask", final_mask),
+        _make_panel_cell("5 二值图模板匹配", match_mask_debug),
         _make_panel_cell("6 模板匹配结果", match_debug),
     ]
     top = np.hstack(cells[:3])
@@ -154,26 +154,185 @@ def _make_block_debug_panel(
     return panel
 
 
-def _remove_white_background(roi_bgr, white_s_max=45, white_v_min=180, return_stages=False):
-    """低位方块在白底上方时，直接把白色背景去掉得到前景 mask。"""
+def _segment_roi_by_local_rgb_color(roi_bgr, category, return_stages=False):
+    """在低位 ROI 内用局部 RGB 颜色种子分割目标方块。"""
     if roi_bgr is None or roi_bgr.size == 0:
-        raise ValueError("低位 ROI 为空，无法去白背景")
+        raise ValueError("低位 ROI 为空，无法进行 RGB 颜色分割")
 
-    hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
-    h, s, v = cv2.split(hsv)
-    white_bg = (s <= float(white_s_max)) & (v >= float(white_v_min))
-    raw_foreground = (~white_bg).astype(np.uint8) * 255
+    color_config = load_color_segmentation_config(category)
+    seed_search_half_size = color_config["seed_search_half_size"]
+    seed_patch_size = color_config["seed_patch_size"]
+    seed_stride = color_config["seed_stride"]
+    local_dist_thresh = color_config["local_dist_thresh"]
+    r_prior, g_prior, b_prior = color_config["rgb"]
+
+    roi_rgb = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
+    roi_h, roi_w = roi_rgb.shape[:2]
+    center_x = roi_w / 2.0
+    center_y = roi_h / 2.0
+    search_x1 = max(0, int(np.floor(center_x - seed_search_half_size)))
+    search_y1 = max(0, int(np.floor(center_y - seed_search_half_size)))
+    search_x2 = min(roi_w, int(np.ceil(center_x + seed_search_half_size + 1)))
+    search_y2 = min(roi_h, int(np.ceil(center_y + seed_search_half_size + 1)))
+
+    if search_x2 - search_x1 < seed_patch_size or search_y2 - search_y1 < seed_patch_size:
+        raise ValueError(
+            "低位 ROI 中心搜索窗口过小，无法枚举 seed patch: "
+            f"roi={roi_w}x{roi_h}, "
+            f"window=({search_x1},{search_y1})-({search_x2},{search_y2}), "
+            f"seed_patch_size={seed_patch_size}"
+        )
+
+    best_patch = None
+    best_d2 = None
+    for patch_y in range(search_y1, search_y2 - seed_patch_size + 1, seed_stride):
+        for patch_x in range(search_x1, search_x2 - seed_patch_size + 1, seed_stride):
+            patch = roi_rgb[patch_y:patch_y + seed_patch_size, patch_x:patch_x + seed_patch_size]
+            r_mean, g_mean, b_mean = patch.reshape(-1, 3).mean(axis=0)
+            d2 = (
+                (r_mean - r_prior) ** 2
+                + (g_mean - g_prior) ** 2
+                + (b_mean - b_prior) ** 2
+            )
+            if best_d2 is None or d2 < best_d2:
+                best_d2 = d2
+                best_patch = {
+                    "x": patch_x,
+                    "y": patch_y,
+                    "mean": (float(r_mean), float(g_mean), float(b_mean)),
+                }
+
+    if best_patch is None:
+        raise ValueError(
+            "低位 ROI 中心搜索窗口无法枚举任何 seed patch: "
+            f"roi={roi_w}x{roi_h}, "
+            f"window=({search_x1},{search_y1})-({search_x2},{search_y2}), "
+            f"seed_patch_size={seed_patch_size}, seed_stride={seed_stride}"
+        )
+
+    r0, g0, b0 = best_patch["mean"]
+    d2_map = (
+        (roi_rgb[:, :, 0] - r0) ** 2
+        + (roi_rgb[:, :, 1] - g0) ** 2
+        + (roi_rgb[:, :, 2] - b0) ** 2
+    )
+    raw_foreground = (d2_map < local_dist_thresh ** 2).astype(np.uint8) * 255
     kernel = np.ones((3, 3), np.uint8)
     morph_foreground = cv2.morphologyEx(raw_foreground, cv2.MORPH_OPEN, kernel)
     morph_foreground = cv2.morphologyEx(morph_foreground, cv2.MORPH_CLOSE, kernel)
     foreground = morph_foreground
+
+    seed_center_x = best_patch["x"] + seed_patch_size / 2.0
+    seed_center_y = best_patch["y"] + seed_patch_size / 2.0
+    print(
+        "低位RGB颜色分割: "
+        f"category={category}, "
+        f"seed_center=({seed_center_x:.1f}, {seed_center_y:.1f}), "
+        f"local_color=[{r0:.1f}, {g0:.1f}, {b0:.1f}], "
+        f"local_dist_thresh={local_dist_thresh:.1f}"
+    )
+
     if return_stages:
         return foreground, {
             "raw_mask": raw_foreground,
             "morph_mask": morph_foreground,
             "filled_mask": foreground,
+            "seed_center": (seed_center_x, seed_center_y),
+            "seed_search_box": (search_x1, search_y1, search_x2, search_y2),
+            "seed_patch_box": (
+                best_patch["x"],
+                best_patch["y"],
+                best_patch["x"] + seed_patch_size,
+                best_patch["y"] + seed_patch_size,
+            ),
+            "local_color": (r0, g0, b0),
+            "local_dist_thresh": local_dist_thresh,
+            "seed_d2": float(best_d2),
         }
     return foreground
+
+
+def _draw_seed_patch_debug(roi_bgr, mask_stages):
+    """在 ROI 原图上标出中心搜索窗口和最终 seed patch。"""
+    debug = _make_debug_image(roi_bgr)
+    search_box = mask_stages.get("seed_search_box")
+    patch_box = mask_stages.get("seed_patch_box")
+    seed_center = mask_stages.get("seed_center")
+    local_color = mask_stages.get("local_color")
+    local_dist_thresh = mask_stages.get("local_dist_thresh")
+
+    if search_box is not None:
+        x1, y1, x2, y2 = [int(round(v)) for v in search_box]
+        cv2.rectangle(debug, (x1, y1), (x2 - 1, y2 - 1), (0, 255, 255), 1)
+
+    if patch_box is not None:
+        x1, y1, x2, y2 = [int(round(v)) for v in patch_box]
+        cv2.rectangle(debug, (x1, y1), (x2 - 1, y2 - 1), (0, 0, 255), 2)
+
+    if seed_center is not None:
+        cv2.drawMarker(
+            debug,
+            (int(round(seed_center[0])), int(round(seed_center[1]))),
+            (0, 0, 255),
+            markerType=cv2.MARKER_CROSS,
+            markerSize=18,
+            thickness=2,
+        )
+
+    if local_color is not None:
+        r0, g0, b0 = local_color
+        text = f"seed RGB=[{r0:.0f},{g0:.0f},{b0:.0f}]"
+        _put_chinese_text(debug, text, (8, 8), (0, 255, 255), font_size=20)
+    if local_dist_thresh is not None:
+        _put_chinese_text(debug, f"阈值={float(local_dist_thresh):.1f}", (8, 36), (0, 255, 255), font_size=20)
+
+    return debug
+
+
+def _draw_template_match_on_mask(mask, match_debug_output):
+    """在模板匹配实际输入的二值图上画出最佳模板轮廓。"""
+    debug = _to_bgr(mask)
+    if not match_debug_output:
+        return debug
+
+    best_kernel = match_debug_output.get("best_kernel")
+    template_top_left = match_debug_output.get("template_top_left")
+    match_center = match_debug_output.get("match_center")
+    angle = match_debug_output.get("angle")
+    score = match_debug_output.get("score")
+    if best_kernel is None or template_top_left is None:
+        return debug
+
+    contours, _ = cv2.findContours(best_kernel, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    offset = (
+        int(round(float(template_top_left[0]))),
+        int(round(float(template_top_left[1]))),
+    )
+    cv2.drawContours(debug, contours, -1, (0, 255, 0), 1, offset=offset)
+
+    if match_center is not None:
+        cv2.drawMarker(
+            debug,
+            (int(round(float(match_center[0]))), int(round(float(match_center[1])))),
+            (0, 0, 255),
+            markerType=cv2.MARKER_CROSS,
+            markerSize=18,
+            thickness=2,
+        )
+
+    if angle is not None and score is not None:
+        _put_chinese_text(debug, f"角度={float(angle):.1f} 分数={float(score):.1f}", (8, 8), (0, 255, 255), font_size=20)
+
+    return debug
+
+
+def _format_seed_debug_message(category, foreground_area, mask_stages, prefix=""):
+    """生成低位方块 debug 面板底部摘要。"""
+    local_color = mask_stages.get("local_color", (0.0, 0.0, 0.0))
+    local_dist_thresh = float(mask_stages.get("local_dist_thresh", 0.0))
+    seed_rgb = [int(round(float(value))) for value in local_color]
+    prefix_text = f"{prefix} " if prefix else ""
+    return f"{prefix_text}类别={category} 面积={foreground_area} seedRGB={seed_rgb} 阈值={local_dist_thresh:.1f}"
 
 
 
@@ -220,7 +379,7 @@ def detect_block_with_high_prior_roi(
 
     低位画面中相机已在方块正上方，不再重新 YOLO 检测类别和框。
     这里用画面中心、高位旋转角和低位模板尺寸估算旋转矩形 ROI；
-    ROI 内去掉白色背景后，只在高位角度附近做模板匹配。
+    ROI 内按局部 RGB 颜色分割后，只在高位角度附近做模板匹配。
     """
     debug_image = _make_debug_image(img_bgr)
     if img_bgr is None or img_bgr.size == 0:
@@ -257,24 +416,29 @@ def detect_block_with_high_prior_roi(
     roi_polygon_mask = np.zeros(roi_bgr.shape[:2], dtype=np.uint8)
     cv2.fillConvexPoly(roi_polygon_mask, np.intp(local_roi_box), 255)
 
-    foreground_mask, mask_stages = _remove_white_background(
+    foreground_mask, mask_stages = _segment_roi_by_local_rgb_color(
         roi_bgr,
-        white_s_max=white_s_max,
-        white_v_min=white_v_min,
+        category,
         return_stages=True,
     )
+    roi_seed_debug = _draw_seed_patch_debug(roi_bgr, mask_stages)
     foreground_mask = cv2.bitwise_and(foreground_mask, roi_polygon_mask)
     foreground_area = int(cv2.countNonZero(foreground_mask))
     if foreground_area < int(min_foreground_area):
         _draw_prior_roi_debug(debug_image, roi_box, category=category, theta=high_theta_deg)
         debug_panel = _make_block_debug_panel(
             roi_debug_image,
-            roi_bgr=roi_bgr,
+            roi_seed_debug=roi_seed_debug,
             raw_mask=mask_stages["raw_mask"],
-            morph_mask=mask_stages["morph_mask"],
             final_mask=foreground_mask,
+            match_mask_debug=_draw_template_match_on_mask(foreground_mask, None),
             match_debug=debug_image,
-            message=f"前景面积过小: {foreground_area}",
+            message=_format_seed_debug_message(
+                category,
+                foreground_area,
+                mask_stages,
+                prefix="前景面积过小",
+            ),
         )
         return _empty_detection(
             f"低位 ROI 前景面积过小: {foreground_area}",
@@ -284,6 +448,7 @@ def detect_block_with_high_prior_roi(
 
     # get_rect 内部模板角度为逆时针正；返回的 OpenCV 矩形角度是相反数。
     template_angle_center = -high_theta_deg
+    match_debug_output = {}
     rect = get_rect(
         foreground_mask,
         block_px,
@@ -295,7 +460,9 @@ def detect_block_with_high_prior_roi(
         angle_step=angle_step,
         angle_center=template_angle_center,
         angle_window=angle_window,
+        debug_output=match_debug_output,
     )
+    match_mask_debug = _draw_template_match_on_mask(foreground_mask, match_debug_output)
 
     box = cv2.boxPoints(rect)
     box = np.intp(box)
@@ -334,12 +501,12 @@ def detect_block_with_high_prior_roi(
     )
     debug_panel = _make_block_debug_panel(
         roi_debug_image,
-        roi_bgr=roi_bgr,
+        roi_seed_debug=roi_seed_debug,
         raw_mask=mask_stages["raw_mask"],
-        morph_mask=mask_stages["morph_mask"],
         final_mask=foreground_mask,
+        match_mask_debug=match_mask_debug,
         match_debug=debug_image,
-        message=f"类别={category} 面积={foreground_area} 填洞前后对比",
+        message=_format_seed_debug_message(category, foreground_area, mask_stages),
     )
 
     return {
