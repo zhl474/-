@@ -860,8 +860,7 @@ class ImageProcessor:
 
         try:
             h, w = img_bgr1.shape[:2]
-            new_camera_mtx, roi = cv2.getOptimalNewCameraMatrix(self.camera_matrix, self.dist_coeff, (w, h), 1, (w, h))
-            board_bgr = cv2.undistort(img_bgr1, self.camera_matrix, self.dist_coeff, None, new_camera_mtx)#去畸变
+            board_bgr = img_bgr1
             center_x = w / 2.0
             center_y = h / 2.0
             detect_result = detect_nearest_board_dot_in_roi(

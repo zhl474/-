@@ -78,13 +78,8 @@ def load_camera_params(calibration_path):
 
 
 def undistort_image(img_bgr, camera_params):
-    if camera_params is None:
-        return img_bgr
-
-    camera_matrix, dist_coeff = camera_params
-    h, w = img_bgr.shape[:2]
-    new_camera_mtx, _ = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeff, (w, h), 1, (w, h))
-    return cv2.undistort(img_bgr, camera_matrix, dist_coeff, None, new_camera_mtx)
+    """Gemini335 图像直接参与标定测量，不再额外去畸变。"""
+    return img_bgr
 
 
 def iter_image_inputs(image_paths):
@@ -424,7 +419,7 @@ def print_summary(measurements):
 
 def main():
     args = parse_args()
-    camera_params = None if args.no_undistort else load_camera_params(args.calibration)
+    camera_params = None
     measurements = init_measurements()
     if args.accumulate:
         print("提示：当前脚本不再读取历史 measurements，只统计本次接受测量。")

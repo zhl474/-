@@ -13,16 +13,8 @@ from image_process_lib.template_match.template_match import get_rect
 
 
 def undistort_bgr_image(img_bgr, camera_matrix, dist_coeff):
-    """按当前相机内参去畸变，返回后续检测统一使用的图像。"""
-    h, w = img_bgr.shape[:2]
-    new_camera_mtx, _ = cv2.getOptimalNewCameraMatrix(
-        camera_matrix,
-        dist_coeff,
-        (w, h),
-        1,
-        (w, h),
-    )
-    return cv2.undistort(img_bgr, camera_matrix, dist_coeff, None, new_camera_mtx)
+    """Gemini335 已输出可直接使用的图像，这里保留接口但不再做去畸变。"""
+    return img_bgr
 
 
 def _empty_detection(message, debug_image=None, debug_panel=None):
