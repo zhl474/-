@@ -7,35 +7,35 @@ template_sizes:
       block_px: 37
       connector_px: 5
     low:
-      block_px: 81
+      block_px: 83
       connector_px: 11
 
 color_segmentation:
   seed_search_half_size: 40
   seed_patch_size: 7
   seed_stride: 8
-  local_dist_thresh: 45
+  local_dist_thresh: 40
   categories:
     line:
-      rgb: [63, 44, 47]
+      rgb: [89, 52, 56]
     square:
-      rgb: [129, 65, 53]
+      rgb: [103, 56, 54]
     T:
-      rgb: [55, 67, 63]
+      rgb: [54, 61, 61]
     L_yellow:
-      rgb: [115, 117, 40]
+      rgb: [89, 97, 42]
     L_blue:
-      rgb: [49, 62, 83]
+      rgb: [44, 55, 80]
     z_green:
-      rgb: [45, 84, 64]
+      rgb: [48, 73, 65]
     z_blue:
-      rgb: [48, 77, 107]
+      rgb: [44, 58, 87]
 
-#真实长度测量
-# line:   17.8  78.2
-# buleL:  58.3  37.8
-# yellowL:58.1  38.0
-# T:      58.0  38.1  
+#真实长度测量 注：计算的时候不要拿line的短边*4-长边，大数相减求小数求小数会引起很大误差，稍微读错一点，可能算出来的间隙就差很多
+# line:   17.8  78.2   364.7 80
+# buleL:  58.3  37.8   
+# yellowL:58.1  38.0   271.6 175
+# T:      58.0  38.1   
 # greenZ: 58.0  38.0
 # buleZ:  58.2  38.1
 # square: 38.1  38.1 

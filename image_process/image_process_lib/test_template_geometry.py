@@ -295,6 +295,35 @@ def test_local_rgb_segment_returns_seed_debug_boxes():
     assert cv2.countNonZero(mask) > 0
 
 
+def test_local_rgb_seed_prefers_homogeneous_patch_over_mixed_boundary():
+    category = "T"
+    config = load_color_segmentation_config(category)
+    patch_size = config["seed_patch_size"]
+    seed_stride = config["seed_stride"]
+    seed_search_half_size = config["seed_search_half_size"]
+    prior_rgb = np.array(config["rgb"], dtype=np.float32)
+    homogeneous_rgb = np.clip(prior_rgb + np.array([5.0, 0.0, 0.0]), 0, 255)
+    low_rgb = np.clip(prior_rgb - 50.0, 0, 255)
+    high_rgb = np.clip(prior_rgb + 50.0, 0, 255)
+
+    image = np.full((90, 90, 3), 255, dtype=np.uint8)
+    search_start = max(0, int(np.floor(45.0 - seed_search_half_size)))
+    boundary_x = search_start + 4 * seed_stride
+    homogeneous_x = search_start + 6 * seed_stride
+    patch_y = search_start + 4 * seed_stride
+
+    boundary_bgr = image[patch_y:patch_y + patch_size, boundary_x:boundary_x + patch_size]
+    split_col = patch_size // 2
+    boundary_bgr[:, :split_col] = _bgr_from_rgb(*low_rgb)
+    boundary_bgr[:, split_col:] = _bgr_from_rgb(*high_rgb)
+    image[patch_y:patch_y + patch_size, homogeneous_x:homogeneous_x + patch_size] = _bgr_from_rgb(*homogeneous_rgb)
+
+    _mask, stages = _segment_roi_by_local_rgb_color(image, category, return_stages=True)
+
+    np.testing.assert_allclose(stages["local_color"], homogeneous_rgb, atol=1.0)
+    assert stages["seed_variance_d2"] < 1.0
+
+
 def _valid_template_size_config():
     return {
         "active_profile": "high",

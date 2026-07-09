@@ -673,9 +673,9 @@ if __name__ == "__main__":
         sucker_high_pose[2] = lift_z
         send_arm_pose(sucker_high_pose, speed=ARM_SPEED, theta_deg=theta_pick, label="视觉抓取吸盘高位")
 
-        # 8. 下探前留出安全确认入口，避免未实测参数直接撞桌面。
-        if not verify_pick_before_down(sucker_high_pose, index_cube):
-            handle_block_servo_failed(index_cube, "人工取消下探吸取")
+        # 8. 下探前留出安全确认入口，避免未实测参数直接撞桌面。已经稳定实现，不需要暂停
+        # if not verify_pick_before_down(sucker_high_pose, index_cube):
+        #     handle_block_servo_failed(index_cube, "人工取消下探吸取")
 
         # 9. 下探吸取。
         pick_pose = list(sucker_high_pose)

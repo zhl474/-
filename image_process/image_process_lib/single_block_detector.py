@@ -184,22 +184,28 @@ def _segment_roi_by_local_rgb_color(roi_bgr, category, return_stages=False):
         )
 
     best_patch = None
-    best_d2 = None
+    best_score = None
     for patch_y in range(search_y1, search_y2 - seed_patch_size + 1, seed_stride):
         for patch_x in range(search_x1, search_x2 - seed_patch_size + 1, seed_stride):
             patch = roi_rgb[patch_y:patch_y + seed_patch_size, patch_x:patch_x + seed_patch_size]
             r_mean, g_mean, b_mean = patch.reshape(-1, 3).mean(axis=0)
-            d2 = (
+            color_d2 = (
                 (r_mean - r_prior) ** 2
                 + (g_mean - g_prior) ** 2
                 + (b_mean - b_prior) ** 2
             )
-            if best_d2 is None or d2 < best_d2:
-                best_d2 = d2
+            mean_rgb = np.array([r_mean, g_mean, b_mean], dtype=np.float32)
+            patch_variance_d2 = float(np.mean(np.sum((patch - mean_rgb) ** 2, axis=2)))
+            seed_score = float(color_d2 + patch_variance_d2)
+            if best_score is None or seed_score < best_score:
+                best_score = seed_score
                 best_patch = {
                     "x": patch_x,
                     "y": patch_y,
                     "mean": (float(r_mean), float(g_mean), float(b_mean)),
+                    "color_d2": float(color_d2),
+                    "variance_d2": patch_variance_d2,
+                    "score": seed_score,
                 }
 
     if best_patch is None:
@@ -229,7 +235,9 @@ def _segment_roi_by_local_rgb_color(roi_bgr, category, return_stages=False):
         f"category={category}, "
         f"seed_center=({seed_center_x:.1f}, {seed_center_y:.1f}), "
         f"local_color=[{r0:.1f}, {g0:.1f}, {b0:.1f}], "
-        f"local_dist_thresh={local_dist_thresh:.1f}"
+        f"local_dist_thresh={local_dist_thresh:.1f}, "
+        f"seed_color_d2={best_patch['color_d2']:.1f}, "
+        f"seed_variance_d2={best_patch['variance_d2']:.1f}"
     )
 
     if return_stages:
@@ -247,7 +255,9 @@ def _segment_roi_by_local_rgb_color(roi_bgr, category, return_stages=False):
             ),
             "local_color": (r0, g0, b0),
             "local_dist_thresh": local_dist_thresh,
-            "seed_d2": float(best_d2),
+            "seed_color_d2": float(best_patch["color_d2"]),
+            "seed_variance_d2": float(best_patch["variance_d2"]),
+            "seed_score": float(best_patch["score"]),
         }
     return foreground
 
@@ -260,6 +270,7 @@ def _draw_seed_patch_debug(roi_bgr, mask_stages):
     seed_center = mask_stages.get("seed_center")
     local_color = mask_stages.get("local_color")
     local_dist_thresh = mask_stages.get("local_dist_thresh")
+    seed_variance_d2 = mask_stages.get("seed_variance_d2")
 
     if search_box is not None:
         x1, y1, x2, y2 = [int(round(v)) for v in search_box]
@@ -285,6 +296,8 @@ def _draw_seed_patch_debug(roi_bgr, mask_stages):
         _put_chinese_text(debug, text, (8, 8), (0, 255, 255), font_size=20)
     if local_dist_thresh is not None:
         _put_chinese_text(debug, f"阈值={float(local_dist_thresh):.1f}", (8, 36), (0, 255, 255), font_size=20)
+    if seed_variance_d2 is not None:
+        _put_chinese_text(debug, f"方差D2={float(seed_variance_d2):.0f}", (8, 64), (0, 255, 255), font_size=20)
 
     return debug
 
@@ -330,9 +343,13 @@ def _format_seed_debug_message(category, foreground_area, mask_stages, prefix=""
     """生成低位方块 debug 面板底部摘要。"""
     local_color = mask_stages.get("local_color", (0.0, 0.0, 0.0))
     local_dist_thresh = float(mask_stages.get("local_dist_thresh", 0.0))
+    seed_variance_d2 = float(mask_stages.get("seed_variance_d2", 0.0))
     seed_rgb = [int(round(float(value))) for value in local_color]
     prefix_text = f"{prefix} " if prefix else ""
-    return f"{prefix_text}类别={category} 面积={foreground_area} seedRGB={seed_rgb} 阈值={local_dist_thresh:.1f}"
+    return (
+        f"{prefix_text}类别={category} 面积={foreground_area} "
+        f"seedRGB={seed_rgb} 阈值={local_dist_thresh:.1f} 方差D2={seed_variance_d2:.0f}"
+    )
 
 
 
