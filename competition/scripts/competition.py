@@ -104,8 +104,9 @@ if __name__ == "__main__":
     SERVO_LOOK_Z = 200.0
     PICK_Z = 170.0
     LIFT_Z = 205.0
-    ARM_SPEED = 40
-    PICK_SPEED = 25
+    ARM_SPEED = 80
+    PICK_SPEED = 40
+    SERVO_SPEED = 25
     PLACE_HIGH_Z = 197.0
     PLACE_DOWN_Z = 188.0
     PLACE_LIFT_STEP_MM = 20.0
@@ -114,7 +115,7 @@ if __name__ == "__main__":
     VISUAL_MIN_STEP_MM = 0.05
     VISUAL_MAX_STEP_MM = 5.0
     VISUAL_MAX_ITER = 40
-    VISUAL_SUCCESS_STABLE_FRAMES = 5
+    VISUAL_SUCCESS_STABLE_FRAMES = 2
     VISUAL_MAX_MISSED_FRAMES = 5
     VISUAL_SETTLE_SEC = 0.0
 
@@ -389,7 +390,7 @@ if __name__ == "__main__":
             move_pose_for_visual_servo,
             start_pose,
             visual_servo_config,
-            speed=ARM_SPEED,
+            speed=SERVO_SPEED,
             error_threshold_px=VISUAL_ERROR_THRESHOLD_PX,
             max_step_mm=VISUAL_MAX_STEP_MM,
             min_step_mm=VISUAL_MIN_STEP_MM,
@@ -486,7 +487,7 @@ if __name__ == "__main__":
             move_pose_for_visual_servo,
             start_pose,
             visual_servo_config,
-            speed=ARM_SPEED,
+            speed=SERVO_SPEED,
             error_threshold_px=VISUAL_ERROR_THRESHOLD_PX,
             max_step_mm=VISUAL_MAX_STEP_MM,
             min_step_mm=VISUAL_MIN_STEP_MM,
@@ -551,7 +552,7 @@ if __name__ == "__main__":
         place_down_pose = list(place_high_pose)
         place_down_pose[2] = place_down_z
         send_arm_pose(place_down_pose, speed=PICK_SPEED, theta_deg=theta_place, label="托盘视觉摆放下放")
-        input("放")
+        # input("放")
         set_sucker_state(suck_out)
 
         place_lift_pose = list(place_down_pose)
