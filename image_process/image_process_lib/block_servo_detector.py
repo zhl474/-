@@ -227,16 +227,6 @@ def _segment_roi_by_local_rgb_color(roi_bgr, category, return_stages=False):
 
     seed_center_x = best_patch["x"] + seed_patch_size / 2.0
     seed_center_y = best_patch["y"] + seed_patch_size / 2.0
-    print(
-        "低位RGB颜色分割: "
-        f"category={category}, "
-        f"seed_center=({seed_center_x:.1f}, {seed_center_y:.1f}), "
-        f"local_color=[{r0:.1f}, {g0:.1f}, {b0:.1f}], "
-        f"local_dist_thresh={local_dist_thresh:.1f}, "
-        f"seed_color_d2={best_patch['color_d2']:.1f}, "
-        f"seed_variance_d2={best_patch['variance_d2']:.1f}"
-    )
-
     if return_stages:
         return foreground, {
             "raw_mask": raw_foreground,
@@ -534,4 +524,3 @@ def detect_block_with_high_prior_roi(
         "debug_panel": debug_panel,
         "message": "低位先验 ROI 模板匹配成功",
     }
-

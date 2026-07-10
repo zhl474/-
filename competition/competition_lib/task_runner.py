@@ -78,6 +78,7 @@ class TaskRunner:
             success_stable_frames=self.config.success_stable_frames,
             max_missed_frames=self.config.max_missed_frames,
             settle_sec=self.config.settle_sec,
+            timing_debug=self.config.timing_debug,
         )
 
     def _pick(self, target):

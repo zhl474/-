@@ -24,6 +24,7 @@ class ExecutionConfig:
     place_high_z: float
     place_down_z: float
     place_lift_step_mm: float
+    timing_debug: bool
     error_threshold_px: float
     min_step_mm: float
     max_step_mm: float
@@ -62,6 +63,7 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         place_high_z=float(motion["place_high_z"]),
         place_down_z=float(motion["place_down_z"]),
         place_lift_step_mm=float(motion["place_lift_step_mm"]),
+        timing_debug=bool(servo.get("timing_debug", False)),
         error_threshold_px=float(servo["error_threshold_px"]),
         min_step_mm=float(servo["min_step_mm"]),
         max_step_mm=float(servo["max_step_mm"]),
@@ -85,8 +87,6 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
     ]
     if not np.all(np.isfinite(numeric_values)) or min(config.arm_speed, config.pick_speed, config.servo_speed) <= 0:
         raise ValueError("执行配置包含无效数值")
-    if config.pick_z >= config.lift_z or config.place_down_z >= config.place_high_z:
-        raise ValueError("抓放下探高度必须低于对应高位")
     if config.error_threshold_px < 0 or not 0 <= config.min_step_mm <= config.max_step_mm:
         raise ValueError("视觉伺服误差阈值和步长范围无效")
     if min(config.max_iter, config.success_stable_frames, config.max_missed_frames) <= 0:

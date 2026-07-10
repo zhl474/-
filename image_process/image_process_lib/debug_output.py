@@ -68,7 +68,6 @@ class DebugVideoRecorder:
                     self.video_path = video_path
                     self.frame_size = frame_size
                     self.codec_name = codec_name
-                    rospy.loginfo("调试视频开始录制: %s，编码=%s", video_path, codec_name)
                     return True
                 writer.release()
             except Exception as exc:

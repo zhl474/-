@@ -51,13 +51,16 @@ def run_offset_visual_servo_alignment(
     max_missed_frames: int,
     settle_sec: float,
     min_step_mm: float = 0.0,
+    timing_debug: bool = False,
 ):
     pose = list(float(value) for value in start_pose)
     stable_count = 0
     missed_count = 0
     last_response = None
     for iteration in range(int(max_iter)):
+        round_started_at = time.perf_counter()
         response = get_offset_func()
+        detection_finished_at = time.perf_counter()
         last_response = response
         if not response.found:
             missed_count += 1
@@ -67,8 +70,22 @@ def run_offset_visual_servo_alignment(
                 f"连续丢失 {missed_count}/{max_missed_frames}: {response.message}"
             )
             if missed_count >= max_missed_frames:
+                if timing_debug:
+                    print(
+                        f"[视觉伺服耗时] 第 {iteration + 1} 轮 "
+                        f"图像服务={(detection_finished_at - round_started_at) * 1000:.1f}ms，"
+                        f"本轮总={(time.perf_counter() - round_started_at) * 1000:.1f}ms"
+                    )
                 return False, pose, last_response, "连续多帧未识别到目标"
             time.sleep(settle_sec)
+            if timing_debug:
+                round_finished_at = time.perf_counter()
+                print(
+                    f"[视觉伺服耗时] 第 {iteration + 1} 轮 "
+                    f"图像服务={(detection_finished_at - round_started_at) * 1000:.1f}ms，"
+                    f"稳定等待={(round_finished_at - detection_finished_at) * 1000:.1f}ms，"
+                    f"本轮总={(round_finished_at - round_started_at) * 1000:.1f}ms"
+                )
             continue
 
         missed_count = 0
@@ -76,11 +93,26 @@ def run_offset_visual_servo_alignment(
         if error <= error_threshold_px:
             stable_count += 1
             if stable_count >= success_stable_frames:
+                if timing_debug:
+                    print(
+                        f"[视觉伺服耗时] 第 {iteration + 1} 轮 "
+                        f"图像服务={(detection_finished_at - round_started_at) * 1000:.1f}ms，"
+                        f"本轮总={(time.perf_counter() - round_started_at) * 1000:.1f}ms"
+                    )
                 return True, pose, last_response, "视觉伺服对准成功"
             time.sleep(settle_sec)
+            if timing_debug:
+                round_finished_at = time.perf_counter()
+                print(
+                    f"[视觉伺服耗时] 第 {iteration + 1} 轮 "
+                    f"图像服务={(detection_finished_at - round_started_at) * 1000:.1f}ms，"
+                    f"稳定等待={(round_finished_at - detection_finished_at) * 1000:.1f}ms，"
+                    f"本轮总={(round_finished_at - round_started_at) * 1000:.1f}ms"
+                )
             continue
 
         stable_count = 0
+        control_calculation_started_at = time.perf_counter()
         delta_xy = pixel_error_to_robot_delta(
             response.dx_px,
             response.dy_px,
@@ -88,11 +120,27 @@ def run_offset_visual_servo_alignment(
             max_step_mm,
             min_step_mm,
         )
+        control_calculation_finished_at = time.perf_counter()
         pose[0] += float(delta_xy[0])
         pose[1] += float(delta_xy[1])
         print(
             f"[视觉伺服] 第 {iteration + 1} 轮误差=({response.dx_px:.2f},{response.dy_px:.2f})px，"
             f"修正=({delta_xy[0]:.3f},{delta_xy[1]:.3f})mm"
         )
-        move_pose_func(pose, speed=speed, wait_sec=settle_sec)
+        control_started_at = time.perf_counter()
+        move_pose_func(pose, speed=speed, wait_sec=0.0)
+        arm_arrived_at = time.perf_counter()
+        if settle_sec > 0:
+            time.sleep(settle_sec)
+        round_finished_at = time.perf_counter()
+        if timing_debug:
+            print(
+                f"[视觉伺服耗时] 第 {iteration + 1} 轮 "
+                f"图像服务={(detection_finished_at - round_started_at) * 1000:.1f}ms，"
+                f"控制计算={(control_calculation_finished_at - control_calculation_started_at) * 1000:.1f}ms，"
+                f"误差日志输出={(control_started_at - control_calculation_finished_at) * 1000:.1f}ms，"
+                f"机械臂控制及到位={(arm_arrived_at - control_started_at) * 1000:.1f}ms，"
+                f"稳定等待={(round_finished_at - arm_arrived_at) * 1000:.1f}ms，"
+                f"本轮总={(round_finished_at - round_started_at) * 1000:.1f}ms"
+            )
     return False, pose, last_response, "达到最大迭代次数仍未连续稳定"

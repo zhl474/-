@@ -3,6 +3,7 @@
 
 import os
 import threading
+import time
 
 import rospy
 from sensor_msgs.msg import Image
@@ -218,6 +219,12 @@ class ImageProcessor:
 
         with open(EXECUTION_CONFIG_PATH, "r", encoding="utf-8") as config_file:
             execution_config = yaml.safe_load(config_file) or {}
+        self.visual_servo_timing_debug = bool(
+            rospy.get_param(
+                "~visual_servo_timing_debug",
+                execution_config.get("servo", {}).get("timing_debug", False),
+            )
+        )
         self.shooting_angle = [float(value) for value in execution_config["shooting_pose"]]
         if len(self.shooting_angle) != 6 or not np.all(np.isfinite(self.shooting_angle)):
             raise ValueError("shooting_pose 必须包含 6 个有限数值")
@@ -270,6 +277,34 @@ class ImageProcessor:
         video_frame = video_image if video_image is not None else debug_image
         video_saved = self.visual_board_debug_recorder.write(video_frame)
         return image_saved and (video_saved or not self.visual_board_debug_video_enabled)
+
+    def log_visual_servo_detection_timing(
+        self,
+        target_type,
+        request_started_at,
+        snapshot_finished_at,
+        detection_started_at=None,
+        detection_finished_at=None,
+        debug_started_at=None,
+        debug_finished_at=None,
+    ):
+        """调试时输出图像服务内部耗时，所有时间戳均在日志输出前采集。"""
+        if not getattr(self, "visual_servo_timing_debug", False):
+            return
+
+        def elapsed_ms(started_at, finished_at):
+            if started_at is None or finished_at is None:
+                return "-"
+            return f"{(finished_at - started_at) * 1000:.1f}ms"
+
+        finished_at = debug_finished_at or detection_finished_at or snapshot_finished_at
+        print(
+            f"[视觉伺服识别耗时][{target_type}] "
+            f"取图={elapsed_ms(request_started_at, snapshot_finished_at)}，"
+            f"识别={elapsed_ms(detection_started_at, detection_finished_at)}，"
+            f"调试图输出={elapsed_ms(debug_started_at, debug_finished_at)}，"
+            f"服务内总={elapsed_ms(request_started_at, finished_at)}"
+        )
 
     def image_callback(self, msg):
         try:
@@ -507,8 +542,13 @@ class ImageProcessor:
         低位时托盘通常不完整入画，因此只在画面中心小 ROI 内找托盘圆点。
         row/col 支持整数和 .5，小数目标会用相邻圆点平均成虚拟目标点。
         """
+        request_started_at = time.perf_counter()
         img_bgr1 = self.get_image_snapshot()
+        snapshot_finished_at = time.perf_counter()
         if img_bgr1 is None:
+            self.log_visual_servo_detection_timing(
+                "托盘", request_started_at, snapshot_finished_at
+            )
             return self.make_visual_servo_result(
                 found=False,
                 target_type="board",
@@ -516,6 +556,7 @@ class ImageProcessor:
             )
 
         try:
+            detection_started_at = time.perf_counter()
             h, w = img_bgr1.shape[:2]
             board_bgr = img_bgr1
             center_x = w / 2.0
@@ -533,10 +574,22 @@ class ImageProcessor:
                 row=row,
                 col=col,
             )
+            detection_finished_at = time.perf_counter()
             debug_image = detect_result.get("debug_image")
             debug_panel = detect_result.get("debug_panel")
             if not detect_result["found"]:
+                debug_started_at = time.perf_counter()
                 self.save_visual_board_debug_frame(debug_image, debug_panel)
+                debug_finished_at = time.perf_counter()
+                self.log_visual_servo_detection_timing(
+                    "托盘",
+                    request_started_at,
+                    snapshot_finished_at,
+                    detection_started_at,
+                    detection_finished_at,
+                    debug_started_at,
+                    debug_finished_at,
+                )
                 return self.make_visual_servo_result(
                     found=False,
                     target_type="board",
@@ -546,7 +599,18 @@ class ImageProcessor:
             target_point = detect_result["point"]
             dx_px = float(target_point[0] - center_x)
             dy_px = float(target_point[1] - center_y)
+            debug_started_at = time.perf_counter()
             self.save_visual_board_debug_frame(debug_image, debug_panel)
+            debug_finished_at = time.perf_counter()
+            self.log_visual_servo_detection_timing(
+                "托盘",
+                request_started_at,
+                snapshot_finished_at,
+                detection_started_at,
+                detection_finished_at,
+                debug_started_at,
+                debug_finished_at,
+            )
 
             return self.make_visual_servo_result(
                 found=True,
@@ -561,6 +625,13 @@ class ImageProcessor:
                 message=detect_result.get("message", "低位托盘目标点识别成功"),
             )
         except Exception as exc:
+            self.log_visual_servo_detection_timing(
+                "托盘",
+                request_started_at,
+                snapshot_finished_at,
+                locals().get("detection_started_at"),
+                time.perf_counter(),
+            )
             rospy.logerr("托盘视觉伺服目标检测失败: %s" % exc)
             print("\033[91m托盘视觉伺服目标检测失败，请重新识别。\033[0m")
             return self.make_visual_servo_result(
@@ -572,8 +643,13 @@ class ImageProcessor:
     def detect_block_visual_offset(self, expected_category, angle_step, angle_center, angle_window):
         """使用高位类别和角度先验识别低位方块像素偏差。"""
         prior_message = self.make_block_angle_prior_message(angle_center, angle_window, angle_step)
+        request_started_at = time.perf_counter()
         image = self.get_image_snapshot()
+        snapshot_finished_at = time.perf_counter()
         if image is None:
+            self.log_visual_servo_detection_timing(
+                "方块", request_started_at, snapshot_finished_at
+            )
             return self.make_visual_servo_result(
                 found=False,
                 target_type="block",
@@ -582,6 +658,9 @@ class ImageProcessor:
 
         category = normalize_category_name((expected_category or "").strip())
         if not category:
+            self.log_visual_servo_detection_timing(
+                "方块", request_started_at, snapshot_finished_at
+            )
             return self.make_visual_servo_result(
                 found=False,
                 target_type="block",
@@ -590,6 +669,7 @@ class ImageProcessor:
         try:
             height, width = image.shape[:2]
             center_x, center_y = width / 2.0, height / 2.0
+            detection_started_at = time.perf_counter()
             target_block = detect_block_with_high_prior_roi(
                 image,
                 template_geometry=load_template_geometry("low"),
@@ -602,6 +682,7 @@ class ImageProcessor:
                 white_v_min=self.block_low_white_v_min,
                 min_foreground_area=self.block_low_min_foreground_area,
             )
+            detection_finished_at = time.perf_counter()
             debug_image = target_block.get("debug_image")
             if debug_image is None:
                 debug_image = image.copy()
@@ -615,7 +696,18 @@ class ImageProcessor:
                 thickness=2,
             )
             if not target_block["found"]:
+                debug_started_at = time.perf_counter()
                 self.save_visual_servo_debug_frame(debug_image, debug_panel)
+                debug_finished_at = time.perf_counter()
+                self.log_visual_servo_detection_timing(
+                    "方块",
+                    request_started_at,
+                    snapshot_finished_at,
+                    detection_started_at,
+                    detection_finished_at,
+                    debug_started_at,
+                    debug_finished_at,
+                )
                 return self.make_visual_servo_result(
                     found=False,
                     target_type="block",
@@ -632,7 +724,18 @@ class ImageProcessor:
                 (255, 0, 0),
                 1,
             )
+            debug_started_at = time.perf_counter()
             self.save_visual_servo_debug_frame(debug_image, debug_panel)
+            debug_finished_at = time.perf_counter()
+            self.log_visual_servo_detection_timing(
+                "方块",
+                request_started_at,
+                snapshot_finished_at,
+                detection_started_at,
+                detection_finished_at,
+                debug_started_at,
+                debug_finished_at,
+            )
             return self.make_visual_servo_result(
                 found=True,
                 target_type="block",
@@ -646,6 +749,13 @@ class ImageProcessor:
                 message=f"低位先验 ROI 模板匹配成功，{prior_message}",
             )
         except Exception as exc:
+            self.log_visual_servo_detection_timing(
+                "方块",
+                request_started_at,
+                snapshot_finished_at,
+                locals().get("detection_started_at"),
+                time.perf_counter(),
+            )
             rospy.logerr("方块视觉伺服目标检测失败: %s", exc)
             return self.make_visual_servo_result(
                 found=False,
