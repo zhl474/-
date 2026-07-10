@@ -1,11 +1,12 @@
 <launch>
-  <arg name="debug_output_dir" default="$(env HOME)/.ros/single_arm_tetris"/>
+  <arg name="debug_output_dir" default="/home/zhl/桌面"/>
 
   <node pkg="camera" type="camera_node.py" name="camera_node" output="screen"/>
 
   <node pkg="image_process" type="process.py" name="image_process_node" output="screen">
     <param name="save_top_surface_mask_vis" value="true"/>
     <param name="top_surface_mask_vis_path" value="$(arg debug_output_dir)/方块上表面掩码.jpg"/>
+    <param name="high_template_match_debug_path" value="$(arg debug_output_dir)/高位方块模板匹配结果.jpg"/>
     <param name="visual_servo_debug_path" value="$(arg debug_output_dir)/方块视觉伺服当前检测.jpg"/>
     <param name="visual_board_debug_path" value="$(arg debug_output_dir)/托盘视觉伺服当前检测.jpg"/>
     <param name="visual_board_grid_debug_path" value="$(arg debug_output_dir)/托盘格点粗定位.jpg"/>

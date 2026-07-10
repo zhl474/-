@@ -665,7 +665,7 @@ def test_competition_module_imports_with_service_stubs(monkeypatch):
 def test_depth_first_servo_pose_uses_world_point_when_depth_valid(monkeypatch):
     localizer = RoughLocalizer(
         shooting_pose=[0, 0, 0, 0, 0, 0],
-        servo_look_z=200.0,
+        servo_height_offset_mm=200.0,
         wrist_to_camera_mm=np.array([
             [1.0, 0.0, 0.0, 10.0],
             [0.0, 1.0, 0.0, 20.0],
@@ -685,14 +685,14 @@ def test_depth_first_servo_pose_uses_world_point_when_depth_valid(monkeypatch):
 
     assert source == "depth"
     assert world_position == [100.0, 200.0, 50.0]
-    assert pose == [90.0, 180.0, 200.0, 0.0, 0.0, 0.0]
+    assert pose == [90.0, 180.0, 250.0, 0.0, 0.0, 0.0]
 
 
 def test_depth_first_servo_pose_falls_back_when_depth_invalid(monkeypatch):
     warnings = []
     localizer = RoughLocalizer(
         shooting_pose=[100.0, 200.0, 0.0, 0.0, 0.0, 0.0],
-        servo_look_z=200.0,
+        servo_height_offset_mm=200.0,
         wrist_to_camera_mm=np.eye(4),
         pixel_to_world_client=lambda _x, _y: types.SimpleNamespace(
             success=False, world_position=[0.0, 0.0, 0.0], message="无效深度"
@@ -714,7 +714,7 @@ def test_depth_first_servo_pose_falls_back_when_depth_invalid(monkeypatch):
 def test_depth_failure_does_not_fallback_when_disabled():
     localizer = RoughLocalizer(
         shooting_pose=[0, 0, 0, 0, 0, 0],
-        servo_look_z=200.0,
+        servo_height_offset_mm=200.0,
         wrist_to_camera_mm=np.eye(4),
         pixel_to_world_client=lambda _x, _y: types.SimpleNamespace(
             success=False, world_position=[0, 0, 0], message="深度无效"

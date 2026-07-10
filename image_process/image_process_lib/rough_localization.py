@@ -21,7 +21,7 @@ class RoughLocalizer:
     def __init__(
         self,
         shooting_pose: Sequence[float],
-        servo_look_z: float,
+        servo_height_offset_mm: float,
         wrist_to_camera_mm,
         pixel_to_world_client: Callable,
         x_mm_per_pixel: float,
@@ -35,7 +35,7 @@ class RoughLocalizer:
             raise ValueError("高位拍摄位姿必须包含 6 个有限数值")
         if self.wrist_to_camera_mm.shape != (4, 4) or not np.all(np.isfinite(self.wrist_to_camera_mm)):
             raise ValueError("手眼标定矩阵必须是有限的 4x4 矩阵")
-        self.servo_look_z = float(servo_look_z)
+        self.servo_height_offset_mm = float(servo_height_offset_mm)
         self.pixel_to_world_client = pixel_to_world_client
         self.x_mm_per_pixel = float(x_mm_per_pixel)
         self.y_mm_per_pixel = float(y_mm_per_pixel)
@@ -59,7 +59,7 @@ class RoughLocalizer:
         tool_position = np.array([
             world_position[0] - camera_offset_in_base[0],
             world_position[1] - camera_offset_in_base[1],
-            self.servo_look_z,
+            world_position[2] + self.servo_height_offset_mm,
         ])
         return [*tool_position.tolist(), *self.shooting_pose[3:6].tolist()]
 
@@ -70,7 +70,7 @@ class RoughLocalizer:
         return [
             float(predicted_x),
             float(predicted_y),
-            self.servo_look_z,
+            self.servo_height_offset_mm,
             *self.shooting_pose[3:6].tolist(),
         ]
 

@@ -13,7 +13,7 @@ def main():
     arm = AkaiFr()
     arm.set_speed(MOVE_SPEED)
     arm.set_tcf(1, [0, 0, 0, 0, 0, 0])
-    input(f"确认安全后按回车移动到复位位姿: {TARGET_POSE}")
+    # input(f"确认安全后按回车移动到复位位姿: {TARGET_POSE}")
     arm.set_tool_pose(TARGET_POSE)
 
 

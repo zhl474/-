@@ -66,13 +66,13 @@ PERCEPTION_CONFIG_PATH = os.path.join(PACKAGE_DIR, "config", "perception.yaml")
 DEFAULT_DEBUG_DIR = os.path.expanduser("~/.ros/single_arm_tetris")
 
 
-def load_servo_look_z(config_path=VISUAL_SERVO_CONFIG_PATH):
-    """从视觉伺服配置读取相机观察高度。"""
+def load_servo_height_offset_mm(config_path=VISUAL_SERVO_CONFIG_PATH):
+    """从视觉伺服配置读取相对深度目标的观察高度偏移。"""
     if not os.path.exists(config_path):
         return 200.0
     with open(config_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
-    return float(data.get("servo_look_z", 200.0))
+    return float(data.get("servo_height_offset_mm", 200.0))
 
 
 class ImageProcessor:
@@ -130,7 +130,7 @@ class ImageProcessor:
         self.model = YOLO(detection_model_path)
 
         self.board_theta = 0.0
-        self.servo_look_z = load_servo_look_z()
+        self.servo_height_offset_mm = load_servo_height_offset_mm()
         self.T_wrist2camera_mm = np.load(hand_eye_matrix_path)
         if self.T_wrist2camera_mm.shape != (4, 4) or not np.all(np.isfinite(self.T_wrist2camera_mm)):
             raise ValueError("手眼标定矩阵 T_wrist2camera.npy 无效，请重新标定")
@@ -142,6 +142,11 @@ class ImageProcessor:
         self.visual_servo_debug_path = rospy.get_param(
             "~visual_servo_debug_path",
             os.path.join(DEFAULT_DEBUG_DIR, "方块视觉伺服当前检测.jpg")
+        )
+        # 高位全场识别的模板匹配轮廓图，用于核对边框是否贴合方块。
+        self.high_template_match_debug_path = rospy.get_param(
+            "~high_template_match_debug_path",
+            os.path.join(DEFAULT_DEBUG_DIR, "高位方块模板匹配结果.jpg")
         )
         default_visual_servo_debug_video_path = os.path.splitext(self.visual_servo_debug_path)[0] + ".avi"
         self.visual_servo_debug_video_path = rospy.get_param(
@@ -218,7 +223,7 @@ class ImageProcessor:
             raise ValueError("shooting_pose 必须包含 6 个有限数值")
         self.rough_localizer = RoughLocalizer(
             shooting_pose=self.shooting_angle,
-            servo_look_z=self.servo_look_z,
+            servo_height_offset_mm=self.servo_height_offset_mm,
             wrist_to_camera_mm=self.T_wrist2camera_mm,
             pixel_to_world_client=self.pixel2world_client,
             x_mm_per_pixel=self.high_rough_x_mm_per_pixel,
@@ -324,7 +329,7 @@ class ImageProcessor:
             crop_margin=8,
             save_mask_overlay=self.save_top_surface_mask_vis,
         )
-        save_image_to_path(os.path.join(DEFAULT_DEBUG_DIR, "方块高位识别.jpg"), debug_image)
+        save_image_to_path(self.high_template_match_debug_path, debug_image)
         if not blocks:
             raise RuntimeError("高位没有识别到方块")
         if self.save_top_surface_mask_vis:

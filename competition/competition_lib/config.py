@@ -107,7 +107,7 @@ def load_visual_servo_config(config_path: str = DEFAULT_VISUAL_SERVO_CONFIG_PATH
         raise ValueError("视觉伺服矩阵必须为 2x2，吸盘偏移必须包含 2 个数值")
     if not np.all(np.isfinite(matrix)) or not np.all(np.isfinite(offset)):
         raise ValueError("视觉伺服配置包含非有限数值")
-    servo_look_z = float(config.get("servo_look_z", 0.0))
-    if not np.isfinite(servo_look_z) or servo_look_z <= 0:
-        raise ValueError("servo_look_z 必须是大于 0 的有限数值")
+    servo_height_offset_mm = float(config.get("servo_height_offset_mm", 0.0))
+    if not np.isfinite(servo_height_offset_mm) or servo_height_offset_mm <= 0:
+        raise ValueError("servo_height_offset_mm 必须是大于 0 的有限数值")
     return config
