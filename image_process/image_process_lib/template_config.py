@@ -3,7 +3,9 @@ import os
 import yaml
 
 
-TEMPLATE_CONFIG_PATH = "/home/zhl/SingleArmTetris/SingleArmTetris/src/competition/config/template_config.yaml"
+PACKAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+SRC_DIR = os.path.abspath(os.path.join(PACKAGE_DIR, ".."))
+TEMPLATE_CONFIG_PATH = os.path.join(SRC_DIR, "competition", "config", "template_config.yaml")
 
 
 def load_template_config(config_path=TEMPLATE_CONFIG_PATH):

@@ -1,12 +1,21 @@
 <launch>
-    <node pkg="camera" type="camera_node.py" name="camera_node" output="screen" />
-    <node pkg="image_process" type="process.py" name="image_process_node" output="screen">
-        <param name="save_top_surface_mask_vis" value="true"/>
-        <param name="top_surface_mask_vis_path" value="/home/zhl/桌面/top_surface_masks.jpg"/>
-    </node>
-    <node pkg="control" type="controller.py" name="control_node" output="screen">
-        <param name="servo_port" value="/dev/servo_motor"/>
-        <param name="servo_baudrate" value="115200"/>
-    </node>
-    <node pkg="competition" type="competition.py" name="competition_node" output="screen"/>
+  <arg name="debug_output_dir" default="$(env HOME)/.ros/single_arm_tetris"/>
+
+  <node pkg="camera" type="camera_node.py" name="camera_node" output="screen"/>
+
+  <node pkg="image_process" type="process.py" name="image_process_node" output="screen">
+    <param name="save_top_surface_mask_vis" value="true"/>
+    <param name="top_surface_mask_vis_path" value="$(arg debug_output_dir)/方块上表面掩码.jpg"/>
+    <param name="visual_servo_debug_path" value="$(arg debug_output_dir)/方块视觉伺服当前检测.jpg"/>
+    <param name="visual_board_debug_path" value="$(arg debug_output_dir)/托盘视觉伺服当前检测.jpg"/>
+    <param name="visual_board_grid_debug_path" value="$(arg debug_output_dir)/托盘格点粗定位.jpg"/>
+  </node>
+
+  <node pkg="control" type="controller.py" name="control_node" output="screen">
+    <param name="servo_port" value="/dev/servo_motor"/>
+    <param name="servo_baudrate" value="115200"/>
+    <param name="minimum_z" value="165.0"/>
+  </node>
+
+  <node pkg="competition" type="competition.py" name="competition_node" output="screen"/>
 </launch>

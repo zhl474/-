@@ -1,0 +1,36 @@
+# 基础任务唯一摆放表。行列坐标允许使用半格。
+targets:
+  - {col: 1, row: 2, angle_deg: 90, category: L_yellow}
+  - {col: 4, row: 1.5, angle_deg: 0, category: T}
+  - {col: 7.5, row: 1, angle_deg: 0, category: line}
+  - {col: 9.5, row: 2, angle_deg: -90, category: z_green}
+  - {col: 2, row: 3, angle_deg: 90, category: L_yellow}
+  - {col: 4, row: 3, angle_deg: 180, category: L_blue}
+  - {col: 7, row: 2, angle_deg: 0, category: L_yellow}
+  - {col: 1.5, row: 5, angle_deg: 90, category: T}
+  - {col: 3.5, row: 5, angle_deg: 90, category: z_blue}
+  - {col: 5, row: 4.5, angle_deg: 0, category: z_green}
+  - {col: 6.5, row: 3.5, angle_deg: 0, category: square}
+  - {col: 9, row: 5, angle_deg: -90, category: L_blue}
+  - {col: 10, row: 4.5, angle_deg: 90, category: line}
+  - {col: 7.5, row: 5.5, angle_deg: 0, category: square}
+  - {col: 1.5, row: 7, angle_deg: -90, category: z_green}
+  - {col: 3.5, row: 7, angle_deg: 90, category: z_blue}
+  - {col: 6.5, row: 7, angle_deg: 90, category: T}
+  - {col: 5, row: 7.5, angle_deg: 90, category: line}
+  - {col: 9, row: 7, angle_deg: 0, category: L_blue}
+  - {col: 3, row: 9, angle_deg: -90, category: L_blue}
+  - {col: 7, row: 8.5, angle_deg: 180, category: T}
+  - {col: 9.5, row: 8.5, angle_deg: 0, category: square}
+  - {col: 1, row: 10, angle_deg: 90, category: L_yellow}
+  - {col: 4.5, row: 10, angle_deg: 90, category: T}
+  - {col: 6.5, row: 11, angle_deg: 90, category: z_blue}
+  - {col: 8.5, row: 10, angle_deg: 0, category: line}
+  - {col: 2.5, row: 11, angle_deg: 90, category: z_blue}
+  - {col: 8, row: 12, angle_deg: 90, category: L_yellow}
+  - {col: 9.5, row: 12, angle_deg: -90, category: z_green}
+  - {col: 1.5, row: 12.5, angle_deg: 0, category: square}
+  - {col: 3.5, row: 13, angle_deg: -90, category: z_green}
+  - {col: 5, row: 12.5, angle_deg: 90, category: line}
+  - {col: 6.5, row: 13, angle_deg: 90, category: z_blue}
+  - {col: 9, row: 14, angle_deg: 180, category: L_blue}

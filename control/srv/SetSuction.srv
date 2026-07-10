@@ -1,0 +1,7 @@
+uint8 SUCK=0
+uint8 BLOW=1
+uint8 OFF=2
+uint8 state
+---
+bool success
+string message

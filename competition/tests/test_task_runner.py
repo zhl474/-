@@ -1,0 +1,96 @@
+import importlib
+import sys
+import types
+
+import pytest
+
+from competition_lib.config import load_execution_config, load_visual_servo_config
+
+
+def _load_task_runner(monkeypatch):
+    rospy = types.ModuleType("rospy")
+    rospy.loginfo = lambda *_args, **_kwargs: None
+    rospy.logerr = lambda *_args, **_kwargs: None
+    monkeypatch.setitem(sys.modules, "rospy", rospy)
+
+    clients_module = types.ModuleType("competition_lib.ros_clients")
+
+    class RobotClients:
+        SUCK = 0
+        BLOW = 1
+        OFF = 2
+
+    clients_module.RobotClients = RobotClients
+    monkeypatch.setitem(sys.modules, "competition_lib.ros_clients", clients_module)
+    sys.modules.pop("competition_lib.task_runner", None)
+    return importlib.import_module("competition_lib.task_runner")
+
+
+class _FakeClients:
+    def __init__(self):
+        self.moves = []
+        self.suction_states = []
+
+    def get_task_target(self, _index):
+        return types.SimpleNamespace(
+            category="T",
+            row=1.0,
+            col=1.0,
+            pick_observation_pose=[0, 0, 200, -180, 0, 90],
+            place_observation_pose=[10, 10, 200, -180, 0, 90],
+            detected_angle_deg=0.0,
+            rotation_delta_deg=0.0,
+        )
+
+    def move_arm(self, pose, speed, wait_sec=0.0):
+        self.moves.append((list(pose), speed, wait_sec))
+
+    def rotate_tool(self, _angle):
+        return None
+
+    def set_suction(self, state):
+        self.suction_states.append(state)
+
+
+def test_pick_alignment_failure_never_descends_or_starts_suction(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=load_execution_config(),
+        visual_config=load_visual_servo_config(),
+    )
+    runner._align = lambda *_args, **_kwargs: (False, [], None, "未识别")
+
+    with pytest.raises(RuntimeError, match="方块视觉伺服失败"):
+        runner.execute_all(1)
+
+    assert runner.state is module.TaskState.FAILED
+    assert clients.suction_states == []
+    assert len(clients.moves) == 1
+
+
+def test_interactive_prepare_retries_after_failed_rough_localization(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    runner = module.TaskRunner(
+        clients=_FakeClients(),
+        execution_config=load_execution_config(),
+        visual_config=load_visual_servo_config(),
+    )
+    responses = iter([
+        types.SimpleNamespace(success=False, task_count=0, message="托盘格点不足"),
+        types.SimpleNamespace(success=True, task_count=3, message="粗定位成功"),
+    ])
+    prepare_calls = []
+    runner.prepare = lambda **kwargs: prepare_calls.append(kwargs) or next(responses)
+    executed_counts = []
+    runner.execute_all = executed_counts.append
+
+    # 依次回答：基础任务、失败后重试、识别结果满意、开始抓放。
+    answers = iter(["", "", "1", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    runner.run_interactive()
+
+    assert len(prepare_calls) == 2
+    assert executed_counts == [3]

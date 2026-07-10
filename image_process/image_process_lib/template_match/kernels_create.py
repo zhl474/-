@@ -1,7 +1,6 @@
 import math
 
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -179,6 +178,9 @@ def show_kernel(kernels, index, show=1):
 
 
 def show_all_kernels_grid(kernels, cols=12):
+    # 仅调试绘图时加载 matplotlib，避免正式节点启动时创建字体缓存。
+    import matplotlib.pyplot as plt
+
     k = kernels.shape[0]
     length = kernels.shape[2]
 
@@ -272,12 +274,3 @@ def create_rotation_kernels(
         angles,
         device=device,
     )
-
-
-if __name__ == "__main__":
-    kernels, kernel_size, angles = create_rotation_kernels(37, 5, "T", device="cuda")
-
-    print("卷积核形状:", kernels.shape)
-    print("卷积核大小:", kernel_size)
-    print("角度数量:", len(angles))
-    show_kernel(kernels, 45)

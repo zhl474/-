@@ -1,125 +1,117 @@
 #!/home/zhl/fr3env/fr3env/bin/python
+"""机械臂、末端舵机与电子吸盘控制节点。"""
+
+import math
+
 import rospy
-import threading
-import time
-import warnings
 import serial
 from serial.tools import list_ports
-from akai_fr import AkaiFr, AkaiElectricSucker
 
-from control.srv import arm,armResponse,motor,motorResponse,suck,suckResponse
+from akai_fr import AkaiElectricSucker, AkaiFr
+from control.srv import (
+    MoveArm,
+    MoveArmResponse,
+    RotateTool,
+    RotateToolResponse,
+    SetSuction,
+    SetSuctionResponse,
+)
 
-class Control:
+
+class ControlNode:
     def __init__(self):
-        self.arm  = AkaiFr()
-        self.speed = 80
-        self.arm.set_speed(self.speed)
-        tool_id = 1
-        tcf = [0, 0, 0, 0, 0, 0.0]
-        self.arm.set_tcf(tool_id, tcf)
-        self.sucker = AkaiElectricSucker(self.arm)    # 创建电子吸盘对象
+        self.minimum_z = float(rospy.get_param("~minimum_z", 165.0))
+        self.arm = AkaiFr()
+        self.arm.set_speed(80)
+        self.arm.set_tcf(1, [0, 0, 0, 0, 0, 0])
+        self.sucker = AkaiElectricSucker(self.arm)
+        self.servo_serial = self._open_servo_serial()
 
-        self.ser = self.open_servo_serial()
+        self.arm_service = rospy.Service("/control/move_arm", MoveArm, self.move_arm)
+        self.motor_service = rospy.Service("/control/rotate_tool", RotateTool, self.rotate_tool)
+        self.suction_service = rospy.Service("/control/set_suction", SetSuction, self.set_suction)
+        rospy.on_shutdown(self.close)
+        rospy.loginfo("机械臂、吸盘和舵机控制节点已启动")
 
-        self.arm_server = rospy.Service("arm_control",arm,self.arm_control)
-        self.set_servo_angle_server = rospy.Service("motor_control",motor,self.motor_control)
-        self.suck_server = rospy.Service("suck_control",suck,self.suck_control)
-
-        # monitor_thread = threading.Thread(target=self.monitor_serial, daemon=True)
-        # monitor_thread.start()
-        rospy.loginfo("机械臂/吸盘/舵机控制节点启动")
-
-    def open_servo_serial(self):
-        """打开舵机串口,默认使用udev固定别名/dev/servo_motor"""
+    def _open_servo_serial(self):
         port = rospy.get_param("~servo_port", "/dev/servo_motor")
-        baudrate = rospy.get_param("~servo_baudrate", 115200)
+        baudrate = int(rospy.get_param("~servo_baudrate", 115200))
         try:
-            ser = serial.Serial(port=port, baudrate=baudrate, timeout=1)
-            rospy.loginfo(f"舵机串口已打开: {port}, 波特率: {baudrate}")
-            return ser
-        except serial.SerialException as e:
-            available_ports = [
-                f"{item.device} ({item.description}, 序列号: {item.serial_number})"
-                for item in list_ports.comports()
-            ]
-            rospy.logerr(f"舵机串口打开失败: {port}, 错误: {e}")
-            rospy.logerr(f"当前可用串口: {available_ports}")
-            rospy.logerr("建议为舵机USB串口配置udev固定别名/dev/servo_motor")
+            connection = serial.Serial(port=port, baudrate=baudrate, timeout=1)
+            rospy.loginfo("舵机串口已打开: %s，波特率: %d", port, baudrate)
+            return connection
+        except serial.SerialException as exc:
+            available = [f"{item.device} ({item.description})" for item in list_ports.comports()]
+            rospy.logerr("舵机串口打开失败: %s；可用串口: %s", exc, available)
             raise
-    def suck_in(self):  
-        self.sucker.set_solenoid_valve(False)   # 电磁阀关闭
-        self.sucker.set_pump_motor(True)        # 气泵电机开启
-    def suck_out(self):
-        self.sucker.set_solenoid_valve(True)    # 电磁阀开启
-        self.sucker.set_pump_motor(True)        # 气泵电机开启
-    def sucker_off(self):
-        self.sucker.set_solenoid_valve(False)   # 电磁阀关闭
-        self.sucker.set_pump_motor(False)       # 气泵电机关闭
-    def suck_control(self,req):
-        if(req.state==0):
-            self.suck_in()
-        elif(req.state==1):
-            self.suck_out()
-        elif(req.state==2):
-            self.sucker_off()
-        else:
-            rospy.logerr("无效输入")
-        return suckResponse(1)
-    
-        
-    def write_to_serial(self, data):
-        """向串口发送数据"""
+
+    @staticmethod
+    def _finite(values):
+        return all(math.isfinite(float(value)) for value in values)
+
+    def move_arm(self, request):
+        pose = [float(value) for value in request.pose]
+        if len(pose) != 6 or not self._finite(pose):
+            return MoveArmResponse(success=False, message="机械臂位姿必须包含 6 个有限数值")
+        if request.speed <= 0:
+            return MoveArmResponse(success=False, message="机械臂速度必须大于 0")
+        if pose[2] < self.minimum_z:
+            return MoveArmResponse(
+                success=False,
+                message=f"目标 Z={pose[2]:.2f} mm 低于安全下限 {self.minimum_z:.2f} mm，已拒绝运动",
+            )
         try:
-            self.ser.write(data.encode())
-            print(f"Sent: {data}")
-        except Exception as e:
-            print(f"Failed to send data: {e}")
-    def motor_control(self,req):
-        angle = req.angle
-        if(angle<0):
-            angle=0
-            warnings.warn("旋转角小于0")
-        if(angle>360):
-            angle=360
-            warnings.warn("旋转角大于360")
-        str_angle=str(angle)
-        str_angle=str_angle+"E"
-        self.write_to_serial(str_angle)
-        rospy.set_param('/motor_done', 0)
-        # print("舵机开始运行")
-        resp = motorResponse(1)
-        return resp
-    def monitor_serial(self):
-        """监控串口,收到数据就将response_flag置1"""    
-        while True:
-            if self.ser.in_waiting > 0:
-                # 有数据来了
-                data = self.ser.read_all()  # 读取所有数据
-                print("收到舵机数据:", data)
-                if data == b'1':
-                    rospy.set_param('/motor_done', 1)
-                self.ser.reset_input_buffer()  # 清空接收缓冲区
-            time.sleep(0.1)  # 避免CPU占用过高
+            self.arm.set_speed(int(request.speed))
+            result = self.arm.arm.MoveL(pose, tool=0, user=0, vel=int(request.speed))
+            if result is False:
+                return MoveArmResponse(success=False, message="机械臂 MoveL 返回失败")
+            return MoveArmResponse(success=True, message="机械臂运动完成")
+        except Exception as exc:
+            rospy.logerr("机械臂运动异常: %s", exc)
+            return MoveArmResponse(success=False, message=str(exc))
+
+    def rotate_tool(self, request):
+        angle = float(request.angle_deg)
+        if not math.isfinite(angle) or not 0.0 <= angle <= 360.0:
+            return RotateToolResponse(success=False, message="舵机角度必须在 0 到 360 度之间")
+        try:
+            self.servo_serial.write(f"{angle}E".encode("ascii"))
+            return RotateToolResponse(success=True, message="舵机指令已发送")
+        except Exception as exc:
+            rospy.logerr("舵机指令发送失败: %s", exc)
+            return RotateToolResponse(success=False, message=str(exc))
+
+    def set_suction(self, request):
+        try:
+            if request.state == request.SUCK:
+                self.sucker.set_solenoid_valve(False)
+                self.sucker.set_pump_motor(True)
+                message = "吸盘开始吸气"
+            elif request.state == request.BLOW:
+                self.sucker.set_solenoid_valve(True)
+                self.sucker.set_pump_motor(True)
+                message = "吸盘开始喷气"
+            elif request.state == request.OFF:
+                self.sucker.set_solenoid_valve(False)
+                self.sucker.set_pump_motor(False)
+                message = "吸盘已关闭"
+            else:
+                return SetSuctionResponse(success=False, message=f"未知吸盘状态: {request.state}")
+            return SetSuctionResponse(success=True, message=message)
+        except Exception as exc:
+            rospy.logerr("吸盘控制失败: %s", exc)
+            return SetSuctionResponse(success=False, message=str(exc))
+
+    def close(self):
+        if getattr(self, "servo_serial", None) is not None and self.servo_serial.is_open:
+            self.servo_serial.close()
 
 
-    def arm_control(self,req):
-        pose = req.pose
-        if req.pose[2]<165:
-            pose[2] = 165
-            rospy.logerr("高度小于165过低,拒绝运动")
-            print("目标高度",req.pose)
-        # else:
-        self.arm.set_speed(req.speed)
-        self.arm.arm.MoveL(pose,tool=0,user=0, vel=req.speed)
-        resp = armResponse(1)
-        return resp
+def main():
+    rospy.init_node("control_node")
+    ControlNode()
+    rospy.spin()
 
 
 if __name__ == "__main__":
-    # 2.初始化 ROS 节点
-    rospy.init_node("control_node")
-    # 3.创建服务对象
-    Controller = Control()
-    # 4.回调函数处理请求并产生响应
-    # 5.spin 函数
-    rospy.spin()
+    main()

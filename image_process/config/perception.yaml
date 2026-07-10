@@ -1,0 +1,34 @@
+models:
+  # 高位识别各个俄罗斯方块类别和姿态的检测模型。
+  detection: competition/model/best5.14.pt
+  # 高位托盘外框识别模型，供后续 140 个格点检测裁剪托盘区域。
+  board: competition/model/best.pt
+  # 方块上表面分割模型。正式运行使用 TensorRT engine 加速。
+  segmentation: competition/model/best_seg.engine
+
+calibration:
+  hand_eye_matrix: camera/config/T_wrist2camera.npy
+
+fallback:
+  depth_pixel_estimate: true
+  color_segmentation: true
+
+high_rough_localization:
+  x_mm_per_pixel: 0.5
+  y_mm_per_pixel: 0.5
+
+block_servo:
+  angle_window_deg: 10.0
+  angle_step_deg: 1.0
+  roi_expand_px: 50
+  white_s_max: 45
+  white_v_min: 180
+  min_foreground_area: 200
+
+board_servo:
+  roi_half_size: 90
+  blackhat_kernel_size: 27
+  min_dot_area: 200
+  max_dot_area: 800
+  min_dot_circularity: 0.35
+  max_dot_aspect_ratio: 1.8

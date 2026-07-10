@@ -37,7 +37,7 @@ def match_template(image: torch.Tensor, template: torch.Tensor, kernel_size, ang
           特征图形状 (N, H_out, W_out)，N 为模板个数
           位置列表每个元素为 (top, left) 像素坐标
     """
-    
+
     # 使用 conv2d 做互相关（卷积不翻转，等价于模板匹配中的相关性）
     # groups=1 表示普通卷积
     pad = kernel_size // 2
@@ -141,7 +141,7 @@ def get_rect(
     # print(f"模版匹配{category}代码运行时间: {elapsed_time:.6f} 秒")
     # print(positions)
     center = (positions['x'] + offset_x, positions['y'] + offset_y)  # 注意：OpenCV 用 (x, y)
-    
+
     # 矩形尺寸由子块和连接处像素计算，不再从旧外接矩形标定结果读取。
     rect_size = get_template_rect_size(category, block_px, connector_px)
 
@@ -167,47 +167,3 @@ def get_rect(
     # cv2.waitKey(0)
     # cv2.destroyAllWindows()
     return rect
-
-# ========== 使用示例 ==========
-if __name__ == "__main__":
-    # 设备选择
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"使用设备: {device}")
-
-    # 1. 加载大图并二值化
-    image = cv2.imread("/home/zhl/机器人竞赛_zhb/SingleArmTetris/template_match/图片/2.png")
-    vis_img = image.copy()
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)  # 先变灰度
-    image_tensor = load_img(image,device=device)
-    print(f"大图尺寸: {image_tensor.shape}")
-
-    # 2. 加载模板（可以是一个或多个）
-    block_px = 37
-    connector_px = 5
-    angle_step = 1
-    kernels, kernel_size, angles = create_rotation_kernels(block_px, connector_px, "square", device=device)
-    show_kernel(kernels, 0)
-    print(f"卷积核形状: {kernels.shape}")  # [180, 1, kernel_size, kernel_size]
-    print(f"卷积核大小: {kernel_size}")
-
-    # 3. 执行匹配
-    best_kernel, positions = match_template(image_tensor, kernels, kernel_size, angles)
-    print(positions)
-    center = (positions['x'], positions['y'])  # 注意：OpenCV 用 (x, y)
-
-    rect_size = get_template_rect_size("square", block_px, connector_px)
-
-    # 构造 rotated rect
-    rect = (center, rect_size, positions['angle'])
-    box = cv2.boxPoints(rect)
-    box = np.int32(box)
-
-
-    cv2.drawContours(vis_img, [box], 0, (0, 255, 0), 2)
-
-    cv2.imshow("match", vis_img)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-    # 5. 可视化第一个模板的匹配结果
-    # visualize_result(image_tensor, templates[0], feature_maps, positions[0], template_idx=0)

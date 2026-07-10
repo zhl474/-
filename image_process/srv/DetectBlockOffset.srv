@@ -1,0 +1,11 @@
+string category
+float64 high_angle_deg
+---
+bool found
+float64 px
+float64 py
+float64 dx_px
+float64 dy_px
+float64 detected_angle_deg
+float64 score
+string message

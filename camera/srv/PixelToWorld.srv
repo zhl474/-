@@ -1,0 +1,6 @@
+int32 x
+int32 y
+---
+bool success
+float64[3] world_position
+string message
