@@ -145,6 +145,9 @@ def test_completed_state_logs_total_execution_time(monkeypatch):
     )
     runner.execution_start_time = 120.0
 
+    runner._set_state(module.TaskState.PICK_COARSE)
+    assert logs == []
+
     runner._set_state(module.TaskState.COMPLETED)
 
     assert logs == ["任务状态: 完成", "全部方块抓放完成，总耗时: 5.25 秒"]

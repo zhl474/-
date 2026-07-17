@@ -47,7 +47,7 @@ motion:
 
 servo:
   # 是否输出视觉伺服分阶段耗时。调试时开启，正式运行时关闭以避免日志 I/O 影响闭环频率。
-  timing_debug: true
+  timing_debug: false
 
   # 视觉伺服成功阈值，单位 px。
   # 每轮取 max(abs(dx), abs(dy))；不超过该值才算一帧对准。

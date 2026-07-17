@@ -64,11 +64,14 @@ class TaskRunner:
 
     def _set_state(self, state):
         self.state = state
-        rospy.loginfo("任务状态: %s", state.value)
-        if state is TaskState.COMPLETED and self.execution_start_time is not None:
-            elapsed_sec = time.monotonic() - self.execution_start_time
-            rospy.loginfo("全部方块抓放完成，总耗时: %.2f 秒", elapsed_sec)
-            self.execution_start_time = None
+        if state is TaskState.COMPLETED:
+            rospy.loginfo("任务状态: %s", state.value)
+            if self.execution_start_time is not None:
+                elapsed_sec = time.monotonic() - self.execution_start_time
+                rospy.loginfo("全部方块抓放完成，总耗时: %.2f 秒", elapsed_sec)
+                self.execution_start_time = None
+        elif state is TaskState.FAILED:
+            rospy.logerr("任务状态: %s", state.value)
 
     def _align(self, offset_func, start_pose):
         return run_offset_visual_servo_alignment(
