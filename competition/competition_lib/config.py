@@ -19,7 +19,7 @@ class ExecutionConfig:
     arm_speed: int
     pick_speed: int
     servo_speed: int
-    pick_z: float
+    pick_surface_offset_mm: float
     lift_z: float
     place_high_z: float
     place_down_z: float
@@ -56,7 +56,7 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         arm_speed=int(motion["arm_speed"]),
         pick_speed=int(motion["pick_speed"]),
         servo_speed=int(motion["servo_speed"]),
-        pick_z=float(motion["pick_z"]),
+        pick_surface_offset_mm=float(motion["pick_surface_offset_mm"]),
         lift_z=float(motion["lift_z"]),
         place_high_z=float(motion["place_high_z"]),
         place_down_z=float(motion["place_down_z"]),
@@ -75,7 +75,7 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         motor_upper_margin_deg=float(motor["upper_margin_deg"]),
     )
     numeric_values = [
-        config.arm_speed, config.pick_speed, config.servo_speed, config.pick_z, config.lift_z,
+        config.arm_speed, config.pick_speed, config.servo_speed, config.pick_surface_offset_mm, config.lift_z,
         config.place_high_z, config.place_down_z, config.place_lift_step_mm,
         config.error_threshold_px, config.min_step_mm, config.max_step_mm, config.max_iter,
         config.success_stable_frames, config.max_missed_frames, config.motor_velocity_deg_per_sec,

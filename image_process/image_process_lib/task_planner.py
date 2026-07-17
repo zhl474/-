@@ -18,6 +18,10 @@ class ObservedBlock:
     category: str
     observation_pose: Sequence[float]
     detected_angle_deg: float
+    # 高位深度相机测得的方块上表面绝对 Z；无有效深度时为 0。
+    pick_surface_z_mm: float = 0.0
+    # false 表示本次粗定位使用了无深度的像素比例回退，禁止按深度高度抓取。
+    pick_surface_z_valid: bool = False
 
 
 @dataclass(frozen=True)
@@ -40,6 +44,8 @@ class TaskTarget:
     place_observation_pose: Sequence[float]
     detected_angle_deg: float
     rotation_delta_deg: float
+    pick_surface_z_mm: float
+    pick_surface_z_valid: bool
 
 
 def load_task_layout(config_path: str) -> List[dict]:
@@ -167,6 +173,8 @@ def assign_blocks_to_targets(
                     block.detected_angle_deg,
                     board_angle_deg,
                 ),
+                pick_surface_z_mm=float(block.pick_surface_z_mm),
+                pick_surface_z_valid=bool(block.pick_surface_z_valid),
             )
 
     expected_indices = sorted(target_by_index)

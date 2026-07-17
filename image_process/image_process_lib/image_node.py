@@ -440,19 +440,28 @@ class ImageProcessor:
             if category not in counts:
                 rospy.logwarn("忽略未知方块类别: %s", category)
                 continue
-            servo_pose, _, _ = self.make_depth_first_servo_pose(
+            servo_pose, localization_source, world_position = self.make_depth_first_servo_pose(
                 block["px"], block["py"], image.shape, f"方块 {category}"
             )
+            has_valid_surface_z = localization_source == "depth" and len(world_position) == 3
             counts[category] += 1
             observed_blocks.append(
                 ObservedBlock(
                     category=category,
                     observation_pose=tuple(servo_pose),
                     detected_angle_deg=float(block["theta"]),
+                    pick_surface_z_mm=float(world_position[2]) if has_valid_surface_z else 0.0,
+                    pick_surface_z_valid=has_valid_surface_z,
                 )
             )
         if not observed_blocks:
             raise RuntimeError("没有可用于任务规划的已知类别方块")
+        invalid_depth_count = sum(not block.pick_surface_z_valid for block in observed_blocks)
+        if invalid_depth_count:
+            raise RuntimeError(
+                f"{invalid_depth_count} 个方块缺少有效深度高度，已取消任务准备；"
+                "请调整相机视野、方块摆放或光照后重试"
+            )
         return observed_blocks, [counts[category] for category in BLOCK_CATEGORY_NAMES]
 
     def _load_layout_for_request(self, request, cube_counts):
@@ -536,6 +545,8 @@ class ImageProcessor:
                 category="",
                 detected_angle_deg=0.0,
                 rotation_delta_deg=0.0,
+                pick_surface_z_mm=0.0,
+                pick_surface_z_valid=False,
                 message=f"任务序号越界: {index}，当前任务数: {len(self.task_targets)}",
             )
         target = self.task_targets[index]
@@ -548,6 +559,8 @@ class ImageProcessor:
             category=target.category,
             detected_angle_deg=target.detected_angle_deg,
             rotation_delta_deg=target.rotation_delta_deg,
+            pick_surface_z_mm=target.pick_surface_z_mm,
+            pick_surface_z_valid=target.pick_surface_z_valid,
             message="读取任务目标成功",
         )
 

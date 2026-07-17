@@ -8,4 +8,6 @@ float64 col
 string category
 float64 detected_angle_deg
 float64 rotation_delta_deg
+float64 pick_surface_z_mm
+bool pick_surface_z_valid
 string message

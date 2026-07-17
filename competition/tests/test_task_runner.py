@@ -1,6 +1,7 @@
 import importlib
 import sys
 import types
+from dataclasses import replace
 
 import pytest
 
@@ -40,6 +41,8 @@ class _FakeClients:
             place_observation_pose=[10, 10, 200, -180, 0, 90],
             detected_angle_deg=0.0,
             rotation_delta_deg=0.0,
+            pick_surface_z_mm=180.0,
+            pick_surface_z_valid=True,
         )
 
     def move_arm(self, pose, speed, wait_sec=0.0):
@@ -68,6 +71,40 @@ def test_pick_alignment_failure_never_descends_or_starts_suction(monkeypatch):
     assert runner.state is module.TaskState.FAILED
     assert clients.suction_states == []
     assert len(clients.moves) == 1
+
+
+def test_pick_uses_depth_surface_height_and_configured_offset(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    execution_config = replace(load_execution_config(), pick_surface_offset_mm=-2.5)
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=execution_config,
+        visual_config=load_visual_servo_config(),
+    )
+    runner._align = lambda *_args, **_kwargs: (True, [0, 0, 200, -180, 0, 90], None, "成功")
+
+    runner._pick(clients.get_task_target(0))
+
+    assert clients.moves[2][0][2] == 177.5
+
+
+def test_pick_rejects_missing_depth_height_before_moving(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    target = clients.get_task_target(0)
+    target.pick_surface_z_valid = False
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=load_execution_config(),
+        visual_config=load_visual_servo_config(),
+    )
+
+    with pytest.raises(RuntimeError, match="缺少有效深度高度"):
+        runner._pick(target)
+
+    assert clients.moves == []
+    assert clients.suction_states == []
 
 
 def test_interactive_prepare_retries_after_failed_rough_localization(monkeypatch):

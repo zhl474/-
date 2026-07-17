@@ -1,6 +1,7 @@
 """粗定位与视觉伺服抓放任务状态机。"""
 
 from enum import Enum
+import math
 import time
 
 import rospy
@@ -87,6 +88,12 @@ class TaskRunner:
         )
 
     def _pick(self, target):
+        if not getattr(target, "pick_surface_z_valid", False):
+            raise RuntimeError("方块缺少有效深度高度，已取消抓取")
+        pick_surface_z_mm = float(getattr(target, "pick_surface_z_mm", float("nan")))
+        if not math.isfinite(pick_surface_z_mm):
+            raise RuntimeError("方块表面深度高度无效，已取消抓取")
+
         _, place_angle, motor_wait = self.angle_planner.plan(target.rotation_delta_deg)
         rough_pose = list(target.pick_observation_pose)
         self._set_state(TaskState.PICK_COARSE)
@@ -108,7 +115,7 @@ class TaskRunner:
 
         self._set_state(TaskState.PICKING)
         pick_pose = list(sucker_pose)
-        pick_pose[2] = self.config.pick_z
+        pick_pose[2] = pick_surface_z_mm + self.config.pick_surface_offset_mm
         self.clients.move_arm(pick_pose, self.config.pick_speed)
         self.clients.set_suction(RobotClients.SUCK)
         self.holding_block = True
