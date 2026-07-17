@@ -10,7 +10,3 @@ pixel_to_robot_matrix:
 camera_to_sucker_offset_mm: [-94.1, -13.8]
 # 高位深度定位得到目标世界坐标后，视觉伺服观察位相对目标 Z 的抬高量，单位 mm。
 servo_height_offset_mm: 192.0
-# 最近一次标定时间，仅用于记录，不参与控制。
-last_calibration:
-  pixel_motion: "未标定"
-  camera_sucker_offset: "未标定"

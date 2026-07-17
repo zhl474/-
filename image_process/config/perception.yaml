@@ -18,9 +18,11 @@ high_rough_localization:
   y_mm_per_pixel: 0.5
 
 block_servo:
-  angle_window_deg: 10.0
+  angle_window_deg: 5.0
   angle_step_deg: 1.0
   roi_expand_px: 50
+  # true 时低位方块先按高位角度转正为紧凑 ROI，再使用紧凑矩形模板核匹配。
+  rectified_roi_enabled: true
   white_s_max: 45
   white_v_min: 180
   min_foreground_area: 200

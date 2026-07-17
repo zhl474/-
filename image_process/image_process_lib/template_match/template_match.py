@@ -38,6 +38,19 @@ def _finish_timing_stage(timing_output, stage_name, started_at, device):
     timing_output["阶段毫秒"][stage_name] = elapsed_ms + (previous_ms or 0.0)
 
 
+def _normalize_kernel_hw(kernel_size):
+    """把旧方核尺寸或新矩形核尺寸统一为（高，宽）。"""
+    if isinstance(kernel_size, (tuple, list)):
+        if len(kernel_size) != 2:
+            raise ValueError("矩形模板核尺寸必须为（高，宽）")
+        kernel_h, kernel_w = int(kernel_size[0]), int(kernel_size[1])
+    else:
+        kernel_h = kernel_w = int(kernel_size)
+    if kernel_h <= 0 or kernel_w <= 0:
+        raise ValueError("模板核尺寸必须为正数")
+    return kernel_h, kernel_w
+
+
 def match_template(image: torch.Tensor, template: torch.Tensor, kernel_size, angles) -> Tuple[torch.Tensor, List[Tuple[int, int]]]:
     """
     用卷积进行模板匹配。
@@ -51,7 +64,8 @@ def match_template(image: torch.Tensor, template: torch.Tensor, kernel_size, ang
 
     # 使用 conv2d 做互相关（卷积不翻转，等价于模板匹配中的相关性）
     # groups=1 表示普通卷积
-    pad = kernel_size // 2
+    kernel_h, kernel_w = _normalize_kernel_hw(kernel_size)
+    pad = (kernel_h // 2, kernel_w // 2)
     # feature_map = F.conv2d(image, template, padding=pad, stride=1)
     feature_map_small = F.conv2d(image, template, padding=pad, stride=2)
     # 上采样回原尺寸
@@ -93,7 +107,8 @@ def crop_image_for_search(image, search_center=None, search_radius=None, kernel_
         return image, (0, 0)
 
     center_x, center_y = search_center
-    pad = int(kernel_size // 2 + radius)
+    kernel_h, kernel_w = _normalize_kernel_hw(kernel_size)
+    pad = int(max(kernel_h, kernel_w) // 2 + radius)
     image_h, image_w = image.shape[:2]
     x1 = max(0, int(round(float(center_x))) - pad)
     y1 = max(0, int(round(float(center_y))) - pad)
@@ -121,25 +136,35 @@ def get_rect(
     search_radius=None,
     debug_output=None,
     timing_output=None,
+    prepared_templates=None,
 ):
     # 2. 加载模板（可以是一个或多个）
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     template_started_at = time.perf_counter() if timing_output is not None else None
-    kernels, kernel_size, angles = create_rotation_kernels(
-        block_px,
-        connector_px,
-        category,
-        device=device,
-        angle_step=angle_step,
-        angle_center=angle_center,
-        angle_window=angle_window,
-        angle_values=angle_values,
-    )
-    _finish_timing_stage(timing_output, "模板生成", template_started_at, device)
+    if prepared_templates is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        kernels, kernel_size, angles = create_rotation_kernels(
+            block_px,
+            connector_px,
+            category,
+            device=device,
+            angle_step=angle_step,
+            angle_center=angle_center,
+            angle_window=angle_window,
+            angle_values=angle_values,
+        )
+        _finish_timing_stage(timing_output, "模板生成", template_started_at, device)
+    else:
+        kernels = prepared_templates["kernels"]
+        kernel_size = prepared_templates["kernel_size"]
+        angles = prepared_templates["angles"]
+        device = str(kernels.device.type)
+        if timing_output is not None and timing_output["阶段毫秒"].get("模板生成") is None:
+            timing_output["阶段毫秒"]["模板生成"] = 0.0
     if timing_output is not None:
         timing_output["后端"] = device
         timing_output["模板数量"] = int(kernels.shape[0])
-        timing_output["模板核尺寸"] = int(kernel_size)
+        kernel_h, kernel_w = _normalize_kernel_hw(kernel_size)
+        timing_output["模板核尺寸"] = (int(kernel_w), int(kernel_h))
 
     tensor_started_at = time.perf_counter() if timing_output is not None else None
     cropped_image, (offset_x, offset_y) = crop_image_for_search(

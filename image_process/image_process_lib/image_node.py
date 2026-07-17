@@ -198,6 +198,10 @@ class ImageProcessor:
             "~board_low_max_dot_aspect_ratio", board_servo["max_dot_aspect_ratio"]
         )
         self.block_low_roi_expand_px = rospy.get_param("~block_low_roi_expand_px", block_servo["roi_expand_px"])
+        self.block_low_rectified_roi_enabled = rospy.get_param(
+            "~block_low_rectified_roi_enabled",
+            block_servo.get("rectified_roi_enabled", False),
+        )
         self.block_low_white_s_max = rospy.get_param("~block_low_white_s_max", block_servo["white_s_max"])
         self.block_low_white_v_min = rospy.get_param("~block_low_white_v_min", block_servo["white_v_min"])
         self.block_low_min_foreground_area = rospy.get_param(
@@ -328,7 +332,11 @@ class ImageProcessor:
         kernel_size = timing_info.get("模板核尺寸")
         template_text = "未执行"
         if template_count is not None and kernel_size is not None:
-            template_text = f"{template_count}×{kernel_size}"
+            if isinstance(kernel_size, (tuple, list)) and len(kernel_size) == 2:
+                kernel_text = f"{kernel_size[0]}x{kernel_size[1]}"
+            else:
+                kernel_text = str(kernel_size)
+            template_text = f"{template_count}×{kernel_text}"
 
         config_ms = timing_info.get("模板几何配置毫秒")
         detector_total_ms = timing_info.get("总计毫秒")
@@ -341,11 +349,14 @@ class ImageProcessor:
             f"状态={timing_info.get('状态') or '-'} "
             f"后端={timing_info.get('后端') or '未执行'} "
             f"ROI={roi_text} 匹配图={match_image_text} 模板={template_text} "
-            f"前景面积={timing_info.get('前景面积') if timing_info.get('前景面积') is not None else '-'}"
+            f"前景面积={timing_info.get('前景面积') if timing_info.get('前景面积') is not None else '-'} "
+            f"模式={timing_info.get('匹配模式') or '-'} "
+            f"缓存={timing_info.get('模板缓存') or '-'}"
         )
         print(
             f"配置={format_ms(config_ms)}，"
             f"先验ROI={format_ms(stages_ms.get('先验ROI'))}，"
+            f"ROI矫正={format_ms(stages_ms.get('ROI矫正'))}，"
             f"RGB分割={format_ms(stages_ms.get('RGB分割'))}，"
             f"模板生成={format_ms(stages_ms.get('模板生成'))}，"
             f"张量准备={format_ms(stages_ms.get('张量准备'))}，"
@@ -735,6 +746,7 @@ class ImageProcessor:
                 min_foreground_area=self.block_low_min_foreground_area,
                 debug_enabled=self.visual_servo_debug_enabled,
                 timing_enabled=self.visual_servo_timing_debug,
+                rectified_roi_enabled=self.block_low_rectified_roi_enabled,
             )
             detection_finished_at = time.perf_counter()
             block_timing = target_block.get("timing")

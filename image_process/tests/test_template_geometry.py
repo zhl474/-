@@ -22,7 +22,11 @@ from image_process_lib.block_category import (
     BLOCK_CATEGORY_NAMES,
     normalize_category_name,
 )
+import image_process_lib.block_servo_detector as block_servo_detector_module
 from image_process_lib.block_servo_detector import (
+    _build_rectified_roi_transform,
+    _transform_angle,
+    _transform_point,
     _segment_roi_by_local_rgb_color,
     detect_block_with_high_prior_roi,
 )
@@ -33,6 +37,7 @@ from image_process_lib.template_config import (
 from image_process_lib.template_match.kernels_create import (
     build_angle_values,
     create_base_shape,
+    create_compact_rotation_kernels,
     create_rotation_kernels,
     get_template_rect_size,
 )
@@ -143,6 +148,31 @@ def test_rotation_kernels_are_binary_without_edge_weighting():
     kernels, _, angles = create_rotation_kernels(37, 5, "T", angle_values=[0, 45], device="cpu")
     assert angles == [0.0, 45.0]
     assert set(np.unique(kernels.detach().cpu().numpy()).tolist()).issubset({0.0, 1.0})
+
+
+@pytest.mark.parametrize("category", BLOCK_CATEGORY_NAMES)
+def test_compact_rotation_kernels_keep_all_template_pixels(category):
+    full_kernels, full_size, full_angles = create_rotation_kernels(
+        37,
+        5,
+        category,
+        angle_values=[-10, 0, 10],
+        device="cpu",
+    )
+    compact_kernels, compact_hw, compact_angles = create_compact_rotation_kernels(
+        37,
+        5,
+        category,
+        angle_values=[-10, 0, 10],
+        device="cpu",
+    )
+    assert compact_angles == full_angles
+    assert compact_kernels.shape == (3, 1, compact_hw[0], compact_hw[1])
+    assert compact_hw[0] * compact_hw[1] < full_size * full_size
+    np.testing.assert_array_equal(
+        compact_kernels.sum(dim=(1, 2, 3)).numpy(),
+        full_kernels.sum(dim=(1, 2, 3)).numpy(),
+    )
 
 
 def test_block_category_order_and_legacy_names_are_stable():
@@ -324,6 +354,78 @@ def test_low_prior_roi_template_match_skips_debug_images_when_disabled():
     assert abs(result["py"] - target_center[1]) <= 2.0
     assert result["debug_image"] is None
     assert result["debug_panel"] is None
+
+
+def test_rectified_low_prior_roi_recovers_center_angle_and_uses_template_cache():
+    category = "T"
+    block_px = 12
+    connector_px = 3
+    template_angle = 18.0
+    high_theta = -template_angle
+    target_center = (165, 116)
+    image = np.full((240, 320, 3), 255, dtype=np.uint8)
+    color_config = load_color_segmentation_config(category)
+    target_bgr = _bgr_from_rgb(*color_config["rgb"])
+
+    kernels, _, _ = create_rotation_kernels(
+        block_px,
+        connector_px,
+        category,
+        device="cpu",
+        angle_values=[template_angle],
+    )
+    shape_mask = (kernels[0, 0].detach().cpu().numpy() > 0.5).astype(np.uint8)
+    x1 = target_center[0] - shape_mask.shape[1] // 2
+    y1 = target_center[1] - shape_mask.shape[0] // 2
+    image[y1:y1 + shape_mask.shape[0], x1:x1 + shape_mask.shape[1]][shape_mask > 0] = target_bgr
+
+    block_servo_detector_module._LOW_PREPARED_TEMPLATE_CACHE.clear()
+    common_kwargs = {
+        "template_geometry": {"block_px": block_px, "connector_px": connector_px},
+        "category": category,
+        "high_theta_deg": high_theta,
+        "angle_window": 3,
+        "angle_step": 1,
+        "roi_expand_px": 30,
+        "min_foreground_area": 50,
+        "debug_enabled": False,
+        "timing_enabled": True,
+        "rectified_roi_enabled": True,
+    }
+    first_result = detect_block_with_high_prior_roi(image, **common_kwargs)
+    second_result = detect_block_with_high_prior_roi(image, **common_kwargs)
+
+    assert first_result["found"] is True
+    assert second_result["found"] is True
+    assert abs(first_result["px"] - target_center[0]) <= 2.0
+    assert abs(first_result["py"] - target_center[1]) <= 2.0
+    assert abs(first_result["theta"] - high_theta) <= 1.0
+    np.testing.assert_allclose(
+        (second_result["px"], second_result["py"], second_result["theta"]),
+        (first_result["px"], first_result["py"], first_result["theta"]),
+        atol=1e-6,
+    )
+    first_timing = first_result["timing"]
+    second_timing = second_result["timing"]
+    assert first_timing["匹配模式"] == "转正紧凑核"
+    assert first_timing["模板缓存"] == "未命中"
+    assert second_timing["模板缓存"] == "命中"
+    assert first_timing["阶段毫秒"]["ROI矫正"] is not None
+    assert first_timing["匹配图尺寸"][0] < first_timing["ROI尺寸"][0]
+    assert first_timing["匹配图尺寸"][1] < first_timing["ROI尺寸"][1]
+
+
+def test_rectified_roi_inverse_transform_restores_center_and_angle():
+    image_center = (160.0, 120.0)
+    matrix, inverse_matrix, roi_size = _build_rectified_roi_transform(
+        image_center,
+        (120.0, 80.0),
+        -18.0,
+    )
+    restored_center = _transform_point(((roi_size[0] - 1) / 2.0, (roi_size[1] - 1) / 2.0), inverse_matrix)
+    np.testing.assert_allclose(restored_center, image_center, atol=1e-4)
+    assert abs(_transform_angle(0.0, inverse_matrix) + 18.0) <= 1e-4
+    assert matrix.shape == (2, 3)
 
 
 def test_low_prior_roi_timing_marks_template_stages_not_executed_when_foreground_too_small():

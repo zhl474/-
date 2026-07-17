@@ -1,9 +1,11 @@
 """高位类别/角度先验约束下的低位方块识别。"""
 
+import math
 import time
 
 import cv2
 import numpy as np
+import torch
 
 from image_process_lib.block_detection import (
     coreect_LL_location,
@@ -12,12 +14,17 @@ from image_process_lib.block_detection import (
 )
 from image_process_lib.block_category import normalize_category_name
 from image_process_lib.template_config import load_color_segmentation_config, load_template_geometry
-from image_process_lib.template_match.kernels_create import get_template_rect_size
+from image_process_lib.template_match.kernels_create import (
+    build_angle_values,
+    create_compact_rotation_kernels,
+    get_template_rect_size,
+)
 from image_process_lib.template_match.template_match import get_rect
 
 
 _TIMING_STAGE_NAMES = (
     "先验ROI",
+    "ROI矫正",
     "RGB分割",
     "模板生成",
     "张量准备",
@@ -25,6 +32,9 @@ _TIMING_STAGE_NAMES = (
     "匹配收尾",
     "检测调试图",
 )
+
+
+_LOW_PREPARED_TEMPLATE_CACHE = {}
 
 
 def _create_timing_info(category):
@@ -37,6 +47,8 @@ def _create_timing_info(category):
         "匹配图尺寸": None,
         "模板数量": None,
         "模板核尺寸": None,
+        "匹配模式": "原始方核",
+        "模板缓存": "未使用",
         "前景面积": None,
         "阶段毫秒": {stage_name: None for stage_name in _TIMING_STAGE_NAMES},
         "_开始时间": time.perf_counter(),
@@ -92,6 +104,102 @@ def _clip_bbox_from_points(points, image_shape, expand_px=0):
     x2 = min(image_w, int(np.ceil(np.max(points[:, 0]))) + expand_px + 1)
     y2 = min(image_h, int(np.ceil(np.max(points[:, 1]))) + expand_px + 1)
     return x1, y1, x2, y2
+
+
+def _build_rectified_roi_transform(center, expanded_size, high_theta_deg):
+    """构造原图到转正紧凑 ROI 的仿射变换及其逆变换。"""
+    roi_w = max(1, int(math.ceil(float(expanded_size[0]))))
+    roi_h = max(1, int(math.ceil(float(expanded_size[1]))))
+    matrix = cv2.getRotationMatrix2D(center, float(high_theta_deg), 1.0)
+    matrix[0, 2] += (roi_w - 1) / 2.0 - float(center[0])
+    matrix[1, 2] += (roi_h - 1) / 2.0 - float(center[1])
+    return matrix.astype(np.float32), cv2.invertAffineTransform(matrix).astype(np.float32), (roi_w, roi_h)
+
+
+def _warp_rectified_roi(img_bgr, matrix, roi_size):
+    """从原图一次旋转并裁出水平紧凑 ROI。"""
+    return cv2.warpAffine(
+        img_bgr,
+        matrix,
+        roi_size,
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
+    )
+
+
+def _transform_point(point, matrix):
+    """使用仿射矩阵变换一个像素点。"""
+    point_array = np.asarray([[point]], dtype=np.float32)
+    transformed = cv2.transform(point_array, matrix)
+    return float(transformed[0, 0, 0]), float(transformed[0, 0, 1])
+
+
+def _transform_angle(angle_deg, inverse_matrix):
+    """把转正 ROI 内的方向角经逆仿射矩阵恢复到原图坐标。"""
+    angle_rad = math.radians(float(angle_deg))
+    direction = np.array([math.cos(angle_rad), math.sin(angle_rad)], dtype=np.float32)
+    source_direction = inverse_matrix[:, :2] @ direction
+    theta = math.degrees(math.atan2(float(source_direction[1]), float(source_direction[0])))
+    if theta <= -180.0:
+        theta += 360.0
+    elif theta > 180.0:
+        theta -= 360.0
+    return theta
+
+
+def _get_low_prepared_templates(block_px, connector_px, category, angle_step, angle_window):
+    """按低位残余角度惰性生成并缓存紧凑 CUDA 模板。"""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    angles = build_angle_values(
+        category,
+        angle_step=angle_step,
+        angle_center=0.0,
+        angle_window=angle_window,
+    )
+    cache_key = (
+        str(device),
+        str(category),
+        int(block_px),
+        int(connector_px),
+        tuple(round(float(angle), 6) for angle in angles),
+    )
+    prepared = _LOW_PREPARED_TEMPLATE_CACHE.get(cache_key)
+    if prepared is not None:
+        return prepared, "命中"
+
+    kernels, kernel_size, angles = create_compact_rotation_kernels(
+        block_px,
+        connector_px,
+        category,
+        device=device,
+        angle_values=angles,
+    )
+    prepared = {
+        "kernels": kernels,
+        "kernel_size": kernel_size,
+        "angles": angles,
+    }
+    _LOW_PREPARED_TEMPLATE_CACHE[cache_key] = prepared
+    return prepared, "未命中"
+
+
+def _draw_rectified_template_on_original(debug_image, match_debug_output, inverse_matrix):
+    """把转正 ROI 内的最佳模板轮廓映回原图调试画面。"""
+    if debug_image is None or not match_debug_output:
+        return
+    best_kernel = match_debug_output.get("best_kernel")
+    template_top_left = match_debug_output.get("template_top_left")
+    if best_kernel is None or template_top_left is None:
+        return
+
+    contours, _ = cv2.findContours(best_kernel, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    offset = np.asarray(template_top_left, dtype=np.float32)
+    transformed_contours = []
+    for contour in contours:
+        local_contour = contour.astype(np.float32) + offset.reshape(1, 1, 2)
+        transformed_contours.append(cv2.transform(local_contour, inverse_matrix).astype(np.int32))
+    cv2.drawContours(debug_image, transformed_contours, -1, (0, 255, 0), 1)
 
 
 def _put_chinese_text(image, text, org, color, font_size=22):
@@ -428,12 +536,13 @@ def detect_block_with_high_prior_roi(
     min_foreground_area=200,
     debug_enabled=True,
     timing_enabled=False,
+    rectified_roi_enabled=False,
 ):
     """低位方块精定位：使用高位类别和角度生成 ROI 后直接模板匹配。
 
     低位画面中相机已在方块正上方，不再重新 YOLO 检测类别和框。
     这里用画面中心、高位旋转角和低位模板尺寸估算旋转矩形 ROI；
-    ROI 内按局部 RGB 颜色分割后，只在高位角度附近做模板匹配。
+    可选地将该 ROI 直接旋正为紧凑矩形，并只匹配高位角度附近的残余角度。
     """
     timing_info = _create_timing_info("") if timing_enabled else None
     debug_started_at = time.perf_counter() if timing_info is not None else None
@@ -482,18 +591,46 @@ def detect_block_with_high_prior_roi(
             timing_info=_finalize_timing_info(timing_info, "ROI越界"),
         )
 
-    roi_bgr = img_bgr[crop_y1:crop_y2, crop_x1:crop_x2]
-    if timing_info is not None:
-        timing_info["ROI尺寸"] = (int(roi_bgr.shape[1]), int(roi_bgr.shape[0]))
+    rectified_matrix = None
+    inverse_rectified_matrix = None
+    if rectified_roi_enabled:
+        rectify_started_at = time.perf_counter() if timing_info is not None else None
+        rectified_matrix, inverse_rectified_matrix, rectified_roi_size = _build_rectified_roi_transform(
+            center,
+            expanded_size,
+            high_theta_deg,
+        )
+        roi_bgr = _warp_rectified_roi(img_bgr, rectified_matrix, rectified_roi_size)
+        _add_timing_stage(timing_info, "ROI矫正", rectify_started_at)
+        if timing_info is not None:
+            timing_info["匹配模式"] = "转正紧凑核"
+            timing_info["ROI尺寸"] = (int(crop_x2 - crop_x1), int(crop_y2 - crop_y1))
+    else:
+        roi_bgr = img_bgr[crop_y1:crop_y2, crop_x1:crop_x2]
+        if timing_info is not None:
+            timing_info["ROI尺寸"] = (int(roi_bgr.shape[1]), int(roi_bgr.shape[0]))
     roi_debug_image = None
     debug_started_at = time.perf_counter() if timing_info is not None else None
     if debug_enabled:
-        roi_debug_image = np.copy(debug_image)
-        _draw_prior_roi_debug(roi_debug_image, roi_box, category=category, theta=high_theta_deg)
+        roi_debug_image = _make_debug_image(roi_bgr) if rectified_roi_enabled else np.copy(debug_image)
+        if rectified_roi_enabled:
+            cv2.drawMarker(
+                roi_debug_image,
+                (roi_bgr.shape[1] // 2, roi_bgr.shape[0] // 2),
+                (255, 0, 0),
+                markerType=cv2.MARKER_CROSS,
+                markerSize=24,
+                thickness=2,
+            )
+            _put_chinese_text(roi_debug_image, "转正紧凑ROI", (12, 12), (255, 0, 0), font_size=22)
+        else:
+            _draw_prior_roi_debug(roi_debug_image, roi_box, category=category, theta=high_theta_deg)
     _add_timing_stage(timing_info, "检测调试图", debug_started_at)
-    local_roi_box = roi_box - np.array([crop_x1, crop_y1], dtype=np.float32)
-    roi_polygon_mask = np.zeros(roi_bgr.shape[:2], dtype=np.uint8)
-    cv2.fillConvexPoly(roi_polygon_mask, np.intp(local_roi_box), 255)
+    roi_polygon_mask = None
+    if not rectified_roi_enabled:
+        local_roi_box = roi_box - np.array([crop_x1, crop_y1], dtype=np.float32)
+        roi_polygon_mask = np.zeros(roi_bgr.shape[:2], dtype=np.uint8)
+        cv2.fillConvexPoly(roi_polygon_mask, np.intp(local_roi_box), 255)
     _add_timing_stage(timing_info, "先验ROI", roi_started_at)
 
     segmentation_started_at = time.perf_counter() if timing_info is not None else None
@@ -515,7 +652,8 @@ def detect_block_with_high_prior_roi(
     _add_timing_stage(timing_info, "检测调试图", debug_started_at)
 
     roi_started_at = time.perf_counter() if timing_info is not None else None
-    foreground_mask = cv2.bitwise_and(foreground_mask, roi_polygon_mask)
+    if roi_polygon_mask is not None:
+        foreground_mask = cv2.bitwise_and(foreground_mask, roi_polygon_mask)
     foreground_area = int(cv2.countNonZero(foreground_mask))
     _add_timing_stage(timing_info, "先验ROI", roi_started_at)
     if timing_info is not None:
@@ -547,22 +685,43 @@ def detect_block_with_high_prior_roi(
             timing_info=_finalize_timing_info(timing_info, "前景面积过小"),
         )
 
-    # get_rect 内部模板角度为逆时针正；返回的 OpenCV 矩形角度是相反数。
-    template_angle_center = -high_theta_deg
+    prepared_templates = None
+    if rectified_roi_enabled:
+        template_started_at = time.perf_counter() if timing_info is not None else None
+        prepared_templates, cache_status = _get_low_prepared_templates(
+            block_px,
+            connector_px,
+            category,
+            angle_step,
+            angle_window,
+        )
+        if timing_info is not None:
+            if cache_status == "未命中":
+                if prepared_templates["kernels"].device.type == "cuda":
+                    torch.cuda.synchronize()
+                timing_info["阶段毫秒"]["模板生成"] = (
+                    time.perf_counter() - template_started_at
+                ) * 1000.0
+            timing_info["模板缓存"] = cache_status
+        template_angle_center = 0.0
+    else:
+        # get_rect 内部模板角度为逆时针正；返回的 OpenCV 矩形角度是相反数。
+        template_angle_center = -high_theta_deg
     match_debug_output = {} if debug_enabled else None
     rect = get_rect(
         foreground_mask,
         block_px,
         connector_px,
         category,
-        debug_image,
-        crop_x1,
-        crop_y1,
+        None if rectified_roi_enabled else debug_image,
+        0 if rectified_roi_enabled else crop_x1,
+        0 if rectified_roi_enabled else crop_y1,
         angle_step=angle_step,
         angle_center=template_angle_center,
         angle_window=angle_window,
         debug_output=match_debug_output,
         timing_output=timing_info,
+        prepared_templates=prepared_templates,
     )
     debug_started_at = time.perf_counter() if timing_info is not None else None
     match_mask_debug = (
@@ -574,21 +733,26 @@ def detect_block_with_high_prior_roi(
     postprocess_started_at = time.perf_counter() if timing_info is not None else None
     box = cv2.boxPoints(rect)
     box = np.intp(box)
-    px = int(rect[0][0]) + crop_x1
-    py = int(rect[0][1]) + crop_y1
+    local_px, local_py = float(rect[0][0]), float(rect[0][1])
     if category in ("L_yellow", "L_blue"):
-        px, py = coreect_LL_location(box, foreground_mask, rect)
-        px += crop_x1
-        py += crop_y1
+        local_px, local_py = coreect_LL_location(box, foreground_mask, rect)
 
-    theta = rect[2]
-    if theta < -180:
-        theta += 360
+    if rectified_roi_enabled:
+        px, py = _transform_point((local_px, local_py), inverse_rectified_matrix)
+        theta = _transform_angle(rect[2], inverse_rectified_matrix)
+    else:
+        px = local_px + crop_x1
+        py = local_py + crop_y1
+        theta = rect[2]
+        if theta < -180:
+            theta += 360
     _add_timing_stage(timing_info, "匹配收尾", postprocess_started_at)
 
     debug_panel = None
     debug_started_at = time.perf_counter() if timing_info is not None else None
     if debug_enabled:
+        if rectified_roi_enabled:
+            _draw_rectified_template_on_original(debug_image, match_debug_output, inverse_rectified_matrix)
         cv2.drawMarker(
             debug_image,
             (int(center[0]), int(center[1])),

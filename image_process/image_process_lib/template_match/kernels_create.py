@@ -274,3 +274,73 @@ def create_rotation_kernels(
         angles,
         device=device,
     )
+
+
+def create_compact_rotation_kernels(
+    block_px,
+    connector_px,
+    category,
+    device=None,
+    angle_step=1,
+    angle_center=None,
+    angle_window=None,
+    angle_values=None,
+    safety_margin_px=2,
+):
+    """生成仅覆盖给定角度范围的紧凑矩形旋转卷积核。
+
+    先在旧的安全方形画布内旋转，再按所有模板的非零范围统一居中裁剪，
+    因而不会因矩形画布直接旋转而截断方块边缘。
+    """
+    try:
+        safety_margin_px = int(safety_margin_px)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("safety_margin_px 必须是整数") from exc
+    if safety_margin_px < 0:
+        raise ValueError("safety_margin_px 必须大于等于 0")
+
+    base_shape = create_base_shape(category, block_px, connector_px)
+    angles = build_angle_values(
+        category,
+        angle_step=angle_step,
+        angle_center=angle_center,
+        angle_window=angle_window,
+        angle_values=angle_values,
+    )
+    full_kernels, length, angles = create_kernels(base_shape, angles, device=None)
+    full_kernels_np = full_kernels[:, 0].numpy()
+    center = length // 2
+
+    max_up = max_down = max_left = max_right = 0
+    for kernel in full_kernels_np:
+        ys, xs = np.nonzero(kernel > 0.5)
+        if len(xs) == 0 or len(ys) == 0:
+            raise ValueError("旋转模板不能为空")
+        max_up = max(max_up, center - int(np.min(ys)))
+        max_down = max(max_down, int(np.max(ys)) - center)
+        max_left = max(max_left, center - int(np.min(xs)))
+        max_right = max(max_right, int(np.max(xs)) - center)
+
+    half_h = max(max_up, max_down) + safety_margin_px
+    half_w = max(max_left, max_right) + safety_margin_px
+    kernel_h = 2 * half_h + 1
+    kernel_w = 2 * half_w + 1
+    compact_kernels = np.zeros((len(angles), kernel_h, kernel_w), dtype=full_kernels_np.dtype)
+    source_y1 = max(0, center - half_h)
+    source_y2 = min(length, center + half_h + 1)
+    source_x1 = max(0, center - half_w)
+    source_x2 = min(length, center + half_w + 1)
+    target_y1 = source_y1 - (center - half_h)
+    target_x1 = source_x1 - (center - half_w)
+    target_y2 = target_y1 + (source_y2 - source_y1)
+    target_x2 = target_x1 + (source_x2 - source_x1)
+    compact_kernels[:, target_y1:target_y2, target_x1:target_x2] = full_kernels_np[
+        :, source_y1:source_y2, source_x1:source_x2
+    ]
+
+    kernel_dtype = np.float32 if device is None or str(device) == "cpu" else np.float16
+    kernels_tensor = torch.from_numpy(compact_kernels.astype(kernel_dtype, copy=False)).unsqueeze(1)
+    if device is not None:
+        kernels_tensor = kernels_tensor.to(device)
+
+    return kernels_tensor, (kernel_h, kernel_w), angles

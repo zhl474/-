@@ -32,8 +32,6 @@ class ExecutionConfig:
     success_stable_frames: int
     max_missed_frames: int
     settle_sec: float
-    block_angle_window_deg: float
-    block_angle_step_deg: float
     initial_motor_angle_deg: float
     motor_velocity_deg_per_sec: float
     motor_lower_margin_deg: float
@@ -71,8 +69,6 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         success_stable_frames=int(servo["success_stable_frames"]),
         max_missed_frames=int(servo["max_missed_frames"]),
         settle_sec=float(servo["settle_sec"]),
-        block_angle_window_deg=float(servo["block_angle_window_deg"]),
-        block_angle_step_deg=float(servo["block_angle_step_deg"]),
         initial_motor_angle_deg=float(motor["initial_angle_deg"]),
         motor_velocity_deg_per_sec=float(motor["velocity_deg_per_sec"]),
         motor_lower_margin_deg=float(motor["lower_margin_deg"]),
@@ -82,8 +78,7 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         config.arm_speed, config.pick_speed, config.servo_speed, config.pick_z, config.lift_z,
         config.place_high_z, config.place_down_z, config.place_lift_step_mm,
         config.error_threshold_px, config.min_step_mm, config.max_step_mm, config.max_iter,
-        config.success_stable_frames, config.max_missed_frames, config.block_angle_window_deg,
-        config.block_angle_step_deg, config.motor_velocity_deg_per_sec,
+        config.success_stable_frames, config.max_missed_frames, config.motor_velocity_deg_per_sec,
     ]
     if not np.all(np.isfinite(numeric_values)) or min(config.arm_speed, config.pick_speed, config.servo_speed) <= 0:
         raise ValueError("执行配置包含无效数值")

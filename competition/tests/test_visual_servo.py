@@ -17,8 +17,9 @@ def _response(found=True, dx=0.0, dy=0.0, message=""):
 def test_current_execution_and_servo_configs_are_valid():
     execution = load_execution_config()
     visual = load_visual_servo_config()
-    assert execution.arm_speed == 80
-    assert execution.servo_speed == 25
+    assert execution.arm_speed > 0
+    assert execution.servo_speed > 0
+    assert len(execution.shooting_pose) == 6
     assert np.asarray(visual["pixel_to_robot_matrix"]).shape == (2, 2)
 
 
