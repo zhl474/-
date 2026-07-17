@@ -94,3 +94,21 @@ def test_interactive_prepare_retries_after_failed_rough_localization(monkeypatch
 
     assert len(prepare_calls) == 2
     assert executed_counts == [3]
+
+
+def test_completed_state_logs_total_execution_time(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    logs = []
+    monkeypatch.setattr(module.rospy, "loginfo", lambda message, *args: logs.append(message % args))
+    monkeypatch.setattr(module.time, "monotonic", lambda: 125.25)
+    runner = module.TaskRunner(
+        clients=_FakeClients(),
+        execution_config=load_execution_config(),
+        visual_config=load_visual_servo_config(),
+    )
+    runner.execution_start_time = 120.0
+
+    runner._set_state(module.TaskState.COMPLETED)
+
+    assert logs == ["任务状态: 完成", "全部方块抓放完成，总耗时: 5.25 秒"]
+    assert runner.execution_start_time is None
