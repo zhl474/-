@@ -380,7 +380,7 @@ class ImageProcessor:
             if category not in counts:
                 rospy.logwarn("忽略未知方块类别: %s", category)
                 continue
-            servo_pose, source, _ = self.make_depth_first_servo_pose(
+            servo_pose, _, _ = self.make_depth_first_servo_pose(
                 block["px"], block["py"], image.shape, f"方块 {category}"
             )
             counts[category] += 1
@@ -391,7 +391,6 @@ class ImageProcessor:
                     detected_angle_deg=float(block["theta"]),
                 )
             )
-            rospy.loginfo("方块 %s 使用 %s 粗定位", category, source)
         if not observed_blocks:
             raise RuntimeError("没有可用于任务规划的已知类别方块")
         return observed_blocks, [counts[category] for category in BLOCK_CATEGORY_NAMES]
@@ -415,7 +414,7 @@ class ImageProcessor:
                 float(item["row"]),
                 float(item["col"]),
             )
-            servo_pose, source, _ = self.make_depth_first_servo_pose(
+            servo_pose, _, _ = self.make_depth_first_servo_pose(
                 target_point[0],
                 target_point[1],
                 image_shape,
@@ -431,7 +430,6 @@ class ImageProcessor:
                     observation_pose=tuple(servo_pose),
                 )
             )
-            rospy.loginfo("托盘目标 %d 使用 %s 粗定位", item["index"], source)
         return targets
 
     def prepare_task(self, request):

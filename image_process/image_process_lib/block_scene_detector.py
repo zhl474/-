@@ -129,13 +129,6 @@ def detect_blocks_in_image(
             theta += 360
 
         cv2.circle(debug_image, (int(px), int(py)), 3, (0, 0, 255), 2)
-        cv2.rectangle(
-            debug_image,
-            (int(x1), int(y1)),
-            (int(x2), int(y2)),
-            (0, 255, 0),
-            1,
-        )
         cv2.putText(
             debug_image,
             f"{category} ({px:.0f},{py:.0f})",
@@ -160,4 +153,3 @@ def detect_blocks_in_image(
         })
 
     return blocks, debug_image
-
