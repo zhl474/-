@@ -263,6 +263,7 @@ def test_low_prior_roi_template_match_uses_local_rgb_color_seed():
         white_s_max=45,
         white_v_min=180,
         min_foreground_area=50,
+        timing_enabled=True,
     )
 
     assert result["found"] is True
@@ -272,6 +273,14 @@ def test_low_prior_roi_template_match_uses_local_rgb_color_seed():
     assert abs(result["theta"] - high_theta) <= 1.0
     assert result["debug_panel"] is not None
     assert result["debug_panel"].size > 0
+    timing = result["timing"]
+    assert timing["状态"] == "成功"
+    assert timing["ROI尺寸"] is not None
+    assert timing["模板数量"] == 7
+    assert timing["模板核尺寸"] is not None
+    assert timing["后端"] in ("cpu", "cuda")
+    for stage_name in ("先验ROI", "RGB分割", "模板生成", "张量准备", "卷积选优", "匹配收尾", "检测调试图"):
+        assert timing["阶段毫秒"][stage_name] is not None
 
 
 def test_low_prior_roi_template_match_skips_debug_images_when_disabled():
@@ -315,6 +324,39 @@ def test_low_prior_roi_template_match_skips_debug_images_when_disabled():
     assert abs(result["py"] - target_center[1]) <= 2.0
     assert result["debug_image"] is None
     assert result["debug_panel"] is None
+
+
+def test_low_prior_roi_timing_marks_template_stages_not_executed_when_foreground_too_small():
+    category = "T"
+    block_px = 12
+    connector_px = 3
+    image = np.full((240, 320, 3), 255, dtype=np.uint8)
+    target_bgr = _bgr_from_rgb(*load_color_segmentation_config(category)["rgb"])
+
+    # 中心 seed 搜索窗口的第一个候选 patch 与目标颜色完全一致，面积仅 49 px。
+    image[80:87, 120:127] = target_bgr
+    result = detect_block_with_high_prior_roi(
+        image,
+        template_geometry={"block_px": block_px, "connector_px": connector_px},
+        category=category,
+        high_theta_deg=0.0,
+        angle_window=3,
+        angle_step=1,
+        roi_expand_px=30,
+        min_foreground_area=100,
+        debug_enabled=False,
+        timing_enabled=True,
+    )
+
+    assert result["found"] is False
+    timing = result["timing"]
+    assert timing["状态"] == "前景面积过小"
+    assert timing["ROI尺寸"] is not None
+    assert timing["前景面积"] < 100
+    assert timing["阶段毫秒"]["先验ROI"] is not None
+    assert timing["阶段毫秒"]["RGB分割"] is not None
+    for stage_name in ("模板生成", "张量准备", "卷积选优", "匹配收尾"):
+        assert timing["阶段毫秒"][stage_name] is None
 
 
 def test_local_rgb_segment_returns_seed_debug_boxes():

@@ -287,6 +287,7 @@ class ImageProcessor:
         detection_finished_at=None,
         debug_started_at=None,
         debug_finished_at=None,
+        block_timing=None,
     ):
         """调试时输出图像服务内部耗时，所有时间戳均在日志输出前采集。"""
         if not getattr(self, "visual_servo_timing_debug", False):
@@ -304,6 +305,54 @@ class ImageProcessor:
             f"识别={elapsed_ms(detection_started_at, detection_finished_at)}，"
             f"调试图输出={elapsed_ms(debug_started_at, debug_finished_at)}，"
             f"服务内总={elapsed_ms(request_started_at, finished_at)}"
+        )
+        if target_type == "方块" and block_timing is not None:
+            self.log_block_servo_stage_timing(block_timing)
+
+    def log_block_servo_stage_timing(self, timing_info):
+        """输出低位方块识别的可归因分段耗时。"""
+        if not getattr(self, "visual_servo_timing_debug", False):
+            return
+
+        def format_ms(value):
+            return "未执行" if value is None else f"{float(value):.1f}ms"
+
+        stages_ms = timing_info.get("阶段毫秒", {})
+        roi_size = timing_info.get("ROI尺寸")
+        match_image_size = timing_info.get("匹配图尺寸")
+        roi_text = "-" if roi_size is None else f"{roi_size[0]}x{roi_size[1]}"
+        match_image_text = (
+            "-" if match_image_size is None else f"{match_image_size[0]}x{match_image_size[1]}"
+        )
+        template_count = timing_info.get("模板数量")
+        kernel_size = timing_info.get("模板核尺寸")
+        template_text = "未执行"
+        if template_count is not None and kernel_size is not None:
+            template_text = f"{template_count}×{kernel_size}"
+
+        config_ms = timing_info.get("模板几何配置毫秒")
+        detector_total_ms = timing_info.get("总计毫秒")
+        total_ms = None
+        if config_ms is not None and detector_total_ms is not None:
+            total_ms = float(config_ms) + float(detector_total_ms)
+
+        print(
+            f"[方块低位分段] 类别={timing_info.get('类别') or '-'} "
+            f"状态={timing_info.get('状态') or '-'} "
+            f"后端={timing_info.get('后端') or '未执行'} "
+            f"ROI={roi_text} 匹配图={match_image_text} 模板={template_text} "
+            f"前景面积={timing_info.get('前景面积') if timing_info.get('前景面积') is not None else '-'}"
+        )
+        print(
+            f"配置={format_ms(config_ms)}，"
+            f"先验ROI={format_ms(stages_ms.get('先验ROI'))}，"
+            f"RGB分割={format_ms(stages_ms.get('RGB分割'))}，"
+            f"模板生成={format_ms(stages_ms.get('模板生成'))}，"
+            f"张量准备={format_ms(stages_ms.get('张量准备'))}，"
+            f"卷积选优={format_ms(stages_ms.get('卷积选优'))}，"
+            f"匹配收尾={format_ms(stages_ms.get('匹配收尾'))}，"
+            f"检测调试图={format_ms(stages_ms.get('检测调试图'))}，"
+            f"合计={format_ms(total_ms)}"
         )
 
     def image_callback(self, msg):
@@ -670,9 +719,12 @@ class ImageProcessor:
             height, width = image.shape[:2]
             center_x, center_y = width / 2.0, height / 2.0
             detection_started_at = time.perf_counter()
+            geometry_started_at = time.perf_counter() if self.visual_servo_timing_debug else None
+            template_geometry = load_template_geometry("low")
+            geometry_finished_at = time.perf_counter() if self.visual_servo_timing_debug else None
             target_block = detect_block_with_high_prior_roi(
                 image,
-                template_geometry=load_template_geometry("low"),
+                template_geometry=template_geometry,
                 category=category,
                 high_theta_deg=float(angle_center),
                 angle_window=float(angle_window),
@@ -682,8 +734,14 @@ class ImageProcessor:
                 white_v_min=self.block_low_white_v_min,
                 min_foreground_area=self.block_low_min_foreground_area,
                 debug_enabled=self.visual_servo_debug_enabled,
+                timing_enabled=self.visual_servo_timing_debug,
             )
             detection_finished_at = time.perf_counter()
+            block_timing = target_block.get("timing")
+            if block_timing is not None:
+                block_timing["模板几何配置毫秒"] = (
+                    (geometry_finished_at - geometry_started_at) * 1000.0
+                )
             debug_image = target_block.get("debug_image")
             if self.visual_servo_debug_enabled and debug_image is None:
                 debug_image = image.copy()
@@ -710,6 +768,7 @@ class ImageProcessor:
                     detection_finished_at,
                     debug_started_at,
                     debug_finished_at,
+                    block_timing=block_timing,
                 )
                 return self.make_visual_servo_result(
                     found=False,
@@ -740,6 +799,7 @@ class ImageProcessor:
                 detection_finished_at,
                 debug_started_at,
                 debug_finished_at,
+                block_timing=block_timing,
             )
             return self.make_visual_servo_result(
                 found=True,

@@ -1,5 +1,7 @@
 """高位类别/角度先验约束下的低位方块识别。"""
 
+import time
+
 import cv2
 import numpy as np
 
@@ -14,7 +16,52 @@ from image_process_lib.template_match.kernels_create import get_template_rect_si
 from image_process_lib.template_match.template_match import get_rect
 
 
-def _empty_detection(message, debug_image=None, debug_panel=None):
+_TIMING_STAGE_NAMES = (
+    "先验ROI",
+    "RGB分割",
+    "模板生成",
+    "张量准备",
+    "卷积选优",
+    "匹配收尾",
+    "检测调试图",
+)
+
+
+def _create_timing_info(category):
+    """创建一次低位方块识别的分段耗时容器。"""
+    return {
+        "类别": category,
+        "状态": "未完成",
+        "后端": None,
+        "ROI尺寸": None,
+        "匹配图尺寸": None,
+        "模板数量": None,
+        "模板核尺寸": None,
+        "前景面积": None,
+        "阶段毫秒": {stage_name: None for stage_name in _TIMING_STAGE_NAMES},
+        "_开始时间": time.perf_counter(),
+    }
+
+
+def _add_timing_stage(timing_info, stage_name, started_at):
+    """累加一个 CPU 阶段耗时；关闭诊断时不进行计时。"""
+    if timing_info is None:
+        return
+    elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+    previous_ms = timing_info["阶段毫秒"].get(stage_name)
+    timing_info["阶段毫秒"][stage_name] = elapsed_ms + (previous_ms or 0.0)
+
+
+def _finalize_timing_info(timing_info, status):
+    """固化检测状态和总耗时，返回给图像节点输出日志。"""
+    if timing_info is None:
+        return None
+    timing_info["状态"] = status
+    timing_info["总计毫秒"] = (time.perf_counter() - timing_info.pop("_开始时间")) * 1000.0
+    return timing_info
+
+
+def _empty_detection(message, debug_image=None, debug_panel=None, timing_info=None):
     return {
         "found": False,
         "category": "",
@@ -25,6 +72,7 @@ def _empty_detection(message, debug_image=None, debug_panel=None):
         "debug_image": debug_image,
         "debug_panel": debug_panel,
         "message": message,
+        "timing": timing_info,
     }
 
 
@@ -379,6 +427,7 @@ def detect_block_with_high_prior_roi(
     white_v_min=180,
     min_foreground_area=200,
     debug_enabled=True,
+    timing_enabled=False,
 ):
     """低位方块精定位：使用高位类别和角度生成 ROI 后直接模板匹配。
 
@@ -386,13 +435,26 @@ def detect_block_with_high_prior_roi(
     这里用画面中心、高位旋转角和低位模板尺寸估算旋转矩形 ROI；
     ROI 内按局部 RGB 颜色分割后，只在高位角度附近做模板匹配。
     """
+    timing_info = _create_timing_info("") if timing_enabled else None
+    debug_started_at = time.perf_counter() if timing_info is not None else None
     debug_image = _make_debug_image(img_bgr) if debug_enabled else None
+    _add_timing_stage(timing_info, "检测调试图", debug_started_at)
     if img_bgr is None or img_bgr.size == 0:
-        return _empty_detection("输入图像为空", debug_image)
+        return _empty_detection(
+            "输入图像为空",
+            debug_image,
+            timing_info=_finalize_timing_info(timing_info, "输入图像为空"),
+        )
 
     category = normalize_category_name(str(category or "").strip())
+    if timing_info is not None:
+        timing_info["类别"] = category
     if not category:
-        return _empty_detection("低位先验 ROI 缺少方块类别", debug_image)
+        return _empty_detection(
+            "低位先验 ROI 缺少方块类别",
+            debug_image,
+            timing_info=_finalize_timing_info(timing_info, "缺少类别"),
+        )
 
     if template_geometry is None:
         template_geometry = load_template_geometry(template_profile)
@@ -400,6 +462,7 @@ def detect_block_with_high_prior_roi(
     connector_px = template_geometry["connector_px"]
     rect_size = get_template_rect_size(category, block_px, connector_px)
 
+    roi_started_at = time.perf_counter() if timing_info is not None else None
     image_h, image_w = img_bgr.shape[:2]
     center = (image_w / 2.0, image_h / 2.0)
     high_theta_deg = float(high_theta_deg)
@@ -412,32 +475,54 @@ def detect_block_with_high_prior_roi(
     roi_box = cv2.boxPoints(roi_rect)
     crop_x1, crop_y1, crop_x2, crop_y2 = _clip_bbox_from_points(roi_box, img_bgr.shape)
     if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
-        return _empty_detection("低位先验 ROI 越界为空", debug_image)
+        _add_timing_stage(timing_info, "先验ROI", roi_started_at)
+        return _empty_detection(
+            "低位先验 ROI 越界为空",
+            debug_image,
+            timing_info=_finalize_timing_info(timing_info, "ROI越界"),
+        )
 
     roi_bgr = img_bgr[crop_y1:crop_y2, crop_x1:crop_x2]
+    if timing_info is not None:
+        timing_info["ROI尺寸"] = (int(roi_bgr.shape[1]), int(roi_bgr.shape[0]))
     roi_debug_image = None
+    debug_started_at = time.perf_counter() if timing_info is not None else None
     if debug_enabled:
         roi_debug_image = np.copy(debug_image)
         _draw_prior_roi_debug(roi_debug_image, roi_box, category=category, theta=high_theta_deg)
+    _add_timing_stage(timing_info, "检测调试图", debug_started_at)
     local_roi_box = roi_box - np.array([crop_x1, crop_y1], dtype=np.float32)
     roi_polygon_mask = np.zeros(roi_bgr.shape[:2], dtype=np.uint8)
     cv2.fillConvexPoly(roi_polygon_mask, np.intp(local_roi_box), 255)
+    _add_timing_stage(timing_info, "先验ROI", roi_started_at)
 
+    segmentation_started_at = time.perf_counter() if timing_info is not None else None
     if debug_enabled:
         foreground_mask, mask_stages = _segment_roi_by_local_rgb_color(
             roi_bgr,
             category,
             return_stages=True,
         )
-        roi_seed_debug = _draw_seed_patch_debug(roi_bgr, mask_stages)
     else:
         foreground_mask = _segment_roi_by_local_rgb_color(roi_bgr, category)
         mask_stages = None
         roi_seed_debug = None
+    _add_timing_stage(timing_info, "RGB分割", segmentation_started_at)
+
+    debug_started_at = time.perf_counter() if timing_info is not None else None
+    if debug_enabled:
+        roi_seed_debug = _draw_seed_patch_debug(roi_bgr, mask_stages)
+    _add_timing_stage(timing_info, "检测调试图", debug_started_at)
+
+    roi_started_at = time.perf_counter() if timing_info is not None else None
     foreground_mask = cv2.bitwise_and(foreground_mask, roi_polygon_mask)
     foreground_area = int(cv2.countNonZero(foreground_mask))
+    _add_timing_stage(timing_info, "先验ROI", roi_started_at)
+    if timing_info is not None:
+        timing_info["前景面积"] = foreground_area
     if foreground_area < int(min_foreground_area):
         debug_panel = None
+        debug_started_at = time.perf_counter() if timing_info is not None else None
         if debug_enabled:
             _draw_prior_roi_debug(debug_image, roi_box, category=category, theta=high_theta_deg)
             debug_panel = _make_block_debug_panel(
@@ -454,10 +539,12 @@ def detect_block_with_high_prior_roi(
                     prefix="前景面积过小",
                 ),
             )
+        _add_timing_stage(timing_info, "检测调试图", debug_started_at)
         return _empty_detection(
             f"低位 ROI 前景面积过小: {foreground_area}",
             debug_image,
             debug_panel=debug_panel,
+            timing_info=_finalize_timing_info(timing_info, "前景面积过小"),
         )
 
     # get_rect 内部模板角度为逆时针正；返回的 OpenCV 矩形角度是相反数。
@@ -475,12 +562,16 @@ def detect_block_with_high_prior_roi(
         angle_center=template_angle_center,
         angle_window=angle_window,
         debug_output=match_debug_output,
+        timing_output=timing_info,
     )
+    debug_started_at = time.perf_counter() if timing_info is not None else None
     match_mask_debug = (
         _draw_template_match_on_mask(foreground_mask, match_debug_output)
         if debug_enabled else None
     )
+    _add_timing_stage(timing_info, "检测调试图", debug_started_at)
 
+    postprocess_started_at = time.perf_counter() if timing_info is not None else None
     box = cv2.boxPoints(rect)
     box = np.intp(box)
     px = int(rect[0][0]) + crop_x1
@@ -493,8 +584,10 @@ def detect_block_with_high_prior_roi(
     theta = rect[2]
     if theta < -180:
         theta += 360
+    _add_timing_stage(timing_info, "匹配收尾", postprocess_started_at)
 
     debug_panel = None
+    debug_started_at = time.perf_counter() if timing_info is not None else None
     if debug_enabled:
         cv2.drawMarker(
             debug_image,
@@ -527,6 +620,7 @@ def detect_block_with_high_prior_roi(
             match_debug=debug_image,
             message=_format_seed_debug_message(category, foreground_area, mask_stages),
         )
+    _add_timing_stage(timing_info, "检测调试图", debug_started_at)
 
     return {
         "found": True,
@@ -538,4 +632,5 @@ def detect_block_with_high_prior_roi(
         "debug_image": debug_image,
         "debug_panel": debug_panel,
         "message": "低位先验 ROI 模板匹配成功",
+        "timing": _finalize_timing_info(timing_info, "成功"),
     }

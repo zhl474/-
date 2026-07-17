@@ -2,8 +2,8 @@ import torch
 import torch.nn.functional as F
 import cv2
 from typing import List, Tuple
-import time
 import numpy as np
+import time
 from .kernels_create import (
     create_rotation_kernels,
     get_template_rect_size,
@@ -25,6 +25,17 @@ def load_img(img, device: str = "cuda") -> torch.Tensor:
         tensor = tensor.to(torch.float16)
     tensor = tensor.to(device)
     return tensor
+
+
+def _finish_timing_stage(timing_output, stage_name, started_at, device):
+    """结束一个模板匹配计时阶段，CUDA 时等待异步任务完成。"""
+    if timing_output is None:
+        return
+    if device == "cuda":
+        torch.cuda.synchronize()
+    elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+    previous_ms = timing_output["阶段毫秒"].get(stage_name)
+    timing_output["阶段毫秒"][stage_name] = elapsed_ms + (previous_ms or 0.0)
 
 
 def match_template(image: torch.Tensor, template: torch.Tensor, kernel_size, angles) -> Tuple[torch.Tensor, List[Tuple[int, int]]]:
@@ -109,10 +120,11 @@ def get_rect(
     search_center=None,
     search_radius=None,
     debug_output=None,
+    timing_output=None,
 ):
     # 2. 加载模板（可以是一个或多个）
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # print(f"使用设备: {device}")
+    template_started_at = time.perf_counter() if timing_output is not None else None
     kernels, kernel_size, angles = create_rotation_kernels(
         block_px,
         connector_px,
@@ -123,6 +135,13 @@ def get_rect(
         angle_window=angle_window,
         angle_values=angle_values,
     )
+    _finish_timing_stage(timing_output, "模板生成", template_started_at, device)
+    if timing_output is not None:
+        timing_output["后端"] = device
+        timing_output["模板数量"] = int(kernels.shape[0])
+        timing_output["模板核尺寸"] = int(kernel_size)
+
+    tensor_started_at = time.perf_counter() if timing_output is not None else None
     cropped_image, (offset_x, offset_y) = crop_image_for_search(
         image,
         search_center=search_center,
@@ -130,15 +149,20 @@ def get_rect(
         kernel_size=kernel_size,
     )
     image_tensor = load_img(cropped_image, device=device)
+    _finish_timing_stage(timing_output, "张量准备", tensor_started_at, device)
+    if timing_output is not None:
+        timing_output["匹配图尺寸"] = (
+            int(cropped_image.shape[1]),
+            int(cropped_image.shape[0]),
+        )
+
     # show_all_kernels_grid(kernels)
     # 3. 执行匹配
-    start_time = time.time()
+    match_started_at = time.perf_counter() if timing_output is not None else None
     best_kernel, positions = match_template(image_tensor, kernels, kernel_size, angles)
-    # end_time = time.time()
-    # # 计算运行时间
-    # elapsed_time = end_time - start_time
-    # print(f"模版匹配{category}代码运行时间: {elapsed_time:.6f} 秒")
-    # print(positions)
+    _finish_timing_stage(timing_output, "卷积选优", match_started_at, device)
+
+    postprocess_started_at = time.perf_counter() if timing_output is not None else None
     center = (positions['x'] + offset_x, positions['y'] + offset_y)  # 注意：OpenCV 用 (x, y)
 
     # 矩形尺寸由子块和连接处像素计算，不再从旧外接矩形标定结果读取。
@@ -146,11 +170,11 @@ def get_rect(
 
     # 构造 rotated rect
     rect = (center, rect_size, -1*positions['angle'])#这个opencv顺时针转是正的,模版逆时针是正的
-    # box = cv2.boxPoints(rect)
-    # box = np.int32(box)
-
     start_x = center[0] - (best_kernel.shape[1] // 2)
     start_y = center[1] - (best_kernel.shape[0] // 2)
+    _finish_timing_stage(timing_output, "匹配收尾", postprocess_started_at, device)
+
+    debug_started_at = time.perf_counter() if timing_output is not None else None
     if debug_output is not None:
         debug_output.update({
             "best_kernel": best_kernel.copy(),
@@ -170,6 +194,7 @@ def get_rect(
             1,
             offset=(int(crop_x) + int(start_x), int(crop_y) + int(start_y)),
         )
+    _finish_timing_stage(timing_output, "检测调试图", debug_started_at, device)
     # cv2.imshow("match", vis_img)
     # cv2.waitKey(0)
     # cv2.destroyAllWindows()
