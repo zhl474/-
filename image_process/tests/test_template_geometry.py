@@ -274,6 +274,49 @@ def test_low_prior_roi_template_match_uses_local_rgb_color_seed():
     assert result["debug_panel"].size > 0
 
 
+def test_low_prior_roi_template_match_skips_debug_images_when_disabled():
+    category = "T"
+    block_px = 12
+    connector_px = 3
+    template_angle = 18.0
+    high_theta = -template_angle
+    target_center = (165, 116)
+    image = np.full((240, 320, 3), 255, dtype=np.uint8)
+    color_config = load_color_segmentation_config(category)
+    target_bgr = _bgr_from_rgb(*color_config["rgb"])
+
+    kernels, _, _ = create_rotation_kernels(
+        block_px,
+        connector_px,
+        category,
+        device="cpu",
+        angle_values=[template_angle],
+    )
+    shape_mask = (kernels[0, 0].detach().cpu().numpy() > 0.5).astype(np.uint8)
+    mask_h, mask_w = shape_mask.shape
+    x1 = target_center[0] - mask_w // 2
+    y1 = target_center[1] - mask_h // 2
+    image[y1:y1 + mask_h, x1:x1 + mask_w][shape_mask > 0] = target_bgr
+
+    result = detect_block_with_high_prior_roi(
+        image,
+        template_geometry={"block_px": block_px, "connector_px": connector_px},
+        category=category,
+        high_theta_deg=high_theta,
+        angle_window=3,
+        angle_step=1,
+        roi_expand_px=30,
+        min_foreground_area=50,
+        debug_enabled=False,
+    )
+
+    assert result["found"] is True
+    assert abs(result["px"] - target_center[0]) <= 2.0
+    assert abs(result["py"] - target_center[1]) <= 2.0
+    assert result["debug_image"] is None
+    assert result["debug_panel"] is None
+
+
 def test_local_rgb_segment_returns_seed_debug_boxes():
     image = np.full((90, 90, 3), 255, dtype=np.uint8)
     image[25:70, 25:70] = _bgr_from_rgb(0, 0, 0)

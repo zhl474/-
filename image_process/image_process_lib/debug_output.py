@@ -73,6 +73,7 @@ class DebugVideoRecorder:
             except Exception as exc:
                 rospy.logwarn("调试视频初始化失败 %s: %s", video_path, exc)
         self.open_failed = True
+        rospy.logwarn("调试视频无法打开，后续不再写入: %s", self.requested_video_path)
         return False
 
     def write(self, image):

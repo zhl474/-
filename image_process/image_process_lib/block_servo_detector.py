@@ -378,6 +378,7 @@ def detect_block_with_high_prior_roi(
     white_s_max=45,
     white_v_min=180,
     min_foreground_area=200,
+    debug_enabled=True,
 ):
     """低位方块精定位：使用高位类别和角度生成 ROI 后直接模板匹配。
 
@@ -385,7 +386,7 @@ def detect_block_with_high_prior_roi(
     这里用画面中心、高位旋转角和低位模板尺寸估算旋转矩形 ROI；
     ROI 内按局部 RGB 颜色分割后，只在高位角度附近做模板匹配。
     """
-    debug_image = _make_debug_image(img_bgr)
+    debug_image = _make_debug_image(img_bgr) if debug_enabled else None
     if img_bgr is None or img_bgr.size == 0:
         return _empty_detection("输入图像为空", debug_image)
 
@@ -414,36 +415,45 @@ def detect_block_with_high_prior_roi(
         return _empty_detection("低位先验 ROI 越界为空", debug_image)
 
     roi_bgr = img_bgr[crop_y1:crop_y2, crop_x1:crop_x2]
-    roi_debug_image = np.copy(debug_image)
-    _draw_prior_roi_debug(roi_debug_image, roi_box, category=category, theta=high_theta_deg)
+    roi_debug_image = None
+    if debug_enabled:
+        roi_debug_image = np.copy(debug_image)
+        _draw_prior_roi_debug(roi_debug_image, roi_box, category=category, theta=high_theta_deg)
     local_roi_box = roi_box - np.array([crop_x1, crop_y1], dtype=np.float32)
     roi_polygon_mask = np.zeros(roi_bgr.shape[:2], dtype=np.uint8)
     cv2.fillConvexPoly(roi_polygon_mask, np.intp(local_roi_box), 255)
 
-    foreground_mask, mask_stages = _segment_roi_by_local_rgb_color(
-        roi_bgr,
-        category,
-        return_stages=True,
-    )
-    roi_seed_debug = _draw_seed_patch_debug(roi_bgr, mask_stages)
+    if debug_enabled:
+        foreground_mask, mask_stages = _segment_roi_by_local_rgb_color(
+            roi_bgr,
+            category,
+            return_stages=True,
+        )
+        roi_seed_debug = _draw_seed_patch_debug(roi_bgr, mask_stages)
+    else:
+        foreground_mask = _segment_roi_by_local_rgb_color(roi_bgr, category)
+        mask_stages = None
+        roi_seed_debug = None
     foreground_mask = cv2.bitwise_and(foreground_mask, roi_polygon_mask)
     foreground_area = int(cv2.countNonZero(foreground_mask))
     if foreground_area < int(min_foreground_area):
-        _draw_prior_roi_debug(debug_image, roi_box, category=category, theta=high_theta_deg)
-        debug_panel = _make_block_debug_panel(
-            roi_debug_image,
-            roi_seed_debug=roi_seed_debug,
-            raw_mask=mask_stages["raw_mask"],
-            final_mask=foreground_mask,
-            match_mask_debug=_draw_template_match_on_mask(foreground_mask, None),
-            match_debug=debug_image,
-            message=_format_seed_debug_message(
-                category,
-                foreground_area,
-                mask_stages,
-                prefix="前景面积过小",
-            ),
-        )
+        debug_panel = None
+        if debug_enabled:
+            _draw_prior_roi_debug(debug_image, roi_box, category=category, theta=high_theta_deg)
+            debug_panel = _make_block_debug_panel(
+                roi_debug_image,
+                roi_seed_debug=roi_seed_debug,
+                raw_mask=mask_stages["raw_mask"],
+                final_mask=foreground_mask,
+                match_mask_debug=_draw_template_match_on_mask(foreground_mask, None),
+                match_debug=debug_image,
+                message=_format_seed_debug_message(
+                    category,
+                    foreground_area,
+                    mask_stages,
+                    prefix="前景面积过小",
+                ),
+            )
         return _empty_detection(
             f"低位 ROI 前景面积过小: {foreground_area}",
             debug_image,
@@ -452,7 +462,7 @@ def detect_block_with_high_prior_roi(
 
     # get_rect 内部模板角度为逆时针正；返回的 OpenCV 矩形角度是相反数。
     template_angle_center = -high_theta_deg
-    match_debug_output = {}
+    match_debug_output = {} if debug_enabled else None
     rect = get_rect(
         foreground_mask,
         block_px,
@@ -466,7 +476,10 @@ def detect_block_with_high_prior_roi(
         angle_window=angle_window,
         debug_output=match_debug_output,
     )
-    match_mask_debug = _draw_template_match_on_mask(foreground_mask, match_debug_output)
+    match_mask_debug = (
+        _draw_template_match_on_mask(foreground_mask, match_debug_output)
+        if debug_enabled else None
+    )
 
     box = cv2.boxPoints(rect)
     box = np.intp(box)
@@ -481,37 +494,39 @@ def detect_block_with_high_prior_roi(
     if theta < -180:
         theta += 360
 
-    cv2.drawMarker(
-        debug_image,
-        (int(center[0]), int(center[1])),
-        (255, 0, 0),
-        markerType=cv2.MARKER_CROSS,
-        markerSize=24,
-        thickness=2,
-    )
-    cv2.line(
-        debug_image,
-        (int(center[0]), int(center[1])),
-        (int(px), int(py)),
-        (255, 0, 0),
-        1,
-    )
-    _draw_prior_roi_debug(
-        debug_image,
-        roi_box,
-        match_point=(px, py),
-        category=category,
-        theta=theta,
-    )
-    debug_panel = _make_block_debug_panel(
-        roi_debug_image,
-        roi_seed_debug=roi_seed_debug,
-        raw_mask=mask_stages["raw_mask"],
-        final_mask=foreground_mask,
-        match_mask_debug=match_mask_debug,
-        match_debug=debug_image,
-        message=_format_seed_debug_message(category, foreground_area, mask_stages),
-    )
+    debug_panel = None
+    if debug_enabled:
+        cv2.drawMarker(
+            debug_image,
+            (int(center[0]), int(center[1])),
+            (255, 0, 0),
+            markerType=cv2.MARKER_CROSS,
+            markerSize=24,
+            thickness=2,
+        )
+        cv2.line(
+            debug_image,
+            (int(center[0]), int(center[1])),
+            (int(px), int(py)),
+            (255, 0, 0),
+            1,
+        )
+        _draw_prior_roi_debug(
+            debug_image,
+            roi_box,
+            match_point=(px, py),
+            category=category,
+            theta=theta,
+        )
+        debug_panel = _make_block_debug_panel(
+            roi_debug_image,
+            roi_seed_debug=roi_seed_debug,
+            raw_mask=mask_stages["raw_mask"],
+            final_mask=foreground_mask,
+            match_mask_debug=match_mask_debug,
+            match_debug=debug_image,
+            message=_format_seed_debug_message(category, foreground_area, mask_stages),
+        )
 
     return {
         "found": True,

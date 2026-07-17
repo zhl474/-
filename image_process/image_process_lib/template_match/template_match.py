@@ -129,7 +129,6 @@ def get_rect(
         search_radius=search_radius,
         kernel_size=kernel_size,
     )
-    vis_img = cv2.cvtColor(cropped_image, cv2.COLOR_GRAY2BGR)
     image_tensor = load_img(cropped_image, device=device)
     # show_all_kernels_grid(kernels)
     # 3. 执行匹配
@@ -161,8 +160,16 @@ def get_rect(
             "angle": float(positions["angle"]),
             "score": float(positions["score"]),
         })
-    contours, _ = cv2.findContours(best_kernel, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(img_bgr2, contours, -1, (0, 255, 0), 1, offset=(int(crop_x)+int(start_x), int(crop_y)+int(start_y)))
+    if img_bgr2 is not None:
+        contours, _ = cv2.findContours(best_kernel, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(
+            img_bgr2,
+            contours,
+            -1,
+            (0, 255, 0),
+            1,
+            offset=(int(crop_x) + int(start_x), int(crop_y) + int(start_y)),
+        )
     # cv2.imshow("match", vis_img)
     # cv2.waitKey(0)
     # cv2.destroyAllWindows()

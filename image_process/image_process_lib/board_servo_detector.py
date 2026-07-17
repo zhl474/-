@@ -1,7 +1,5 @@
 """低位托盘中心 ROI 圆点与半格目标识别。"""
 
-import os
-
 import cv2
 import numpy as np
 
@@ -10,7 +8,6 @@ from image_process_lib.board_debug import draw_low_board_roi_debug, make_low_boa
 
 BOARD_ROW_COUNT = 14
 BOARD_COL_COUNT = 10
-DEFAULT_DEBUG_PATH = os.path.expanduser("~/.ros/single_arm_tetris/托盘低位检测.jpg")
 LOW_BOARD_ROI_HALF_SIZE = 120
 LOW_BOARD_BLACKHAT_KERNEL_SIZE = 15
 LOW_BOARD_MIN_DOT_AREA = 20
@@ -25,26 +22,6 @@ LOW_BOARD_TARGET_MODE_LABELS = {
     "vertical_mid": "上下中点",
     "cell_center": "四点中心",
 }
-
-
-def _save_debug_image(image_path, image):
-    """保存调试图像，兼容中文路径。"""
-    if not image_path or image is None:
-        return False
-    try:
-        image_dir = os.path.dirname(image_path)
-        if image_dir:
-            os.makedirs(image_dir, exist_ok=True)
-        dot_index = image_path.rfind(".")
-        image_ext = image_path[dot_index:] if dot_index >= 0 else ".jpg"
-        ok, encoded_image = cv2.imencode(image_ext, image)
-        if not ok:
-            return False
-        encoded_image.tofile(image_path)
-        return True
-    except Exception:
-        return False
-
 
 def _make_odd_kernel_size(kernel_size):
     """把形态学核尺寸规整成大于等于 3 的奇数。"""
@@ -350,9 +327,9 @@ def detect_nearest_board_dot_in_roi(
     max_area=LOW_BOARD_MAX_DOT_AREA,
     min_circularity=LOW_BOARD_MIN_DOT_CIRCULARITY,
     max_aspect_ratio=LOW_BOARD_MAX_DOT_ASPECT_RATIO,
-    debug_path=None,
     row=None,
     col=None,
+    debug_enabled=True,
 ):
     """低位托盘视觉伺服：在中心 ROI 内按 row/col 选择单点或虚拟中点。"""
     if img is None:
@@ -369,14 +346,16 @@ def detect_nearest_board_dot_in_roi(
     roi_bounds = _clip_roi_bounds(img.shape, center_point, roi_half_size)
     x1, y1, x2, y2 = roi_bounds
     if x2 <= x1 or y2 <= y1:
-        debug_image = img.copy()
-        _put_chinese_text(debug_image, "低位ROI为空，无法检测托盘圆点", (20, 30), (0, 0, 255))
-        _save_debug_image(debug_path, debug_image)
+        debug_image = None
+        if debug_enabled:
+            debug_image = img.copy()
+            _put_chinese_text(debug_image, "低位ROI为空，无法检测托盘圆点", (20, 30), (0, 0, 255))
         return {
             "found": False,
             "point": None,
             "candidates": [],
             "debug_image": debug_image,
+            "debug_panel": None,
             "message": "低位 ROI 为空，无法检测托盘圆点",
             "count": 0,
         }
@@ -406,38 +385,40 @@ def detect_nearest_board_dot_in_roi(
     target_selection = _select_low_board_target(candidates, center_point, target_info)
     selected_candidate = target_selection["selected_candidate"]
     selected_candidates = target_selection["selected_candidates"]
-    debug_image = draw_low_board_roi_debug(
-        img,
-        roi_bounds,
-        center_point,
-        candidates,
-        selected_candidate=selected_candidate,
-        selected_candidates=selected_candidates,
-        row=row,
-        col=col,
-        target_mode_label=target_info["label"],
-    )
-    row_col_text = f"目标行列=({float(row):.2f},{float(col):.2f})" if row is not None and col is not None else ""
-    if selected_candidate is None:
-        selected_text = "未选中目标"
-    elif target_info["mode"] == "dot":
-        selected_text = f"选中圆点 面积={selected_candidate['area']:.1f} 圆度={selected_candidate['circularity']:.2f}"
-    else:
-        selected_text = f"选中{target_info['label']} 邻点数={len(selected_candidates)}"
-    debug_panel = make_low_board_debug_panel(
-        img,
-        roi_bounds,
-        roi,
-        gray,
-        blackhat,
-        threshold_img,
-        candidates,
-        selected_candidate,
-        debug_image,
-        message=f"候选数量={len(candidates)} {selected_text} {row_col_text} 模式={target_info['label']}",
-        selected_candidates=selected_candidates,
-    )
-    _save_debug_image(debug_path, debug_image)
+    debug_image = None
+    debug_panel = None
+    if debug_enabled:
+        debug_image = draw_low_board_roi_debug(
+            img,
+            roi_bounds,
+            center_point,
+            candidates,
+            selected_candidate=selected_candidate,
+            selected_candidates=selected_candidates,
+            row=row,
+            col=col,
+            target_mode_label=target_info["label"],
+        )
+        row_col_text = f"目标行列=({float(row):.2f},{float(col):.2f})" if row is not None and col is not None else ""
+        if selected_candidate is None:
+            selected_text = "未选中目标"
+        elif target_info["mode"] == "dot":
+            selected_text = f"选中圆点 面积={selected_candidate['area']:.1f} 圆度={selected_candidate['circularity']:.2f}"
+        else:
+            selected_text = f"选中{target_info['label']} 邻点数={len(selected_candidates)}"
+        debug_panel = make_low_board_debug_panel(
+            img,
+            roi_bounds,
+            roi,
+            gray,
+            blackhat,
+            threshold_img,
+            candidates,
+            selected_candidate,
+            debug_image,
+            message=f"候选数量={len(candidates)} {selected_text} {row_col_text} 模式={target_info['label']}",
+            selected_candidates=selected_candidates,
+        )
 
     if not target_selection["found"]:
         return {

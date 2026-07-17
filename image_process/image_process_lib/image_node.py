@@ -140,43 +140,45 @@ class ImageProcessor:
             "~top_surface_mask_vis_path",
             os.path.join(DEFAULT_DEBUG_DIR, "方块上表面掩码.jpg")
         )
-        self.visual_servo_debug_path = rospy.get_param(
-            "~visual_servo_debug_path",
-            os.path.join(DEFAULT_DEBUG_DIR, "方块视觉伺服当前检测.jpg")
-        )
         # 高位全场识别的模板匹配轮廓图，用于核对边框是否贴合方块。
         self.high_template_match_debug_path = rospy.get_param(
             "~high_template_match_debug_path",
             os.path.join(DEFAULT_DEBUG_DIR, "高位方块模板匹配结果.jpg")
         )
-        default_visual_servo_debug_video_path = os.path.splitext(self.visual_servo_debug_path)[0] + ".avi"
-        self.visual_servo_debug_video_path = rospy.get_param(
-            "~visual_servo_debug_video_path",
-            default_visual_servo_debug_video_path,
-        )
-        self.visual_servo_debug_video_fps = rospy.get_param("~visual_servo_debug_video_fps", 10.0)
-        self.visual_servo_debug_video_enabled = rospy.get_param("~visual_servo_debug_video_enabled", True)
-        self.visual_servo_debug_recorder = DebugVideoRecorder(
-            self.visual_servo_debug_video_path,
-            fps=self.visual_servo_debug_video_fps,
-            enabled=self.visual_servo_debug_video_enabled,
-        )
-        self.visual_board_debug_path = rospy.get_param(
-            "~visual_board_debug_path",
-            os.path.join(DEFAULT_DEBUG_DIR, "托盘视觉伺服当前检测.jpg")
-        )
-        default_visual_board_debug_video_path = os.path.splitext(self.visual_board_debug_path)[0] + ".avi"
-        self.visual_board_debug_video_path = rospy.get_param(
-            "~visual_board_debug_video_path",
-            default_visual_board_debug_video_path,
-        )
-        self.visual_board_debug_video_fps = rospy.get_param("~visual_board_debug_video_fps", 10.0)
-        self.visual_board_debug_video_enabled = rospy.get_param("~visual_board_debug_video_enabled", True)
-        self.visual_board_debug_recorder = DebugVideoRecorder(
-            self.visual_board_debug_video_path,
-            fps=self.visual_board_debug_video_fps,
-            enabled=self.visual_board_debug_video_enabled,
-        )
+        visual_servo_debug_config = perception_config.get("visual_servo_debug", {})
+        if not isinstance(visual_servo_debug_config, dict):
+            raise ValueError("perception.yaml 的 visual_servo_debug 必须是字典")
+        debug_enabled = visual_servo_debug_config.get("enabled", False)
+        debug_output_dir = visual_servo_debug_config.get("output_dir", DEFAULT_DEBUG_DIR)
+        if not isinstance(debug_enabled, bool):
+            raise ValueError("visual_servo_debug.enabled 必须是布尔值")
+        if not isinstance(debug_output_dir, str):
+            raise ValueError("visual_servo_debug.output_dir 必须是字符串")
+        self.visual_servo_debug_enabled = debug_enabled
+        self.visual_servo_debug_output_dir = debug_output_dir.strip()
+        try:
+            self.visual_servo_debug_video_fps = float(visual_servo_debug_config.get("video_fps", 10.0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("visual_servo_debug.video_fps 必须是数值") from exc
+        if not self.visual_servo_debug_output_dir:
+            raise ValueError("visual_servo_debug.output_dir 不能为空")
+        if not np.isfinite(self.visual_servo_debug_video_fps) or self.visual_servo_debug_video_fps <= 0.0:
+            raise ValueError("visual_servo_debug.video_fps 必须是大于 0 的有限数值")
+
+        # 关闭低位调试时不创建录像器，避免任何图像构建、编码或文件写入。
+        self.visual_servo_debug_recorder = None
+        self.visual_board_debug_recorder = None
+        if self.visual_servo_debug_enabled:
+            self.visual_servo_debug_recorder = DebugVideoRecorder(
+                os.path.join(self.visual_servo_debug_output_dir, "方块视觉伺服调试.avi"),
+                fps=self.visual_servo_debug_video_fps,
+                enabled=True,
+            )
+            self.visual_board_debug_recorder = DebugVideoRecorder(
+                os.path.join(self.visual_servo_debug_output_dir, "托盘视觉伺服调试.avi"),
+                fps=self.visual_servo_debug_video_fps,
+                enabled=True,
+            )
         self.visual_board_grid_debug_path = rospy.get_param(
             "~visual_board_grid_debug_path",
             os.path.join(DEFAULT_DEBUG_DIR, "托盘格点粗定位.jpg")
@@ -259,24 +261,22 @@ class ImageProcessor:
 
     def close_debug_video_recorders(self):
         """节点退出时释放视频文件句柄，避免最后几帧没有写入文件。"""
-        if hasattr(self, "visual_servo_debug_recorder"):
+        if self.visual_servo_debug_recorder is not None:
             self.visual_servo_debug_recorder.release()
-        if hasattr(self, "visual_board_debug_recorder"):
+        if self.visual_board_debug_recorder is not None:
             self.visual_board_debug_recorder.release()
 
-    def save_visual_servo_debug_frame(self, debug_image, video_image=None):
-        """保存当前调试图，同时把关键调试拼图追加到视觉伺服视频。"""
-        image_saved = save_image_to_path(self.visual_servo_debug_path, debug_image)
-        video_frame = video_image if video_image is not None else debug_image
-        video_saved = self.visual_servo_debug_recorder.write(video_frame)
-        return image_saved and (video_saved or not self.visual_servo_debug_video_enabled)
+    def record_visual_servo_debug_frame(self, debug_panel):
+        """仅在低位调试开启时追加方块视觉伺服调试视频帧。"""
+        if not self.visual_servo_debug_enabled or self.visual_servo_debug_recorder is None:
+            return False
+        return self.visual_servo_debug_recorder.write(debug_panel)
 
-    def save_visual_board_debug_frame(self, debug_image, video_image=None):
-        """保存托盘当前调试图，同时把关键调试拼图追加到托盘伺服视频。"""
-        image_saved = save_image_to_path(self.visual_board_debug_path, debug_image)
-        video_frame = video_image if video_image is not None else debug_image
-        video_saved = self.visual_board_debug_recorder.write(video_frame)
-        return image_saved and (video_saved or not self.visual_board_debug_video_enabled)
+    def record_visual_board_debug_frame(self, debug_panel):
+        """仅在低位调试开启时追加托盘视觉伺服调试视频帧。"""
+        if not self.visual_servo_debug_enabled or self.visual_board_debug_recorder is None:
+            return False
+        return self.visual_board_debug_recorder.write(debug_panel)
 
     def log_visual_servo_detection_timing(
         self,
@@ -568,16 +568,17 @@ class ImageProcessor:
                 max_area=self.board_low_max_dot_area,
                 min_circularity=self.board_low_min_dot_circularity,
                 max_aspect_ratio=self.board_low_max_dot_aspect_ratio,
-                debug_path=self.visual_board_debug_path,
                 row=row,
                 col=col,
+                debug_enabled=self.visual_servo_debug_enabled,
             )
             detection_finished_at = time.perf_counter()
             debug_image = detect_result.get("debug_image")
             debug_panel = detect_result.get("debug_panel")
             if not detect_result["found"]:
                 debug_started_at = time.perf_counter()
-                self.save_visual_board_debug_frame(debug_image, debug_panel)
+                if self.visual_servo_debug_enabled:
+                    self.record_visual_board_debug_frame(debug_panel)
                 debug_finished_at = time.perf_counter()
                 self.log_visual_servo_detection_timing(
                     "托盘",
@@ -598,7 +599,8 @@ class ImageProcessor:
             dx_px = float(target_point[0] - center_x)
             dy_px = float(target_point[1] - center_y)
             debug_started_at = time.perf_counter()
-            self.save_visual_board_debug_frame(debug_image, debug_panel)
+            if self.visual_servo_debug_enabled:
+                self.record_visual_board_debug_frame(debug_panel)
             debug_finished_at = time.perf_counter()
             self.log_visual_servo_detection_timing(
                 "托盘",
@@ -679,23 +681,26 @@ class ImageProcessor:
                 white_s_max=self.block_low_white_s_max,
                 white_v_min=self.block_low_white_v_min,
                 min_foreground_area=self.block_low_min_foreground_area,
+                debug_enabled=self.visual_servo_debug_enabled,
             )
             detection_finished_at = time.perf_counter()
             debug_image = target_block.get("debug_image")
-            if debug_image is None:
+            if self.visual_servo_debug_enabled and debug_image is None:
                 debug_image = image.copy()
             debug_panel = target_block.get("debug_panel")
-            cv2.drawMarker(
-                debug_image,
-                (int(center_x), int(center_y)),
-                (255, 0, 0),
-                markerType=cv2.MARKER_CROSS,
-                markerSize=24,
-                thickness=2,
-            )
+            if self.visual_servo_debug_enabled:
+                cv2.drawMarker(
+                    debug_image,
+                    (int(center_x), int(center_y)),
+                    (255, 0, 0),
+                    markerType=cv2.MARKER_CROSS,
+                    markerSize=24,
+                    thickness=2,
+                )
             if not target_block["found"]:
                 debug_started_at = time.perf_counter()
-                self.save_visual_servo_debug_frame(debug_image, debug_panel)
+                if self.visual_servo_debug_enabled:
+                    self.record_visual_servo_debug_frame(debug_panel)
                 debug_finished_at = time.perf_counter()
                 self.log_visual_servo_detection_timing(
                     "方块",
@@ -715,15 +720,17 @@ class ImageProcessor:
 
             px = float(target_block["px"])
             py = float(target_block["py"])
-            cv2.line(
-                debug_image,
-                (int(center_x), int(center_y)),
-                (int(px), int(py)),
-                (255, 0, 0),
-                1,
-            )
+            if self.visual_servo_debug_enabled:
+                cv2.line(
+                    debug_image,
+                    (int(center_x), int(center_y)),
+                    (int(px), int(py)),
+                    (255, 0, 0),
+                    1,
+                )
             debug_started_at = time.perf_counter()
-            self.save_visual_servo_debug_frame(debug_image, debug_panel)
+            if self.visual_servo_debug_enabled:
+                self.record_visual_servo_debug_frame(debug_panel)
             debug_finished_at = time.perf_counter()
             self.log_visual_servo_detection_timing(
                 "方块",

@@ -36,6 +36,22 @@ def test_low_board_roi_detects_single_dot():
     assert result["count"] == 1
 
 
+def test_low_board_roi_skips_debug_images_when_disabled():
+    image = _make_board_image()
+    _draw_dot(image, (165, 122))
+
+    result = detect_nearest_board_dot_in_roi(
+        image,
+        center_point=(160, 120),
+        roi_half_size=60,
+        debug_enabled=False,
+    )
+
+    assert result["found"] is True
+    assert result["debug_image"] is None
+    assert result["debug_panel"] is None
+
+
 def test_low_board_roi_chooses_candidate_nearest_to_center():
     image = _make_board_image()
     _draw_dot(image, (150, 120))
