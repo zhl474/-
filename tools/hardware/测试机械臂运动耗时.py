@@ -9,7 +9,7 @@ from akai_fr import AkaiFr
 # ========================= 直接修改的运行参数 =========================
 MOVE_SPEED = 100
 # 相对当前位置的工具坐标系 XYZ 偏移量，单位：毫米。
-XYZ_OFFSET = [0.9, 1.4, 0.0]
+XYZ_OFFSET = [0.4, 0.0, 0.0]
 
 
 def main():

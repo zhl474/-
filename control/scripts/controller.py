@@ -2,11 +2,11 @@
 """机械臂、末端舵机与电子吸盘控制节点。"""
 
 import math
+import time
 
 import rospy
 import serial
 from serial.tools import list_ports
-import time
 
 from akai_fr import AkaiElectricSucker, AkaiFr
 from control.srv import (
@@ -22,6 +22,14 @@ from control.srv import (
 class ControlNode:
     def __init__(self):
         self.minimum_z = float(rospy.get_param("~minimum_z", 165.0))
+        stability = rospy.get_param("~arm_stability", {})
+        self.stable_timeout = float(stability.get("timeout_seconds", 5.0))
+        self.stable_poll_interval = float(stability.get("poll_interval_seconds", 0.005))
+        self.stable_duration = float(stability.get("duration_seconds", 0.01))
+        self.linear_speed_threshold = float(stability.get("linear_speed_threshold_mm_s", 3.0))
+        self.angular_speed_threshold = float(stability.get("angular_speed_threshold_deg_s", 3.0))
+        self.position_tolerance = float(stability.get("position_tolerance_mm", 1.0))
+        self.orientation_tolerance = float(stability.get("orientation_tolerance_deg", 0.5))
         self.arm = AkaiFr()
         self.arm.set_speed(80)
         self.arm.set_tcf(1, [0, 0, 0, 0, 0, 0])
@@ -50,6 +58,81 @@ class ControlNode:
     def _finite(values):
         return all(math.isfinite(float(value)) for value in values)
 
+    @staticmethod
+    def _angle_error(actual, target):
+        return abs((float(actual) - float(target) + 180.0) % 360.0 - 180.0)
+
+    @staticmethod
+    def _rpc_value(name, result, value_length=None):
+        if not isinstance(result, (tuple, list)) or len(result) < 2:
+            raise RuntimeError(f"{name} 返回格式异常: {result!r}")
+        if result[0] != 0:
+            raise RuntimeError(f"{name} 查询失败，错误码: {result[0]}")
+        value = result[1]
+        if value_length is not None:
+            if not isinstance(value, (tuple, list)) or len(value) != value_length:
+                raise RuntimeError(f"{name} 数据格式异常: {value!r}")
+            return [float(item) for item in value]
+        return value
+
+    def _wait_until_arm_stable(self, target_pose):
+        """等待机械臂到达目标位姿，并保持低速达到设定时长。"""
+        deadline = time.monotonic() + self.stable_timeout
+        stable_since = None
+
+        while not rospy.is_shutdown():
+            motion_done = bool(
+                self._rpc_value(
+                    "GetRobotMotionDone",
+                    self.arm.arm.GetRobotMotionDone(),
+                )
+            )
+            tcp_speed = self._rpc_value(
+                "GetActualTCPCompositeSpeed",
+                self.arm.arm.GetActualTCPCompositeSpeed(),
+                value_length=2,
+            )
+            actual_pose = self._rpc_value(
+                "GetActualTCPPose",
+                self.arm.arm.GetActualTCPPose(),
+                value_length=6,
+            )
+
+            position_error = math.dist(actual_pose[:3], target_pose[:3])
+            orientation_error = max(
+                self._angle_error(actual_pose[index], target_pose[index])
+                for index in range(3, 6)
+            )
+            is_stable = (
+                motion_done
+                and abs(tcp_speed[0]) <= self.linear_speed_threshold
+                and abs(tcp_speed[1]) <= self.angular_speed_threshold
+                and position_error <= self.position_tolerance
+                and orientation_error <= self.orientation_tolerance
+            )
+
+            now = time.monotonic()
+            if is_stable:
+                if stable_since is None:
+                    stable_since = now
+                if now - stable_since >= self.stable_duration:
+                    return
+            else:
+                stable_since = None
+
+            if now >= deadline:
+                raise TimeoutError(
+                    "等待机械臂停稳超时: "
+                    f"motion_done={motion_done}, "
+                    f"线速度={tcp_speed[0]:.3f} mm/s, "
+                    f"姿态速度={tcp_speed[1]:.3f} °/s, "
+                    f"位置误差={position_error:.3f} mm, "
+                    f"姿态误差={orientation_error:.3f}°"
+                )
+            time.sleep(self.stable_poll_interval)
+
+        raise RuntimeError("ROS 正在关闭，停止等待机械臂停稳")
+
     def move_arm(self, request):
         pose = [float(value) for value in request.pose]
         z_was_clamped = False
@@ -71,9 +154,11 @@ class ControlNode:
         try:
             self.arm.set_speed(int(request.speed))
             result = self.arm.arm.MoveL(pose, tool=0, user=0, vel=int(request.speed))
-            time.sleep(1) 
-            if result is False:
-                return MoveArmResponse(success=False, message="机械臂 MoveL 返回失败")
+            if (isinstance(result, bool) and not result) or (
+                not isinstance(result, bool) and result != 0
+            ):
+                return MoveArmResponse(success=False, message=f"机械臂 MoveL 返回失败: {result!r}")
+            self._wait_until_arm_stable(pose)
             if z_was_clamped:
                 return MoveArmResponse(
                     success=True,
