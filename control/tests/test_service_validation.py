@@ -50,7 +50,9 @@ def test_low_pose_is_clamped_and_still_calls_robot(monkeypatch):
         ),
     )
     node._wait_until_arm_stable = lambda pose: calls.append(("wait_stable", pose))
-    request = types.SimpleNamespace(pose=[0, 0, 100, 0, 0, 0], speed=40)
+    request = types.SimpleNamespace(
+        pose=[0, 0, 100, 0, 0, 0], speed=40, wait_until_stable=True
+    )
 
     response = node.move_arm(request)
 
@@ -72,7 +74,9 @@ def test_non_finite_pose_never_calls_robot(monkeypatch):
         set_speed=lambda _speed: calls.append("set_speed"),
         arm=types.SimpleNamespace(MoveL=lambda *_args, **_kwargs: calls.append("MoveL")),
     )
-    request = types.SimpleNamespace(pose=[0, 0, float("nan"), 0, 0, 0], speed=40)
+    request = types.SimpleNamespace(
+        pose=[0, 0, float("nan"), 0, 0, 0], speed=40, wait_until_stable=False
+    )
 
     response = node.move_arm(request)
 
@@ -129,9 +133,31 @@ def test_move_arm_rejects_nonzero_movel_error(monkeypatch):
     node._wait_until_arm_stable = lambda _pose: (_ for _ in ()).throw(
         AssertionError("MoveL 失败后不应等待停稳")
     )
-    request = types.SimpleNamespace(pose=[0, 0, 200, 0, 0, 0], speed=40)
+    request = types.SimpleNamespace(
+        pose=[0, 0, 200, 0, 0, 0], speed=40, wait_until_stable=False
+    )
 
     response = node.move_arm(request)
 
     assert response.success is False
     assert "14" in response.message
+
+
+def test_move_arm_skips_stability_wait_when_not_requested(monkeypatch):
+    module = _load_controller(monkeypatch)
+    calls = []
+    node = object.__new__(module.ControlNode)
+    node.minimum_z = 165.0
+    node.arm = types.SimpleNamespace(
+        set_speed=lambda _speed: calls.append("set_speed"),
+        arm=types.SimpleNamespace(MoveL=lambda _pose, **_kwargs: calls.append("MoveL") or 0),
+    )
+    node._wait_until_arm_stable = lambda _pose: calls.append("wait_stable")
+    request = types.SimpleNamespace(
+        pose=[0, 0, 200, 0, 0, 0], speed=40, wait_until_stable=False
+    )
+
+    response = node.move_arm(request)
+
+    assert response.success is True
+    assert calls == ["set_speed", "MoveL"]

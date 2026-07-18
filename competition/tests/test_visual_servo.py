@@ -87,3 +87,23 @@ def test_alignment_log_uses_the_specified_target_label(capsys):
     )
 
     assert "[方块视觉伺服] 第 1 轮误差=" in capsys.readouterr().out
+
+
+def test_alignment_motion_requests_stability_wait():
+    move_calls = []
+    run_offset_visual_servo_alignment(
+        lambda: _response(dx=3, dy=1),
+        lambda *args, **kwargs: move_calls.append((args, kwargs)),
+        [0, 0, 200, 0, 0, 0],
+        {"pixel_to_robot_matrix": [[1, 0], [0, 1]]},
+        speed=25,
+        error_threshold_px=2,
+        max_step_mm=5,
+        max_iter=1,
+        success_stable_frames=1,
+        max_missed_frames=2,
+        settle_sec=0,
+    )
+
+    assert len(move_calls) == 1
+    assert move_calls[0][1]["wait_until_stable"] is True

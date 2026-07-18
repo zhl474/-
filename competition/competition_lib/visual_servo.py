@@ -134,7 +134,7 @@ def run_offset_visual_servo_alignment(
             f"修正=({delta_xy[0]:.3f},{delta_xy[1]:.3f})mm"
         )
         control_started_at = time.perf_counter()
-        move_pose_func(pose, speed=speed, wait_sec=0.0)
+        move_pose_func(pose, speed=speed, wait_sec=0.0, wait_until_stable=True)
         arm_arrived_at = time.perf_counter()
         if settle_sec > 0:
             time.sleep(settle_sec)

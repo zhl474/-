@@ -45,8 +45,8 @@ class _FakeClients:
             pick_surface_z_valid=True,
         )
 
-    def move_arm(self, pose, speed, wait_sec=0.0):
-        self.moves.append((list(pose), speed, wait_sec))
+    def move_arm(self, pose, speed, wait_sec=0.0, wait_until_stable=False):
+        self.moves.append((list(pose), speed, wait_sec, wait_until_stable))
 
     def rotate_tool(self, _angle):
         return None
@@ -87,6 +87,23 @@ def test_pick_uses_depth_surface_height_and_configured_offset(monkeypatch):
     runner._pick(clients.get_task_target(0))
 
     assert clients.moves[2][0][2] == 177.5
+
+
+def test_only_observation_poses_request_stability_wait(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=load_execution_config(),
+        visual_config=load_visual_servo_config(),
+    )
+    runner._align = lambda *_args, **_kwargs: (True, [0, 0, 200, -180, 0, 90], None, "成功")
+    target = clients.get_task_target(0)
+
+    runner._pick(target)
+    runner._place(target)
+
+    assert [move[3] for move in clients.moves] == [True, False, False, False, True, False, False, False]
 
 
 def test_pick_rejects_missing_depth_height_before_moving(monkeypatch):

@@ -101,7 +101,7 @@ class TaskRunner:
         _, place_angle, motor_wait = self.angle_planner.plan(target.rotation_delta_deg)
         rough_pose = list(target.pick_observation_pose)
         self._set_state(TaskState.PICK_COARSE)
-        self.clients.move_arm(rough_pose, self.config.arm_speed)
+        self.clients.move_arm(rough_pose, self.config.arm_speed, wait_until_stable=True)
         if motor_wait > 0:
             time.sleep(motor_wait)
 
@@ -130,7 +130,7 @@ class TaskRunner:
     def _place(self, target):
         rough_pose = list(target.place_observation_pose)
         self._set_state(TaskState.PLACE_COARSE)
-        self.clients.move_arm(rough_pose, self.config.arm_speed)
+        self.clients.move_arm(rough_pose, self.config.arm_speed, wait_until_stable=True)
 
         self._set_state(TaskState.PLACE_ALIGN)
         success, camera_pose, _, message = self._align(

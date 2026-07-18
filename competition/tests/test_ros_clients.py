@@ -48,3 +48,15 @@ def test_prepare_task_preserves_recoverable_failure_response(monkeypatch):
     response = client.prepare_task(advanced=False, place_order=[])
 
     assert response is failure
+
+
+def test_move_arm_forwards_stability_wait_flag(monkeypatch):
+    module = _load_ros_clients(monkeypatch)
+    client = object.__new__(module.RobotClients)
+    requests = []
+    client._move_arm = lambda request: requests.append(request) or types.SimpleNamespace(success=True)
+
+    client.move_arm([1, 2, 3, 4, 5, 6], 40)
+    client.move_arm([1, 2, 3, 4, 5, 6], 40, wait_until_stable=True)
+
+    assert [request.wait_until_stable for request in requests] == [False, True]

@@ -73,8 +73,12 @@ class RobotClients:
         request = DetectBoardOffsetRequest(row=float(row), col=float(col))
         return self._board_offset(request)
 
-    def move_arm(self, pose, speed, wait_sec=0.0):
-        request = MoveArmRequest(pose=[float(value) for value in pose], speed=int(speed))
+    def move_arm(self, pose, speed, wait_sec=0.0, wait_until_stable=False):
+        request = MoveArmRequest(
+            pose=[float(value) for value in pose],
+            speed=int(speed),
+            wait_until_stable=bool(wait_until_stable),
+        )
         response = self._require_success(self._move_arm(request), "机械臂运动")
         if wait_sec > 0:
             time.sleep(wait_sec)

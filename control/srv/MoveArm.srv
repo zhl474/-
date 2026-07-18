@@ -1,5 +1,6 @@
 float64[6] pose
 int32 speed
+bool wait_until_stable
 ---
 bool success
 string message

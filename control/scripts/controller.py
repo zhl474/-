@@ -158,7 +158,8 @@ class ControlNode:
                 not isinstance(result, bool) and result != 0
             ):
                 return MoveArmResponse(success=False, message=f"机械臂 MoveL 返回失败: {result!r}")
-            self._wait_until_arm_stable(pose)
+            if request.wait_until_stable:
+                self._wait_until_arm_stable(pose)
             if z_was_clamped:
                 return MoveArmResponse(
                     success=True,
