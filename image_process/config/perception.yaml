@@ -38,7 +38,7 @@ board_servo:
 visual_servo_debug:
   # false 时不构建、不编码也不输出低位方块和托盘视觉伺服调试图像。
   # true 时仅录制两路低位视觉伺服调试视频，不保存单帧 JPG。
-  enabled: false
+  enabled: true
   # 调试视频输出目录；目录不可写时仅记录警告，不影响视觉伺服。
   output_dir: /home/zhl/桌面
   # 方块和托盘调试视频使用相同帧率。

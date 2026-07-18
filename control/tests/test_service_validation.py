@@ -36,21 +36,22 @@ def _load_controller(monkeypatch):
     return module
 
 
-def test_invalid_low_pose_never_calls_robot(monkeypatch):
+def test_low_pose_is_clamped_and_still_calls_robot(monkeypatch):
     module = _load_controller(monkeypatch)
     calls = []
     node = object.__new__(module.ControlNode)
     node.minimum_z = 165.0
     node.arm = types.SimpleNamespace(
         set_speed=lambda _speed: calls.append("set_speed"),
-        arm=types.SimpleNamespace(MoveL=lambda *_args, **_kwargs: calls.append("MoveL")),
+        arm=types.SimpleNamespace(MoveL=lambda pose, **_kwargs: calls.append(("MoveL", pose))),
     )
     request = types.SimpleNamespace(pose=[0, 0, 100, 0, 0, 0], speed=40)
 
     response = node.move_arm(request)
 
-    assert response.success is False
-    assert calls == []
+    assert response.success is True
+    assert calls == ["set_speed", ("MoveL", [0.0, 0.0, 165.0, 0.0, 0.0, 0.0])]
+    assert "已自动调整为 165.00 mm" in response.message
 
 
 def test_non_finite_pose_never_calls_robot(monkeypatch):

@@ -377,8 +377,9 @@ def _segment_roi_by_local_rgb_color(roi_bgr, category, return_stages=False):
     )
     raw_foreground = (d2_map < local_dist_thresh ** 2).astype(np.uint8) * 255
     kernel = np.ones((3, 3), np.uint8)
-    morph_foreground = cv2.morphologyEx(raw_foreground, cv2.MORPH_OPEN, kernel)
-    morph_foreground = cv2.morphologyEx(morph_foreground, cv2.MORPH_CLOSE, kernel)
+    morph_foreground = raw_foreground
+    # morph_foreground = cv2.morphologyEx(raw_foreground, cv2.MORPH_OPEN, kernel)这个b开闭运算在帮倒忙，把正确的边缘干歪了
+    # morph_foreground = cv2.morphologyEx(morph_foreground, cv2.MORPH_CLOSE, kernel)
     foreground = morph_foreground
 
     seed_center_x = best_patch["x"] + seed_patch_size / 2.0

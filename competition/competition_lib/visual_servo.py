@@ -93,6 +93,11 @@ def run_offset_visual_servo_alignment(
         error = max(abs(response.dx_px), abs(response.dy_px))
         if error <= error_threshold_px:
             stable_count += 1
+            print(
+                f"[{log_label}] 第 {iteration + 1} 轮误差=({response.dx_px:.2f},{response.dy_px:.2f})px，"
+                f"满足阈值 {error_threshold_px:.2f}px，"
+                f"稳定帧 {stable_count}/{success_stable_frames}"
+            )
             if stable_count >= success_stable_frames:
                 if timing_debug:
                     print(

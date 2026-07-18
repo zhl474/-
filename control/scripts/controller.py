@@ -51,20 +51,35 @@ class ControlNode:
 
     def move_arm(self, request):
         pose = [float(value) for value in request.pose]
+        z_was_clamped = False
         if len(pose) != 6 or not self._finite(pose):
             return MoveArmResponse(success=False, message="机械臂位姿必须包含 6 个有限数值")
         if request.speed <= 0:
             return MoveArmResponse(success=False, message="机械臂速度必须大于 0")
         if pose[2] < self.minimum_z:
-            return MoveArmResponse(
-                success=False,
-                message=f"目标 Z={pose[2]:.2f} mm 低于安全下限 {self.minimum_z:.2f} mm，已拒绝运动",
+            requested_z = pose[2]
+            pose[2] = self.minimum_z
+            z_was_clamped = True
+            # 使用错误级别日志，让终端以红色突出显示安全钳制警告。
+            rospy.logerr(
+                "安全警告：目标 Z=%.2f mm 低于安全下限 %.2f mm，已自动调整为 %.2f mm 后继续运动",
+                requested_z,
+                self.minimum_z,
+                pose[2],
             )
         try:
             self.arm.set_speed(int(request.speed))
             result = self.arm.arm.MoveL(pose, tool=0, user=0, vel=int(request.speed))
             if result is False:
                 return MoveArmResponse(success=False, message="机械臂 MoveL 返回失败")
+            if z_was_clamped:
+                return MoveArmResponse(
+                    success=True,
+                    message=(
+                        f"目标 Z={requested_z:.2f} mm 低于安全下限 {self.minimum_z:.2f} mm，"
+                        f"已自动调整为 {pose[2]:.2f} mm 并完成运动"
+                    ),
+                )
             return MoveArmResponse(success=True, message="机械臂运动完成")
         except Exception as exc:
             rospy.logerr("机械臂运动异常: %s", exc)
