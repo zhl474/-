@@ -6,6 +6,7 @@ import math
 import rospy
 import serial
 from serial.tools import list_ports
+import time
 
 from akai_fr import AkaiElectricSucker, AkaiFr
 from control.srv import (
@@ -70,6 +71,7 @@ class ControlNode:
         try:
             self.arm.set_speed(int(request.speed))
             result = self.arm.arm.MoveL(pose, tool=0, user=0, vel=int(request.speed))
+            time.sleep(1) 
             if result is False:
                 return MoveArmResponse(success=False, message="机械臂 MoveL 返回失败")
             if z_was_clamped:
