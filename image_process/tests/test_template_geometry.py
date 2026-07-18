@@ -905,10 +905,9 @@ def test_competition_module_imports_with_service_stubs(monkeypatch):
     assert callable(module.main)
 
 
-def test_depth_first_servo_pose_uses_world_point_when_depth_valid(monkeypatch):
+def test_depth_first_servo_pose_uses_individual_height_offsets_when_depth_valid(monkeypatch):
     localizer = RoughLocalizer(
         shooting_pose=[0, 0, 0, 0, 0, 0],
-        servo_height_offset_mm=200.0,
         wrist_to_camera_mm=np.array([
             [1.0, 0.0, 0.0, 10.0],
             [0.0, 1.0, 0.0, 20.0],
@@ -924,18 +923,25 @@ def test_depth_first_servo_pose_uses_world_point_when_depth_valid(monkeypatch):
         warning_func=lambda _message: None,
     )
 
-    pose, source, world_position = localizer.locate(12.2, 33.8, (720, 1280, 3), "测试")
+    block_pose, source, world_position = localizer.locate(
+        12.2, 33.8, (720, 1280, 3), "方块测试", 180.0
+    )
+    board_pose, board_source, board_world_position = localizer.locate(
+        12.2, 33.8, (720, 1280, 3), "托盘测试", 210.0
+    )
 
     assert source == "depth"
     assert world_position == [100.0, 200.0, 50.0]
-    assert pose == [90.0, 180.0, 250.0, 0.0, 0.0, 0.0]
+    assert block_pose == [90.0, 180.0, 230.0, 0.0, 0.0, 0.0]
+    assert board_source == "depth"
+    assert board_world_position == [100.0, 200.0, 50.0]
+    assert board_pose == [90.0, 180.0, 260.0, 0.0, 0.0, 0.0]
 
 
 def test_depth_first_servo_pose_falls_back_when_depth_invalid(monkeypatch):
     warnings = []
     localizer = RoughLocalizer(
         shooting_pose=[100.0, 200.0, 0.0, 0.0, 0.0, 0.0],
-        servo_height_offset_mm=200.0,
         wrist_to_camera_mm=np.eye(4),
         pixel_to_world_client=lambda _x, _y: types.SimpleNamespace(
             success=False, world_position=[0.0, 0.0, 0.0], message="无效深度"
@@ -946,7 +952,7 @@ def test_depth_first_servo_pose_falls_back_when_depth_invalid(monkeypatch):
         warning_func=warnings.append,
     )
 
-    pose, source, world_position = localizer.locate(150.0, 40.0, (100, 200, 3), "测试")
+    pose, source, world_position = localizer.locate(150.0, 40.0, (100, 200, 3), "测试", 200.0)
 
     assert source == "fallback"
     assert world_position == []
@@ -957,7 +963,6 @@ def test_depth_first_servo_pose_falls_back_when_depth_invalid(monkeypatch):
 def test_depth_failure_does_not_fallback_when_disabled():
     localizer = RoughLocalizer(
         shooting_pose=[0, 0, 0, 0, 0, 0],
-        servo_height_offset_mm=200.0,
         wrist_to_camera_mm=np.eye(4),
         pixel_to_world_client=lambda _x, _y: types.SimpleNamespace(
             success=False, world_position=[0, 0, 0], message="深度无效"
@@ -968,4 +973,4 @@ def test_depth_failure_does_not_fallback_when_disabled():
         warning_func=lambda _message: None,
     )
     with pytest.raises(ValueError, match="深度无效"):
-        localizer.locate(1, 1, (10, 10, 3), "测试")
+        localizer.locate(1, 1, (10, 10, 3), "测试", 200.0)

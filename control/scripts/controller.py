@@ -22,6 +22,7 @@ from control.srv import (
 class ControlNode:
     def __init__(self):
         self.minimum_z = float(rospy.get_param("~minimum_z", 165.0))
+        self.move_arm_timing_debug = bool(rospy.get_param("~move_arm_timing_debug", False))
         stability = rospy.get_param("~arm_stability", {})
         self.stable_timeout = float(stability.get("timeout_seconds", 5.0))
         self.stable_poll_interval = float(stability.get("poll_interval_seconds", 0.005))
@@ -75,10 +76,13 @@ class ControlNode:
             return [float(item) for item in value]
         return value
 
-    def _wait_until_arm_stable(self, target_pose):
-        """等待机械臂到达目标位姿，并保持低速达到设定时长。"""
+    def _wait_until_arm_stable(self, target_pose, motion_started_at=None):
+        """等待机械臂到达目标位姿，并返回运动与保稳阶段耗时。"""
+        if motion_started_at is None:
+            motion_started_at = time.monotonic()
         deadline = time.monotonic() + self.stable_timeout
         stable_since = None
+        motion_finished_at = None
 
         while not rospy.is_shutdown():
             motion_done = bool(
@@ -112,11 +116,16 @@ class ControlNode:
             )
 
             now = time.monotonic()
+            if motion_done and motion_finished_at is None:
+                motion_finished_at = now
             if is_stable:
                 if stable_since is None:
                     stable_since = now
                 if now - stable_since >= self.stable_duration:
-                    return
+                    return (
+                        motion_finished_at - motion_started_at,
+                        now - motion_finished_at,
+                    )
             else:
                 stable_since = None
 
@@ -153,13 +162,24 @@ class ControlNode:
             )
         try:
             self.arm.set_speed(int(request.speed))
+            motion_started_at = time.monotonic()
             result = self.arm.arm.MoveL(pose, tool=0, user=0, vel=int(request.speed))
             if (isinstance(result, bool) and not result) or (
                 not isinstance(result, bool) and result != 0
             ):
                 return MoveArmResponse(success=False, message=f"机械臂 MoveL 返回失败: {result!r}")
             if request.wait_until_stable:
-                self._wait_until_arm_stable(pose)
+                motion_seconds, stabilization_seconds = self._wait_until_arm_stable(
+                    pose,
+                    motion_started_at,
+                )
+                if getattr(self, "move_arm_timing_debug", False):
+                    rospy.loginfo(
+                        "机械臂阶段耗时：运动=%.1f ms，保稳=%.1f ms，总计=%.1f ms",
+                        motion_seconds * 1000.0,
+                        stabilization_seconds * 1000.0,
+                        (motion_seconds + stabilization_seconds) * 1000.0,
+                    )
             if z_was_clamped:
                 return MoveArmResponse(
                     success=True,

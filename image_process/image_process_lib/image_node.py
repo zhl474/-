@@ -67,13 +67,19 @@ PERCEPTION_CONFIG_PATH = os.path.join(PACKAGE_DIR, "config", "perception.yaml")
 DEFAULT_DEBUG_DIR = os.path.expanduser("~/.ros/single_arm_tetris")
 
 
-def load_servo_height_offset_mm(config_path=VISUAL_SERVO_CONFIG_PATH):
-    """从视觉伺服配置读取相对深度目标的观察高度偏移。"""
+def load_servo_height_offsets_mm(config_path=VISUAL_SERVO_CONFIG_PATH):
+    """从视觉伺服配置读取方块和托盘各自的观察高度偏移。"""
     if not os.path.exists(config_path):
-        return 200.0
+        return 200.0, 200.0
     with open(config_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
-    return float(data.get("servo_height_offset_mm", 200.0))
+    offsets = (
+        float(data.get("block_servo_height_offset_mm", 200.0)),
+        float(data.get("board_servo_height_offset_mm", 200.0)),
+    )
+    if not np.all(np.isfinite(offsets)) or min(offsets) <= 0.0:
+        raise ValueError("方块和托盘视觉伺服观察高度偏置必须是大于 0 的有限数值")
+    return offsets
 
 
 class ImageProcessor:
@@ -136,7 +142,10 @@ class ImageProcessor:
         self.model = YOLO(detection_model_path)
 
         self.board_theta = 0.0
-        self.servo_height_offset_mm = load_servo_height_offset_mm()
+        (
+            self.block_servo_height_offset_mm,
+            self.board_servo_height_offset_mm,
+        ) = load_servo_height_offsets_mm()
         self.T_wrist2camera_mm = np.load(hand_eye_matrix_path)
         if self.T_wrist2camera_mm.shape != (4, 4) or not np.all(np.isfinite(self.T_wrist2camera_mm)):
             raise ValueError("手眼标定矩阵 T_wrist2camera.npy 无效，请重新标定")
@@ -241,7 +250,6 @@ class ImageProcessor:
             raise ValueError("shooting_pose 必须包含 6 个有限数值")
         self.rough_localizer = RoughLocalizer(
             shooting_pose=self.shooting_angle,
-            servo_height_offset_mm=self.servo_height_offset_mm,
             wrist_to_camera_mm=self.T_wrist2camera_mm,
             pixel_to_world_client=self.pixel2world_client,
             x_mm_per_pixel=self.high_rough_x_mm_per_pixel,
@@ -402,9 +410,9 @@ class ImageProcessor:
                 self.image_condition.wait(remaining_sec)
             return self.latest_image.copy()
 
-    def make_depth_first_servo_pose(self, px, py, image_shape, label):
+    def make_depth_first_servo_pose(self, px, py, image_shape, label, height_offset_mm):
         """兼容节点内部调用，实际粗定位由 RoughLocalizer 完成。"""
-        return self.rough_localizer.locate(px, py, image_shape, label)
+        return self.rough_localizer.locate(px, py, image_shape, label, height_offset_mm)
 
     def compute_board_theta_from_grid_points(self, grid_points):
         """只根据托盘四角像素计算托盘旋转角，不再依赖九点坐标标定。"""
@@ -464,7 +472,11 @@ class ImageProcessor:
                 rospy.logwarn("忽略未知方块类别: %s", category)
                 continue
             servo_pose, localization_source, world_position = self.make_depth_first_servo_pose(
-                block["px"], block["py"], image.shape, f"方块 {category}"
+                block["px"],
+                block["py"],
+                image.shape,
+                f"方块 {category}",
+                self.block_servo_height_offset_mm,
             )
             has_valid_surface_z = localization_source == "depth" and len(world_position) == 3
             counts[category] += 1
@@ -511,6 +523,7 @@ class ImageProcessor:
                 target_point[1],
                 image_shape,
                 f"托盘目标 {item['index']}",
+                self.board_servo_height_offset_mm,
             )
             targets.append(
                 PlacementTarget(

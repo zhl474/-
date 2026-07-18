@@ -89,21 +89,27 @@ def test_pick_uses_depth_surface_height_and_configured_offset(monkeypatch):
     assert clients.moves[2][0][2] == 177.5
 
 
-def test_only_observation_poses_request_stability_wait(monkeypatch):
+def test_place_keeps_dynamic_observation_height_and_directly_releases(monkeypatch):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
+    execution_config = load_execution_config()
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=load_execution_config(),
+        execution_config=execution_config,
         visual_config=load_visual_servo_config(),
     )
-    runner._align = lambda *_args, **_kwargs: (True, [0, 0, 200, -180, 0, 90], None, "成功")
+    runner._align = lambda *_args, **_kwargs: (True, [11, 12, 234, -180, 0, 90], None, "成功")
     target = clients.get_task_target(0)
 
-    runner._pick(target)
     runner._place(target)
 
-    assert [move[3] for move in clients.moves] == [True, False, False, False, True, False, False, False]
+    assert clients.moves[0][0] == [10, 10, 200, -180, 0, 90]
+    assert clients.moves[1][0] == pytest.approx([-83.1, -1.8, 234.0, -180.0, 0.0, 90.0])
+    assert [move[3] for move in clients.moves] == [True, False]
+    assert clients.suction_states == [module.RobotClients.BLOW]
+    assert not hasattr(execution_config, "place_high_z")
+    assert not hasattr(execution_config, "place_down_z")
+    assert not hasattr(execution_config, "place_lift_step_mm")
 
 
 def test_pick_rejects_missing_depth_height_before_moving(monkeypatch):

@@ -21,7 +21,6 @@ class RoughLocalizer:
     def __init__(
         self,
         shooting_pose: Sequence[float],
-        servo_height_offset_mm: float,
         wrist_to_camera_mm,
         pixel_to_world_client: Callable,
         x_mm_per_pixel: float,
@@ -35,7 +34,6 @@ class RoughLocalizer:
             raise ValueError("高位拍摄位姿必须包含 6 个有限数值")
         if self.wrist_to_camera_mm.shape != (4, 4) or not np.all(np.isfinite(self.wrist_to_camera_mm)):
             raise ValueError("手眼标定矩阵必须是有限的 4x4 矩阵")
-        self.servo_height_offset_mm = float(servo_height_offset_mm)
         self.pixel_to_world_client = pixel_to_world_client
         self.x_mm_per_pixel = float(x_mm_per_pixel)
         self.y_mm_per_pixel = float(y_mm_per_pixel)
@@ -53,34 +51,42 @@ class RoughLocalizer:
             raise ValueError(f"深度服务返回无效世界坐标: {world_position.tolist()}")
         return world_position
 
-    def _make_depth_pose(self, world_position):
+    @staticmethod
+    def _validate_height_offset_mm(height_offset_mm):
+        height_offset_mm = float(height_offset_mm)
+        if not np.isfinite(height_offset_mm) or height_offset_mm <= 0.0:
+            raise ValueError("视觉伺服观察高度偏置必须是大于 0 的有限数值")
+        return height_offset_mm
+
+    def _make_depth_pose(self, world_position, height_offset_mm):
         tool_rotation = rpy_degrees_to_rotation_matrix(*self.shooting_pose[3:6])
         camera_offset_in_base = tool_rotation @ self.wrist_to_camera_mm[:3, 3]
         tool_position = np.array([
             world_position[0] - camera_offset_in_base[0],
             world_position[1] - camera_offset_in_base[1],
-            world_position[2] + self.servo_height_offset_mm,
+            world_position[2] + height_offset_mm,
         ])
         return [*tool_position.tolist(), *self.shooting_pose[3:6].tolist()]
 
-    def _make_pixel_fallback_pose(self, px, py, image_shape):
+    def _make_pixel_fallback_pose(self, px, py, image_shape, height_offset_mm):
         height, width = image_shape[:2]
         predicted_x = self.shooting_pose[0] + (float(py) - height / 2.0) * self.y_mm_per_pixel
         predicted_y = self.shooting_pose[1] + (float(px) - width / 2.0) * self.x_mm_per_pixel
         return [
             float(predicted_x),
             float(predicted_y),
-            self.servo_height_offset_mm,
+            height_offset_mm,
             *self.shooting_pose[3:6].tolist(),
         ]
 
-    def locate(self, px, py, image_shape, label):
+    def locate(self, px, py, image_shape, label, height_offset_mm):
+        height_offset_mm = self._validate_height_offset_mm(height_offset_mm)
         try:
             world_position = self._query_world_position(px, py)
-            pose = self._make_depth_pose(world_position)
+            pose = self._make_depth_pose(world_position, height_offset_mm)
             return pose, "depth", world_position.tolist()
         except Exception as exc:
             if not self.fallback_enabled:
                 raise
             self.warning_func(f"{label}深度定位失败，回退旧粗估: {exc}")
-            return self._make_pixel_fallback_pose(px, py, image_shape), "fallback", []
+            return self._make_pixel_fallback_pose(px, py, image_shape, height_offset_mm), "fallback", []

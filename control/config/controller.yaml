@@ -1,3 +1,6 @@
+# 是否输出 MoveL 动作的运动、保稳阶段耗时。调试完成后可改为 false。
+move_arm_timing_debug: true
+
 # 机械臂 MoveL 返回后的停稳判定参数
 arm_stability:
   timeout_seconds: 5.0

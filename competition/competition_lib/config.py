@@ -21,9 +21,6 @@ class ExecutionConfig:
     servo_speed: int
     pick_surface_offset_mm: float
     lift_z: float
-    place_high_z: float
-    place_down_z: float
-    place_lift_step_mm: float
     timing_debug: bool
     error_threshold_px: float
     min_step_mm: float
@@ -58,9 +55,6 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         servo_speed=int(motion["servo_speed"]),
         pick_surface_offset_mm=float(motion["pick_surface_offset_mm"]),
         lift_z=float(motion["lift_z"]),
-        place_high_z=float(motion["place_high_z"]),
-        place_down_z=float(motion["place_down_z"]),
-        place_lift_step_mm=float(motion["place_lift_step_mm"]),
         timing_debug=bool(servo.get("timing_debug", False)),
         error_threshold_px=float(servo["error_threshold_px"]),
         min_step_mm=float(servo["min_step_mm"]),
@@ -76,7 +70,6 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
     )
     numeric_values = [
         config.arm_speed, config.pick_speed, config.servo_speed, config.pick_surface_offset_mm, config.lift_z,
-        config.place_high_z, config.place_down_z, config.place_lift_step_mm,
         config.error_threshold_px, config.min_step_mm, config.max_step_mm, config.max_iter,
         config.success_stable_frames, config.max_missed_frames, config.motor_velocity_deg_per_sec,
     ]
@@ -102,7 +95,8 @@ def load_visual_servo_config(config_path: str = DEFAULT_VISUAL_SERVO_CONFIG_PATH
         raise ValueError("视觉伺服矩阵必须为 2x2，吸盘偏移必须包含 2 个数值")
     if not np.all(np.isfinite(matrix)) or not np.all(np.isfinite(offset)):
         raise ValueError("视觉伺服配置包含非有限数值")
-    servo_height_offset_mm = float(config.get("servo_height_offset_mm", 0.0))
-    if not np.isfinite(servo_height_offset_mm) or servo_height_offset_mm <= 0:
-        raise ValueError("servo_height_offset_mm 必须是大于 0 的有限数值")
+    for key in ("block_servo_height_offset_mm", "board_servo_height_offset_mm"):
+        servo_height_offset_mm = float(config.get(key, 0.0))
+        if not np.isfinite(servo_height_offset_mm) or servo_height_offset_mm <= 0:
+            raise ValueError(f"{key} 必须是大于 0 的有限数值")
     return config

@@ -21,6 +21,9 @@ def test_current_execution_and_servo_configs_are_valid():
     assert execution.servo_speed > 0
     assert len(execution.shooting_pose) == 6
     assert np.asarray(visual["pixel_to_robot_matrix"]).shape == (2, 2)
+    assert visual["block_servo_height_offset_mm"] > 0
+    assert visual["board_servo_height_offset_mm"] > 0
+    assert "servo_height_offset_mm" not in visual
 
 
 def test_step_limit_applies_minimum_and_maximum():

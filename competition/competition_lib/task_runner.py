@@ -142,18 +142,11 @@ class TaskRunner:
             raise RuntimeError(f"托盘视觉伺服失败: {message}")
 
         place_pose = apply_camera_to_sucker_offset(camera_pose, self.visual_config)
-        place_pose[2] = self.config.place_high_z
         self.clients.move_arm(place_pose, self.config.arm_speed)
 
         self._set_state(TaskState.PLACING)
-        down_pose = list(place_pose)
-        down_pose[2] = self.config.place_down_z
-        self.clients.move_arm(down_pose, self.config.pick_speed)
         self.clients.set_suction(RobotClients.BLOW)
         self.holding_block = False
-        lift_pose = list(down_pose)
-        lift_pose[2] += self.config.place_lift_step_mm
-        self.clients.move_arm(lift_pose, self.config.arm_speed)
 
     def prepare(self, advanced=False, place_order=()):
         self._set_state(TaskState.PREPARING)
