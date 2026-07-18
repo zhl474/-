@@ -782,7 +782,11 @@ def detect_block_with_high_prior_roi(
             final_mask=foreground_mask,
             match_mask_debug=match_mask_debug,
             match_debug=debug_image,
-            message=_format_seed_debug_message(category, foreground_area, mask_stages),
+            # 以图像中心为零点显示视觉伺服使用的像素误差，便于逐帧核对修正方向。
+            message=(
+                f"{_format_seed_debug_message(category, foreground_area, mask_stages)} | "
+                f"像素误差：px={px - center[0]:+.1f}，py={py - center[1]:+.1f}"
+            ),
         )
     _add_timing_stage(timing_info, "检测调试图", debug_started_at)
 

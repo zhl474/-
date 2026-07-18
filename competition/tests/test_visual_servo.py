@@ -68,3 +68,22 @@ def test_alignment_stops_after_consecutive_misses():
     )
     assert result[0] is False
     assert "连续多帧" in result[3]
+
+
+def test_alignment_log_uses_the_specified_target_label(capsys):
+    run_offset_visual_servo_alignment(
+        lambda: _response(dx=3, dy=1),
+        lambda *_args, **_kwargs: None,
+        [0, 0, 200, 0, 0, 0],
+        {"pixel_to_robot_matrix": [[1, 0], [0, 1]]},
+        speed=25,
+        error_threshold_px=2,
+        max_step_mm=5,
+        max_iter=1,
+        success_stable_frames=1,
+        max_missed_frames=2,
+        settle_sec=0,
+        log_label="方块视觉伺服",
+    )
+
+    assert "[方块视觉伺服] 第 1 轮误差=" in capsys.readouterr().out

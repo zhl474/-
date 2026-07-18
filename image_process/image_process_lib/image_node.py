@@ -80,7 +80,12 @@ class ImageProcessor:
     def __init__(self):
         self.bridge = CvBridge()
         self.image_lock = threading.Lock()
+        self.image_condition = threading.Condition(self.image_lock)
         self.latest_image = None
+        self.latest_image_stamp = None
+        self.fresh_image_timeout_sec = float(rospy.get_param("~fresh_image_timeout_sec", 0.5))
+        if not np.isfinite(self.fresh_image_timeout_sec) or self.fresh_image_timeout_sec <= 0.0:
+            raise ValueError("fresh_image_timeout_sec 必须是大于 0 的有限数值")
         self.task_targets = []
         self.board_grid_points = None
         self.board_grid_image_shape = None
@@ -369,15 +374,33 @@ class ImageProcessor:
     def image_callback(self, msg):
         try:
             image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-            with self.image_lock:
+            image_stamp = getattr(getattr(msg, "header", None), "stamp", None)
+            with self.image_condition:
                 self.latest_image = image
+                self.latest_image_stamp = image_stamp
+                self.image_condition.notify_all()
         except Exception as e:
             rospy.logerr("图像转换失败: %s" % e)
 
     def get_image_snapshot(self):
         """在锁内复制当前图像，服务处理期间始终使用同一帧。"""
-        with self.image_lock:
+        with self.image_condition:
             return None if self.latest_image is None else self.latest_image.copy()
+
+    def get_image_snapshot_newer_than(self, request_stamp):
+        """等待发布时间晚于本次请求的图像，避免使用请求前的缓存帧。"""
+        with self.image_condition:
+            deadline = time.monotonic() + self.fresh_image_timeout_sec
+            while (
+                self.latest_image is None
+                or self.latest_image_stamp is None
+                or self.latest_image_stamp <= request_stamp
+            ):
+                remaining_sec = deadline - time.monotonic()
+                if remaining_sec <= 0.0:
+                    return None
+                self.image_condition.wait(remaining_sec)
+            return self.latest_image.copy()
 
     def make_depth_first_servo_pose(self, px, py, image_shape, label):
         """兼容节点内部调用，实际粗定位由 RoughLocalizer 完成。"""
@@ -614,7 +637,8 @@ class ImageProcessor:
         row/col 支持整数和 .5，小数目标会用相邻圆点平均成虚拟目标点。
         """
         request_started_at = time.perf_counter()
-        img_bgr1 = self.get_image_snapshot()
+        request_stamp = rospy.Time.now()
+        img_bgr1 = self.get_image_snapshot_newer_than(request_stamp)
         snapshot_finished_at = time.perf_counter()
         if img_bgr1 is None:
             self.log_visual_servo_detection_timing(
@@ -623,7 +647,7 @@ class ImageProcessor:
             return self.make_visual_servo_result(
                 found=False,
                 target_type="board",
-                message="没有可用图像",
+                message=f"等待视觉新帧超时（{self.fresh_image_timeout_sec:.1f} 秒）",
             )
 
         try:
@@ -717,7 +741,8 @@ class ImageProcessor:
         """使用高位类别和角度先验识别低位方块像素偏差。"""
         prior_message = self.make_block_angle_prior_message(angle_center, angle_window, angle_step)
         request_started_at = time.perf_counter()
-        image = self.get_image_snapshot()
+        request_stamp = rospy.Time.now()
+        image = self.get_image_snapshot_newer_than(request_stamp)
         snapshot_finished_at = time.perf_counter()
         if image is None:
             self.log_visual_servo_detection_timing(
@@ -726,7 +751,10 @@ class ImageProcessor:
             return self.make_visual_servo_result(
                 found=False,
                 target_type="block",
-                message=f"没有可用图像，{prior_message}",
+                message=(
+                    f"等待视觉新帧超时（{self.fresh_image_timeout_sec:.1f} 秒），"
+                    f"{prior_message}"
+                ),
             )
 
         category = normalize_category_name((expected_category or "").strip())

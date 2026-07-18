@@ -52,6 +52,7 @@ def run_offset_visual_servo_alignment(
     settle_sec: float,
     min_step_mm: float = 0.0,
     timing_debug: bool = False,
+    log_label: str = "视觉伺服",
 ):
     pose = list(float(value) for value in start_pose)
     stable_count = 0
@@ -66,13 +67,13 @@ def run_offset_visual_servo_alignment(
             missed_count += 1
             stable_count = 0
             print(
-                f"[视觉伺服] 第 {iteration + 1} 轮未识别，"
+                f"[{log_label}] 第 {iteration + 1} 轮未识别，"
                 f"连续丢失 {missed_count}/{max_missed_frames}: {response.message}"
             )
             if missed_count >= max_missed_frames:
                 if timing_debug:
                     print(
-                        f"[视觉伺服耗时] 第 {iteration + 1} 轮 "
+                        f"[{log_label}耗时] 第 {iteration + 1} 轮 "
                         f"图像服务={(detection_finished_at - round_started_at) * 1000:.1f}ms，"
                         f"本轮总={(time.perf_counter() - round_started_at) * 1000:.1f}ms"
                     )
@@ -81,7 +82,7 @@ def run_offset_visual_servo_alignment(
             if timing_debug:
                 round_finished_at = time.perf_counter()
                 print(
-                    f"[视觉伺服耗时] 第 {iteration + 1} 轮 "
+                    f"[{log_label}耗时] 第 {iteration + 1} 轮 "
                     f"图像服务={(detection_finished_at - round_started_at) * 1000:.1f}ms，"
                     f"稳定等待={(round_finished_at - detection_finished_at) * 1000:.1f}ms，"
                     f"本轮总={(round_finished_at - round_started_at) * 1000:.1f}ms"
@@ -95,7 +96,7 @@ def run_offset_visual_servo_alignment(
             if stable_count >= success_stable_frames:
                 if timing_debug:
                     print(
-                        f"[视觉伺服耗时] 第 {iteration + 1} 轮 "
+                        f"[{log_label}耗时] 第 {iteration + 1} 轮 "
                         f"图像服务={(detection_finished_at - round_started_at) * 1000:.1f}ms，"
                         f"本轮总={(time.perf_counter() - round_started_at) * 1000:.1f}ms"
                     )
@@ -104,7 +105,7 @@ def run_offset_visual_servo_alignment(
             if timing_debug:
                 round_finished_at = time.perf_counter()
                 print(
-                    f"[视觉伺服耗时] 第 {iteration + 1} 轮 "
+                    f"[{log_label}耗时] 第 {iteration + 1} 轮 "
                     f"图像服务={(detection_finished_at - round_started_at) * 1000:.1f}ms，"
                     f"稳定等待={(round_finished_at - detection_finished_at) * 1000:.1f}ms，"
                     f"本轮总={(round_finished_at - round_started_at) * 1000:.1f}ms"
@@ -124,7 +125,7 @@ def run_offset_visual_servo_alignment(
         pose[0] += float(delta_xy[0])
         pose[1] += float(delta_xy[1])
         print(
-            f"[视觉伺服] 第 {iteration + 1} 轮误差=({response.dx_px:.2f},{response.dy_px:.2f})px，"
+            f"[{log_label}] 第 {iteration + 1} 轮误差=({response.dx_px:.2f},{response.dy_px:.2f})px，"
             f"修正=({delta_xy[0]:.3f},{delta_xy[1]:.3f})mm"
         )
         control_started_at = time.perf_counter()
@@ -135,7 +136,7 @@ def run_offset_visual_servo_alignment(
         round_finished_at = time.perf_counter()
         if timing_debug:
             print(
-                f"[视觉伺服耗时] 第 {iteration + 1} 轮 "
+                f"[{log_label}耗时] 第 {iteration + 1} 轮 "
                 f"图像服务={(detection_finished_at - round_started_at) * 1000:.1f}ms，"
                 f"控制计算={(control_calculation_finished_at - control_calculation_started_at) * 1000:.1f}ms，"
                 f"误差日志输出={(control_started_at - control_calculation_finished_at) * 1000:.1f}ms，"

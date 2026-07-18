@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import types
 import importlib.util
 
@@ -769,6 +770,61 @@ def test_process_module_imports_with_ros_stubs(monkeypatch):
     module = _load_process_module_with_stubs(monkeypatch, "process_import_smoke")
     assert hasattr(module, "ImageProcessor")
     assert callable(module.main)
+
+
+def _make_timestamp_snapshot_processor(module, timeout_sec=0.05):
+    """构造只包含时间戳快照状态的轻量节点实例。"""
+    processor = object.__new__(module.ImageProcessor)
+    processor.image_lock = threading.Lock()
+    processor.image_condition = threading.Condition(processor.image_lock)
+    processor.latest_image = None
+    processor.latest_image_stamp = None
+    processor.fresh_image_timeout_sec = timeout_sec
+    return processor
+
+
+def _publish_timestamped_test_image(processor, image, stamp):
+    """模拟收到带发布时间戳的相机图像。"""
+    with processor.image_condition:
+        processor.latest_image = image
+        processor.latest_image_stamp = stamp
+        processor.image_condition.notify_all()
+
+
+def test_timestamp_snapshot_rejects_image_published_before_request(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_timestamp_snapshot_timeout")
+    processor = _make_timestamp_snapshot_processor(module, timeout_sec=0.01)
+    _publish_timestamped_test_image(processor, np.full((2, 2, 3), 7, dtype=np.uint8), stamp=10)
+
+    assert processor.get_image_snapshot_newer_than(10) is None
+
+
+def test_timestamp_snapshot_waits_for_image_published_after_request(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_timestamp_snapshot_new_frame")
+    processor = _make_timestamp_snapshot_processor(module)
+    _publish_timestamped_test_image(processor, np.full((2, 2, 3), 1, dtype=np.uint8), stamp=10)
+    wait_started = threading.Event()
+    original_wait = processor.image_condition.wait
+
+    def signal_before_wait(timeout=None):
+        wait_started.set()
+        return original_wait(timeout)
+
+    processor.image_condition.wait = signal_before_wait
+    result = []
+    worker = threading.Thread(
+        target=lambda: result.append(processor.get_image_snapshot_newer_than(10))
+    )
+    worker.start()
+    assert wait_started.wait(timeout=1.0)
+    new_image = np.full((2, 2, 3), 2, dtype=np.uint8)
+    _publish_timestamped_test_image(processor, new_image, stamp=11)
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert len(result) == 1
+    np.testing.assert_array_equal(result[0], new_image)
+    assert result[0] is not new_image
 
 
 def test_task_target_service_rejects_out_of_range_index(monkeypatch):

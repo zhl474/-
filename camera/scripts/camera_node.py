@@ -34,7 +34,7 @@ class CameraNode:
         if self.world_bias_mm.shape != (3,) or not np.all(np.isfinite(self.world_bias_mm)):
             raise ValueError("world_bias_mm 必须包含 3 个有限数值")
 
-        self.image_pub = rospy.Publisher("/camera/image_raw", Image, queue_size=10)
+        self.image_pub = rospy.Publisher("/camera/image_raw", Image, queue_size=1)
         self.bridge = CvBridge()
         self.lock = threading.Lock()
         self.latest_depth_image = None

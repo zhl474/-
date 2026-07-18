@@ -73,7 +73,7 @@ class TaskRunner:
         elif state is TaskState.FAILED:
             rospy.logerr("任务状态: %s", state.value)
 
-    def _align(self, offset_func, start_pose):
+    def _align(self, offset_func, start_pose, log_label):
         return run_offset_visual_servo_alignment(
             offset_func,
             self.clients.move_arm,
@@ -88,6 +88,7 @@ class TaskRunner:
             max_missed_frames=self.config.max_missed_frames,
             settle_sec=self.config.settle_sec,
             timing_debug=self.config.timing_debug,
+            log_label=log_label,
         )
 
     def _pick(self, target):
@@ -108,6 +109,7 @@ class TaskRunner:
         success, camera_pose, _, message = self._align(
             lambda: self.clients.detect_block_offset(target.category, target.detected_angle_deg),
             rough_pose,
+            "方块视觉伺服",
         )
         if not success:
             raise RuntimeError(f"方块视觉伺服失败: {message}")
@@ -134,6 +136,7 @@ class TaskRunner:
         success, camera_pose, _, message = self._align(
             lambda: self.clients.detect_board_offset(target.row, target.col),
             rough_pose,
+            "托盘视觉伺服",
         )
         if not success:
             raise RuntimeError(f"托盘视觉伺服失败: {message}")
