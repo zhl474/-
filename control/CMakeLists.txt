@@ -5,6 +5,7 @@ find_package(catkin REQUIRED COMPONENTS message_generation rospy)
 
 add_service_files(FILES
   MoveArm.srv
+  GetActualPose.srv
   RotateTool.srv
   SetSuction.srv
 )

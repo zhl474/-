@@ -50,6 +50,42 @@ def test_assignment_rejects_insufficient_category_count():
         assign_blocks_to_targets(blocks, targets, board_angle_deg=0)
 
 
+def test_assignment_preserves_high_localization_diagnostics():
+    block = ObservedBlock(
+        "T",
+        _pose(0, 0),
+        10,
+        high_detected_pixel_xy=(100.5, 200.5),
+        high_depth_sample_pixel_xy=(100.0, 200.0),
+        high_image_center_xy=(640.0, 360.0),
+        high_world_position=(1.0, 2.0, 3.0),
+        high_world_position_valid=True,
+        rough_localization_source="depth",
+    )
+    target = PlacementTarget(
+        0,
+        1,
+        1,
+        0,
+        "T",
+        _pose(5, 0),
+        high_detected_pixel_xy=(300.5, 400.5),
+        high_depth_sample_pixel_xy=(300.0, 400.0),
+        high_image_center_xy=(640.0, 360.0),
+        high_world_position=(4.0, 5.0, 6.0),
+        high_world_position_valid=True,
+        rough_localization_source="depth",
+    )
+
+    result = assign_blocks_to_targets([block], [target], board_angle_deg=0)[0]
+
+    assert result.pick_high_detected_pixel_xy == (100.5, 200.5)
+    assert result.pick_high_world_position == (1.0, 2.0, 3.0)
+    assert result.pick_rough_localization_source == "depth"
+    assert result.place_high_detected_pixel_xy == (300.5, 400.5)
+    assert result.place_high_world_position == (4.0, 5.0, 6.0)
+
+
 @pytest.mark.parametrize(
     "category,expected_limit",
     [("T", 180), ("line", 90), ("z_blue", 90), ("square", 45)],

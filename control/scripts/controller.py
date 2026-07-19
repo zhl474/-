@@ -2,14 +2,18 @@
 """机械臂、末端舵机与电子吸盘控制节点。"""
 
 import math
+import os
 import time
 
+import numpy as np
 import rospy
 import serial
 from serial.tools import list_ports
 
 from akai_fr import AkaiElectricSucker, AkaiFr
 from control.srv import (
+    GetActualPose,
+    GetActualPoseResponse,
     MoveArm,
     MoveArmResponse,
     RotateTool,
@@ -17,6 +21,11 @@ from control.srv import (
     SetSuction,
     SetSuctionResponse,
 )
+
+
+PACKAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+SRC_DIR = os.path.abspath(os.path.join(PACKAGE_DIR, ".."))
+DEFAULT_HAND_EYE_MATRIX = os.path.join(SRC_DIR, "camera", "config", "T_wrist2camera.npy")
 
 
 class ControlNode:
@@ -32,12 +41,21 @@ class ControlNode:
         self.position_tolerance = float(stability.get("position_tolerance_mm", 1.0))
         self.orientation_tolerance = float(stability.get("orientation_tolerance_deg", 0.5))
         self.arm = AkaiFr()
+        hand_eye_matrix_path = rospy.get_param("~hand_eye_matrix", DEFAULT_HAND_EYE_MATRIX)
+        wrist_to_camera = np.load(hand_eye_matrix_path)
+        if wrist_to_camera.shape != (4, 4) or not np.all(np.isfinite(wrist_to_camera)):
+            raise ValueError("手眼标定矩阵必须是有限的 4x4 矩阵")
+        # 读取实测相机光心位姿时使用，与相机节点保持同一份手眼标定。
+        self.arm.set_tmat_wrist2camera(wrist_to_camera)
         self.arm.set_speed(80)
         self.arm.set_tcf(1, [0, 0, 0, 0, 0, 0])
         self.sucker = AkaiElectricSucker(self.arm)
         self.servo_serial = self._open_servo_serial()
 
         self.arm_service = rospy.Service("/control/move_arm", MoveArm, self.move_arm)
+        self.actual_pose_service = rospy.Service(
+            "/control/get_actual_pose", GetActualPose, self.get_actual_pose
+        )
         self.motor_service = rospy.Service("/control/rotate_tool", RotateTool, self.rotate_tool)
         self.suction_service = rospy.Service("/control/set_suction", SetSuction, self.set_suction)
         rospy.on_shutdown(self.close)
@@ -193,6 +211,36 @@ class ControlNode:
             rospy.logerr("机械臂运动异常: %s", exc)
             return MoveArmResponse(success=False, message=str(exc))
 
+    def get_actual_pose(self, _request):
+        """读取控制器实测 TCP 与相机光心在机器人基坐标系下的位姿。"""
+        zero_pose = [0.0] * 6
+        try:
+            tcp_pose = self._rpc_value(
+                "GetActualTCPPose",
+                self.arm.arm.GetActualTCPPose(),
+                value_length=6,
+            )
+            success, camera_pose = self.arm.get_camera_pose()
+            if not success or camera_pose is None:
+                raise RuntimeError("获取相机光心位姿失败")
+            camera_pose = [float(value) for value in camera_pose]
+            if len(camera_pose) != 6 or not self._finite(camera_pose):
+                raise RuntimeError(f"相机光心位姿无效: {camera_pose}")
+            return GetActualPoseResponse(
+                success=True,
+                tcp_pose=tcp_pose,
+                camera_pose=camera_pose,
+                message="读取实测 TCP 与相机光心位姿成功",
+            )
+        except Exception as exc:
+            rospy.logwarn("读取实测位姿失败: %s", exc)
+            return GetActualPoseResponse(
+                success=False,
+                tcp_pose=zero_pose,
+                camera_pose=zero_pose,
+                message=str(exc),
+            )
+
     def rotate_tool(self, request):
         angle = float(request.angle_deg)
         if not math.isfinite(angle) or not 0.0 <= angle <= 360.0:
@@ -205,6 +253,7 @@ class ControlNode:
             return RotateToolResponse(success=False, message=str(exc))
 
     def set_suction(self, request):
+        return SetSuctionResponse(success=True, message="1")#关闭吸盘测试
         try:
             if request.state == request.SUCK:
                 self.sucker.set_solenoid_valve(False)

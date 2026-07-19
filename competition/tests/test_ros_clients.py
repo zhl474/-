@@ -16,6 +16,7 @@ def _load_ros_clients(monkeypatch):
     control = types.ModuleType("control")
     control.srv = types.ModuleType("control.srv")
     for name in (
+        "GetActualPose", "GetActualPoseRequest",
         "MoveArm", "MoveArmRequest", "RotateTool", "RotateToolRequest",
         "SetSuction", "SetSuctionRequest",
     ):
@@ -60,3 +61,14 @@ def test_move_arm_forwards_stability_wait_flag(monkeypatch):
     client.move_arm([1, 2, 3, 4, 5, 6], 40, wait_until_stable=True)
 
     assert [request.wait_until_stable for request in requests] == [False, True]
+
+
+def test_get_actual_pose_calls_read_only_control_service(monkeypatch):
+    module = _load_ros_clients(monkeypatch)
+    client = object.__new__(module.RobotClients)
+    response = types.SimpleNamespace(success=True, tcp_pose=[1] * 6, camera_pose=[2] * 6)
+    requests = []
+    client._get_actual_pose = lambda request: requests.append(request) or response
+
+    assert client.get_actual_pose() is response
+    assert len(requests) == 1

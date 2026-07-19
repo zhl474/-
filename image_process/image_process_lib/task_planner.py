@@ -22,6 +22,13 @@ class ObservedBlock:
     pick_surface_z_mm: float = 0.0
     # false 表示本次粗定位使用了无深度的像素比例回退，禁止按深度高度抓取。
     pick_surface_z_valid: bool = False
+    # 以下字段仅用于粗定位误差排查，保存高位识别到粗定位的原始链路。
+    high_detected_pixel_xy: Sequence[float] = (0.0, 0.0)
+    high_depth_sample_pixel_xy: Sequence[float] = (0.0, 0.0)
+    high_image_center_xy: Sequence[float] = (0.0, 0.0)
+    high_world_position: Sequence[float] = (0.0, 0.0, 0.0)
+    high_world_position_valid: bool = False
+    rough_localization_source: str = ""
 
 
 @dataclass(frozen=True)
@@ -32,6 +39,13 @@ class PlacementTarget:
     desired_angle_deg: float
     category: str
     observation_pose: Sequence[float]
+    # 以下字段仅用于粗定位误差排查，保存高位托盘格点的原始链路。
+    high_detected_pixel_xy: Sequence[float] = (0.0, 0.0)
+    high_depth_sample_pixel_xy: Sequence[float] = (0.0, 0.0)
+    high_image_center_xy: Sequence[float] = (0.0, 0.0)
+    high_world_position: Sequence[float] = (0.0, 0.0, 0.0)
+    high_world_position_valid: bool = False
+    rough_localization_source: str = ""
 
 
 @dataclass(frozen=True)
@@ -46,6 +60,19 @@ class TaskTarget:
     rotation_delta_deg: float
     pick_surface_z_mm: float
     pick_surface_z_valid: bool
+    # 抓取侧与摆放侧分别保留，避免任务分配后丢失高位原始定位数据。
+    pick_high_detected_pixel_xy: Sequence[float] = (0.0, 0.0)
+    pick_high_depth_sample_pixel_xy: Sequence[float] = (0.0, 0.0)
+    pick_high_image_center_xy: Sequence[float] = (0.0, 0.0)
+    pick_high_world_position: Sequence[float] = (0.0, 0.0, 0.0)
+    pick_high_world_position_valid: bool = False
+    pick_rough_localization_source: str = ""
+    place_high_detected_pixel_xy: Sequence[float] = (0.0, 0.0)
+    place_high_depth_sample_pixel_xy: Sequence[float] = (0.0, 0.0)
+    place_high_image_center_xy: Sequence[float] = (0.0, 0.0)
+    place_high_world_position: Sequence[float] = (0.0, 0.0, 0.0)
+    place_high_world_position_valid: bool = False
+    place_rough_localization_source: str = ""
 
 
 def load_task_layout(config_path: str) -> List[dict]:
@@ -175,6 +202,26 @@ def assign_blocks_to_targets(
                 ),
                 pick_surface_z_mm=float(block.pick_surface_z_mm),
                 pick_surface_z_valid=bool(block.pick_surface_z_valid),
+                pick_high_detected_pixel_xy=tuple(float(value) for value in block.high_detected_pixel_xy),
+                pick_high_depth_sample_pixel_xy=tuple(
+                    float(value) for value in block.high_depth_sample_pixel_xy
+                ),
+                pick_high_image_center_xy=tuple(float(value) for value in block.high_image_center_xy),
+                pick_high_world_position=tuple(float(value) for value in block.high_world_position),
+                pick_high_world_position_valid=bool(block.high_world_position_valid),
+                pick_rough_localization_source=str(block.rough_localization_source),
+                place_high_detected_pixel_xy=tuple(
+                    float(value) for value in target.high_detected_pixel_xy
+                ),
+                place_high_depth_sample_pixel_xy=tuple(
+                    float(value) for value in target.high_depth_sample_pixel_xy
+                ),
+                place_high_image_center_xy=tuple(
+                    float(value) for value in target.high_image_center_xy
+                ),
+                place_high_world_position=tuple(float(value) for value in target.high_world_position),
+                place_high_world_position_valid=bool(target.high_world_position_valid),
+                place_rough_localization_source=str(target.rough_localization_source),
             )
 
     expected_indices = sorted(target_by_index)

@@ -10,8 +10,8 @@ from competition_lib.visual_servo import (
 )
 
 
-def _response(found=True, dx=0.0, dy=0.0, message=""):
-    return SimpleNamespace(found=found, dx_px=dx, dy_px=dy, message=message)
+def _response(found=True, dx=0.0, dy=0.0, px=320.0, py=240.0, message=""):
+    return SimpleNamespace(found=found, px=px, py=py, dx_px=dx, dy_px=dy, message=message)
 
 
 def test_current_execution_and_servo_configs_are_valid():
@@ -73,7 +73,8 @@ def test_alignment_stops_after_consecutive_misses():
     assert "连续多帧" in result[3]
 
 
-def test_alignment_log_uses_the_specified_target_label(capsys):
+def test_alignment_writes_correction_event_without_terminal_detail(capsys):
+    events = []
     run_offset_visual_servo_alignment(
         lambda: _response(dx=3, dy=1),
         lambda *_args, **_kwargs: None,
@@ -87,9 +88,59 @@ def test_alignment_log_uses_the_specified_target_label(capsys):
         max_missed_frames=2,
         settle_sec=0,
         log_label="方块视觉伺服",
+        event_callback=events.append,
     )
 
-    assert "[方块视觉伺服] 第 1 轮误差=" in capsys.readouterr().out
+    assert capsys.readouterr().out == ""
+    assert len(events) == 1
+    assert events[0]["事件"] == "执行修正"
+    assert events[0]["伺服轮次"] == 1
+    assert events[0]["XY修正X毫米"] == 3.0
+    assert events[0]["低位图像中心X"] == 317.0
+
+
+def test_alignment_event_includes_low_target_and_camera_center_pixels():
+    events = []
+    run_offset_visual_servo_alignment(
+        lambda: _response(dx=3, dy=-2, px=323, py=238),
+        lambda *_args, **_kwargs: None,
+        [0, 0, 200, 0, 0, 0],
+        {"pixel_to_robot_matrix": [[1, 0], [0, 1]]},
+        speed=25,
+        error_threshold_px=1,
+        max_step_mm=5,
+        max_iter=1,
+        success_stable_frames=1,
+        max_missed_frames=2,
+        settle_sec=0,
+        event_callback=events.append,
+    )
+
+    assert events[0]["低位目标像素X"] == 323.0
+    assert events[0]["低位目标像素Y"] == 238.0
+    assert events[0]["低位图像中心X"] == 320.0
+    assert events[0]["低位图像中心Y"] == 240.0
+
+
+def test_alignment_emits_missing_target_event_before_failure():
+    events = []
+    result = run_offset_visual_servo_alignment(
+        lambda: _response(found=False, message="未识别"),
+        lambda *_args, **_kwargs: None,
+        [0, 0, 200, 0, 0, 0],
+        {"pixel_to_robot_matrix": [[1, 0], [0, 1]]},
+        speed=25,
+        error_threshold_px=2,
+        max_step_mm=5,
+        max_iter=5,
+        success_stable_frames=1,
+        max_missed_frames=2,
+        settle_sec=0,
+        event_callback=events.append,
+    )
+
+    assert result[0] is False
+    assert [event["事件"] for event in events] == ["目标丢失", "目标丢失"]
 
 
 def test_alignment_motion_requests_stability_wait():

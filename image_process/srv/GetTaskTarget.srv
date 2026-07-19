@@ -10,4 +10,16 @@ float64 detected_angle_deg
 float64 rotation_delta_deg
 float64 pick_surface_z_mm
 bool pick_surface_z_valid
+float64[2] pick_high_detected_pixel_xy
+float64[2] pick_high_depth_sample_pixel_xy
+float64[2] pick_high_image_center_xy
+float64[3] pick_high_world_position
+bool pick_high_world_position_valid
+string pick_rough_localization_source
+float64[2] place_high_detected_pixel_xy
+float64[2] place_high_depth_sample_pixel_xy
+float64[2] place_high_image_center_xy
+float64[3] place_high_world_position
+bool place_high_world_position_valid
+string place_rough_localization_source
 string message

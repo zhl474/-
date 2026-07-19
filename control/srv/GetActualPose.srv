@@ -1,0 +1,5 @@
+---
+bool success
+float64[6] tcp_pose
+float64[6] camera_pose
+string message

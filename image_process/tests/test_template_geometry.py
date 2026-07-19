@@ -838,6 +838,62 @@ def test_task_target_service_rejects_out_of_range_index(monkeypatch):
     assert "越界" in response.message
 
 
+def test_task_target_service_returns_high_localization_diagnostics(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_target_diagnostics")
+    processor = object.__new__(module.ImageProcessor)
+    processor.task_targets = [
+        types.SimpleNamespace(
+            pick_observation_pose=[1.0] * 6,
+            place_observation_pose=[2.0] * 6,
+            row=3.0,
+            col=4.0,
+            category="T",
+            detected_angle_deg=5.0,
+            rotation_delta_deg=6.0,
+            pick_surface_z_mm=7.0,
+            pick_surface_z_valid=True,
+            pick_high_detected_pixel_xy=(100.5, 200.5),
+            pick_high_depth_sample_pixel_xy=(100.0, 200.0),
+            pick_high_image_center_xy=(640.0, 360.0),
+            pick_high_world_position=(1.0, 2.0, 3.0),
+            pick_high_world_position_valid=True,
+            pick_rough_localization_source="depth",
+            place_high_detected_pixel_xy=(300.5, 400.5),
+            place_high_depth_sample_pixel_xy=(300.0, 400.0),
+            place_high_image_center_xy=(640.0, 360.0),
+            place_high_world_position=(4.0, 5.0, 6.0),
+            place_high_world_position_valid=True,
+            place_rough_localization_source="depth",
+        )
+    ]
+
+    response = processor.get_task_target(types.SimpleNamespace(index=0))
+
+    assert response.success is True
+    assert response.pick_high_detected_pixel_xy == [100.5, 200.5]
+    assert response.pick_high_world_position == [1.0, 2.0, 3.0]
+    assert response.pick_rough_localization_source == "depth"
+    assert response.place_high_detected_pixel_xy == [300.5, 400.5]
+    assert response.place_high_world_position == [4.0, 5.0, 6.0]
+
+
+def test_high_localization_diagnostic_marks_pixel_fallback_without_world_coordinate(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_fallback_diagnostics")
+
+    diagnostic = module.ImageProcessor.make_high_localization_diagnostic(
+        100.6,
+        200.4,
+        (720, 1280, 3),
+        [],
+        "fallback",
+    )
+
+    assert diagnostic["high_depth_sample_pixel_xy"] == (101.0, 200.0)
+    assert diagnostic["high_world_position_valid"] is False
+    assert diagnostic["high_world_position"] == (0.0, 0.0, 0.0)
+    assert diagnostic["rough_localization_source"] == "fallback"
+
+
 def test_prepare_task_clears_previous_result_when_image_is_missing(monkeypatch):
     module = _load_process_module_with_stubs(monkeypatch, "process_prepare_no_image")
     processor = object.__new__(module.ImageProcessor)
@@ -880,7 +936,10 @@ def test_competition_module_imports_with_service_stubs(monkeypatch):
 
     control = _install_module_stub(monkeypatch, "control")
     control.srv = _install_module_stub(monkeypatch, "control.srv")
-    for name in ("MoveArm", "MoveArmRequest", "RotateTool", "RotateToolRequest", "SetSuction", "SetSuctionRequest"):
+    for name in (
+        "GetActualPose", "GetActualPoseRequest",
+        "MoveArm", "MoveArmRequest", "RotateTool", "RotateToolRequest", "SetSuction", "SetSuctionRequest",
+    ):
         setattr(control.srv, name, type(name, (), {}))
 
     image_process = _install_module_stub(monkeypatch, "image_process")

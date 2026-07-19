@@ -414,6 +414,26 @@ class ImageProcessor:
         """兼容节点内部调用，实际粗定位由 RoughLocalizer 完成。"""
         return self.rough_localizer.locate(px, py, image_shape, label, height_offset_mm)
 
+    @staticmethod
+    def make_high_localization_diagnostic(px, py, image_shape, world_position, localization_source):
+        """整理高位识别到粗定位的原始数据，供主进程输出诊断日志。"""
+        height, width = image_shape[:2]
+        world = np.asarray(world_position, dtype=float)
+        world_valid = (
+            str(localization_source) == "depth"
+            and world.shape == (3,)
+            and np.all(np.isfinite(world))
+        )
+        return {
+            "high_detected_pixel_xy": (float(px), float(py)),
+            # 深度服务内部会对检测像素四舍五入，此处单独保存以便排查一像素误差。
+            "high_depth_sample_pixel_xy": (float(round(float(px))), float(round(float(py)))),
+            "high_image_center_xy": (float(width) / 2.0, float(height) / 2.0),
+            "high_world_position": tuple(world.tolist()) if world_valid else (0.0, 0.0, 0.0),
+            "high_world_position_valid": bool(world_valid),
+            "rough_localization_source": str(localization_source),
+        }
+
     def compute_board_theta_from_grid_points(self, grid_points):
         """只根据托盘四角像素计算托盘旋转角，不再依赖九点坐标标定。"""
         left_top = grid_points[BOARD_ROW_COUNT][1]
@@ -479,6 +499,13 @@ class ImageProcessor:
                 self.block_servo_height_offset_mm,
             )
             has_valid_surface_z = localization_source == "depth" and len(world_position) == 3
+            diagnostic = self.make_high_localization_diagnostic(
+                block["px"],
+                block["py"],
+                image.shape,
+                world_position,
+                localization_source,
+            )
             counts[category] += 1
             observed_blocks.append(
                 ObservedBlock(
@@ -487,6 +514,7 @@ class ImageProcessor:
                     detected_angle_deg=float(block["theta"]),
                     pick_surface_z_mm=float(world_position[2]) if has_valid_surface_z else 0.0,
                     pick_surface_z_valid=has_valid_surface_z,
+                    **diagnostic,
                 )
             )
         if not observed_blocks:
@@ -518,12 +546,19 @@ class ImageProcessor:
                 float(item["row"]),
                 float(item["col"]),
             )
-            servo_pose, _, _ = self.make_depth_first_servo_pose(
+            servo_pose, localization_source, world_position = self.make_depth_first_servo_pose(
                 target_point[0],
                 target_point[1],
                 image_shape,
                 f"托盘目标 {item['index']}",
                 self.board_servo_height_offset_mm,
+            )
+            diagnostic = self.make_high_localization_diagnostic(
+                target_point[0],
+                target_point[1],
+                image_shape,
+                world_position,
+                localization_source,
             )
             targets.append(
                 PlacementTarget(
@@ -533,6 +568,7 @@ class ImageProcessor:
                     desired_angle_deg=float(item["angle_deg"]),
                     category=normalize_category_name(item["category"]),
                     observation_pose=tuple(servo_pose),
+                    **diagnostic,
                 )
             )
         return targets
@@ -583,6 +619,18 @@ class ImageProcessor:
                 rotation_delta_deg=0.0,
                 pick_surface_z_mm=0.0,
                 pick_surface_z_valid=False,
+                pick_high_detected_pixel_xy=[0.0] * 2,
+                pick_high_depth_sample_pixel_xy=[0.0] * 2,
+                pick_high_image_center_xy=[0.0] * 2,
+                pick_high_world_position=[0.0] * 3,
+                pick_high_world_position_valid=False,
+                pick_rough_localization_source="",
+                place_high_detected_pixel_xy=[0.0] * 2,
+                place_high_depth_sample_pixel_xy=[0.0] * 2,
+                place_high_image_center_xy=[0.0] * 2,
+                place_high_world_position=[0.0] * 3,
+                place_high_world_position_valid=False,
+                place_rough_localization_source="",
                 message=f"任务序号越界: {index}，当前任务数: {len(self.task_targets)}",
             )
         target = self.task_targets[index]
@@ -597,6 +645,18 @@ class ImageProcessor:
             rotation_delta_deg=target.rotation_delta_deg,
             pick_surface_z_mm=target.pick_surface_z_mm,
             pick_surface_z_valid=target.pick_surface_z_valid,
+            pick_high_detected_pixel_xy=list(target.pick_high_detected_pixel_xy),
+            pick_high_depth_sample_pixel_xy=list(target.pick_high_depth_sample_pixel_xy),
+            pick_high_image_center_xy=list(target.pick_high_image_center_xy),
+            pick_high_world_position=list(target.pick_high_world_position),
+            pick_high_world_position_valid=target.pick_high_world_position_valid,
+            pick_rough_localization_source=target.pick_rough_localization_source,
+            place_high_detected_pixel_xy=list(target.place_high_detected_pixel_xy),
+            place_high_depth_sample_pixel_xy=list(target.place_high_depth_sample_pixel_xy),
+            place_high_image_center_xy=list(target.place_high_image_center_xy),
+            place_high_world_position=list(target.place_high_world_position),
+            place_high_world_position_valid=target.place_high_world_position_valid,
+            place_rough_localization_source=target.place_rough_localization_source,
             message="读取任务目标成功",
         )
 

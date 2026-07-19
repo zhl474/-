@@ -16,6 +16,7 @@ def _load_controller(monkeypatch):
     rospy = types.ModuleType("rospy")
     rospy.logerr = lambda *_args, **_kwargs: None
     rospy.loginfo = lambda *_args, **_kwargs: None
+    rospy.logwarn = lambda *_args, **_kwargs: None
     rospy.is_shutdown = lambda: False
     monkeypatch.setitem(sys.modules, "rospy", rospy)
 
@@ -26,9 +27,9 @@ def _load_controller(monkeypatch):
 
     control = types.ModuleType("control")
     control.srv = types.ModuleType("control.srv")
-    for name in ("MoveArm", "RotateTool", "SetSuction"):
+    for name in ("GetActualPose", "MoveArm", "RotateTool", "SetSuction"):
         setattr(control.srv, name, object)
-    for name in ("MoveArmResponse", "RotateToolResponse", "SetSuctionResponse"):
+    for name in ("GetActualPoseResponse", "MoveArmResponse", "RotateToolResponse", "SetSuctionResponse"):
         setattr(control.srv, name, _Response)
     monkeypatch.setitem(sys.modules, "control", control)
     monkeypatch.setitem(sys.modules, "control.srv", control.srv)
@@ -88,6 +89,37 @@ def test_non_finite_pose_never_calls_robot(monkeypatch):
 
     assert response.success is False
     assert calls == []
+
+
+def test_get_actual_pose_returns_tcp_and_camera_pose(monkeypatch):
+    module = _load_controller(monkeypatch)
+    tcp_pose = [-250.0, 0.0, 200.0, 180.0, 0.0, 90.0]
+    camera_pose = [-220.0, 3.0, 250.0, 180.0, 0.0, 90.0]
+    node = object.__new__(module.ControlNode)
+    node.arm = types.SimpleNamespace(
+        arm=types.SimpleNamespace(GetActualTCPPose=lambda: (0, list(tcp_pose))),
+        get_camera_pose=lambda: (True, list(camera_pose)),
+    )
+
+    response = node.get_actual_pose(None)
+
+    assert response.success is True
+    assert response.tcp_pose == tcp_pose
+    assert response.camera_pose == camera_pose
+
+
+def test_get_actual_pose_failure_returns_unsuccessful_response(monkeypatch):
+    module = _load_controller(monkeypatch)
+    node = object.__new__(module.ControlNode)
+    node.arm = types.SimpleNamespace(
+        arm=types.SimpleNamespace(GetActualTCPPose=lambda: (0, [0.0] * 6)),
+        get_camera_pose=lambda: (False, None),
+    )
+
+    response = node.get_actual_pose(None)
+
+    assert response.success is False
+    assert "相机光心" in response.message
 
 
 def test_wait_until_arm_stable_uses_motion_speed_and_pose(monkeypatch):

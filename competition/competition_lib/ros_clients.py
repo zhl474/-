@@ -4,7 +4,16 @@ import time
 
 import rospy
 
-from control.srv import MoveArm, MoveArmRequest, RotateTool, RotateToolRequest, SetSuction, SetSuctionRequest
+from control.srv import (
+    GetActualPose,
+    GetActualPoseRequest,
+    MoveArm,
+    MoveArmRequest,
+    RotateTool,
+    RotateToolRequest,
+    SetSuction,
+    SetSuctionRequest,
+)
 from image_process.srv import (
     DetectBlockOffset,
     DetectBlockOffsetRequest,
@@ -23,6 +32,7 @@ SERVICE_NAMES = (
     "/perception/block_offset",
     "/perception/board_offset",
     "/control/move_arm",
+    "/control/get_actual_pose",
     "/control/rotate_tool",
     "/control/set_suction",
 )
@@ -41,6 +51,7 @@ class RobotClients:
         self._block_offset = rospy.ServiceProxy("/perception/block_offset", DetectBlockOffset)
         self._board_offset = rospy.ServiceProxy("/perception/board_offset", DetectBoardOffset)
         self._move_arm = rospy.ServiceProxy("/control/move_arm", MoveArm)
+        self._get_actual_pose = rospy.ServiceProxy("/control/get_actual_pose", GetActualPose)
         self._rotate_tool = rospy.ServiceProxy("/control/rotate_tool", RotateTool)
         self._set_suction = rospy.ServiceProxy("/control/set_suction", SetSuction)
 
@@ -83,6 +94,10 @@ class RobotClients:
         if wait_sec > 0:
             time.sleep(wait_sec)
         return response
+
+    def get_actual_pose(self):
+        """读取控制器当前实测 TCP 与相机光心位姿，仅用于定位诊断。"""
+        return self._get_actual_pose(GetActualPoseRequest())
 
     def rotate_tool(self, angle_deg):
         request = RotateToolRequest(angle_deg=float(angle_deg))
