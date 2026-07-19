@@ -15,6 +15,7 @@ DEFAULT_VISUAL_SERVO_CONFIG_PATH = os.path.join(PACKAGE_DIR, "config", "visual_s
 
 @dataclass(frozen=True)
 class ExecutionConfig:
+    calibration_mode: bool
     shooting_pose: tuple
     arm_speed: int
     pick_speed: int
@@ -43,6 +44,13 @@ def _finite_pose(values: Sequence[float], name: str) -> tuple:
     return tuple(float(value) for value in pose)
 
 
+def _strict_bool(value, name: str) -> bool:
+    """严格读取 YAML 布尔值，避免字符串 "false" 被判定为真。"""
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} 必须是 YAML 布尔值 true 或 false")
+    return value
+
+
 def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> ExecutionConfig:
     with open(config_path, "r", encoding="utf-8") as config_file:
         data = yaml.safe_load(config_file) or {}
@@ -50,6 +58,7 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
     servo = data.get("servo", {})
     motor = data.get("tool_motor", {})
     config = ExecutionConfig(
+        calibration_mode=_strict_bool(data.get("calibration_mode", False), "calibration_mode"),
         shooting_pose=_finite_pose(data.get("shooting_pose"), "shooting_pose"),
         arm_speed=int(motion["arm_speed"]),
         pick_speed=int(motion["pick_speed"]),

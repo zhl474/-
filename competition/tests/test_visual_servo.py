@@ -27,10 +27,42 @@ def test_current_execution_and_servo_configs_are_valid():
     assert execution.arm_speed > 0
     assert execution.servo_speed > 0
     assert execution.minimum_tcp_z_mm == 165.0
+    assert execution.calibration_mode is False
     assert len(execution.shooting_pose) == 6
     assert np.asarray(visual["pixel_to_robot_matrix"]).shape == (2, 2)
     assert "block_servo_height_offset_mm" not in visual
     assert "board_servo_height_offset_mm" not in visual
+
+
+@pytest.mark.parametrize("calibration_mode", [False, True])
+def test_execution_config_reads_strict_boolean_calibration_mode(tmp_path, calibration_mode):
+    config_data = yaml.safe_load(
+        Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
+    )
+    config_data["calibration_mode"] = calibration_mode
+    config_path = tmp_path / "运行模式.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    assert load_execution_config(config_path).calibration_mode is calibration_mode
+
+
+@pytest.mark.parametrize("invalid_value", ["false", "true", 0, 1, None])
+def test_execution_config_rejects_nonboolean_calibration_mode(tmp_path, invalid_value):
+    config_data = yaml.safe_load(
+        Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
+    )
+    config_data["calibration_mode"] = invalid_value
+    config_path = tmp_path / "错误运行模式.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="calibration_mode 必须是 YAML 布尔值"):
+        load_execution_config(config_path)
 
 
 @pytest.mark.parametrize("invalid_minimum_z", [0.0, -1.0])

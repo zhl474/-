@@ -38,6 +38,7 @@ class _FakeClients:
         self.moves = []
         self.suction_states = []
         self.prepare_requests = []
+        self.actual_pose_calls = 0
 
     def get_task_target(self, _index):
         return types.SimpleNamespace(
@@ -78,6 +79,7 @@ class _FakeClients:
         return types.SimpleNamespace(success=True, task_count=1, message="成功")
 
     def get_actual_pose(self):
+        self.actual_pose_calls += 1
         return types.SimpleNamespace(
             success=True,
             tcp_pose=[1, 2, 3, -180, 0, 90],
@@ -85,7 +87,9 @@ class _FakeClients:
         )
 
 
-def test_pick_alignment_failure_never_descends_or_starts_suction(monkeypatch, tmp_path):
+def test_formal_pick_alignment_failure_never_writes_csv_or_reads_actual_pose(
+    monkeypatch, tmp_path
+):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
     runner = module.TaskRunner(
@@ -102,8 +106,9 @@ def test_pick_alignment_failure_never_descends_or_starts_suction(monkeypatch, tm
     assert runner.state is module.TaskState.FAILED
     assert clients.suction_states == []
     assert len(clients.moves) == 1
-    rows = _read_csv_rows(tmp_path / "方块视觉伺服.csv")
-    assert [row["事件"] for row in rows] == ["伺服开始", "伺服失败"]
+    assert clients.actual_pose_calls == 0
+    assert not (tmp_path / "方块视觉伺服.csv").exists()
+    assert not (tmp_path / "托盘视觉伺服.csv").exists()
 
 
 def test_pick_uses_surface_height_and_configured_offset(monkeypatch):
@@ -248,12 +253,12 @@ def test_prepare_waits_for_shooting_pose_to_stabilize(monkeypatch):
     assert clients.prepare_requests == [(True, [1, 2])]
 
 
-def test_execute_all_writes_block_and_board_csv_diagnostics(monkeypatch, tmp_path, capsys):
+def test_calibration_mode_writes_one_final_row_per_target(monkeypatch, tmp_path, capsys):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=load_execution_config(),
+        execution_config=replace(load_execution_config(), calibration_mode=True),
         visual_config=load_visual_servo_config(),
         servo_csv_output_dir=tmp_path,
     )
@@ -268,64 +273,78 @@ def test_execute_all_writes_block_and_board_csv_diagnostics(monkeypatch, tmp_pat
     runner.execute_all(1)
 
     output = capsys.readouterr().out
-    assert "视觉伺服 CSV 已覆盖创建" in output
-    assert "最终低位目标像素" not in output
+    assert "当前模式：标定采集模式" in output
+    assert "标定 CSV 已覆盖创建" in output
     block_rows = _read_csv_rows(tmp_path / "方块视觉伺服.csv")
     board_rows = _read_csv_rows(tmp_path / "托盘视觉伺服.csv")
-    assert [row["事件"] for row in block_rows] == ["伺服开始", "伺服成功"]
-    assert [row["事件"] for row in board_rows] == ["伺服开始", "伺服成功"]
-    block_result = block_rows[-1]
-    assert block_result["高位检测像素X"] == "120.5"
-    assert block_result["高位世界坐标X"] == ""
-    assert block_result["高位世界坐标有效"] == "False"
-    assert block_result["粗定位来源"] == "tcp_calibration"
-    assert block_result["低位目标像素X"] == "323.0"
-    assert block_result["低位图像中心X"] == "320.0"
-    assert block_result["实测TCP位置X"] == "1.0"
-    assert block_result["实测相机光心位置X"] == "4.0"
-    assert board_rows[-1]["高位检测像素X"] == "320.5"
+    assert [row["事件"] for row in block_rows] == ["伺服成功"]
+    assert [row["事件"] for row in board_rows] == ["伺服成功"]
+    assert block_rows[0]["高位检测像素X"] == "120.5"
+    assert block_rows[0]["实测TCP位置X"] == "1.0"
+    assert board_rows[0]["高位检测像素X"] == "320.5"
+    assert clients.actual_pose_calls == 2
+    assert clients.suction_states == [module.RobotClients.OFF]
 
 
-def test_execute_all_records_correction_and_stable_frame_rows(monkeypatch, tmp_path):
+def test_formal_mode_uses_suction_without_csv_or_actual_pose(monkeypatch, tmp_path):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
-    block_responses = iter([
-        types.SimpleNamespace(found=True, px=323.0, py=238.0, dx_px=3.0, dy_px=-2.0, message="修正"),
-        types.SimpleNamespace(found=True, px=320.0, py=240.0, dx_px=0.0, dy_px=0.0, message="对准"),
-    ])
-    board_responses = iter([
-        types.SimpleNamespace(found=True, px=317.0, py=241.0, dx_px=-3.0, dy_px=1.0, message="修正"),
-        types.SimpleNamespace(found=True, px=320.0, py=240.0, dx_px=0.0, dy_px=0.0, message="对准"),
-    ])
-    clients.detect_block_offset = lambda *_args: next(block_responses)
-    clients.detect_board_offset = lambda *_args: next(board_responses)
-    execution_config = replace(
-        load_execution_config(),
-        error_threshold_px=1.0,
-        success_stable_frames=1,
-        max_iter=2,
-        settle_sec=0.0,
-    )
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=execution_config,
+        execution_config=load_execution_config(),
         visual_config=load_visual_servo_config(),
         servo_csv_output_dir=tmp_path,
+    )
+    runner._align = lambda *_args, **_kwargs: (
+        True,
+        [1, 2, 200, -180, 0, 90],
+        None,
+        "成功",
     )
 
     runner.execute_all(1)
 
-    block_rows = _read_csv_rows(tmp_path / "方块视觉伺服.csv")
-    board_rows = _read_csv_rows(tmp_path / "托盘视觉伺服.csv")
-    assert [row["事件"] for row in block_rows] == ["伺服开始", "执行修正", "稳定帧", "伺服成功"]
-    assert [row["事件"] for row in board_rows] == ["伺服开始", "执行修正", "稳定帧", "伺服成功"]
-    assert block_rows[1]["XY修正X毫米"]
-    assert block_rows[1]["低位图像中心X"] == "320.0"
-    assert block_rows[1]["图像服务耗时毫秒"]
-    assert board_rows[1]["低位图像中心Y"] == "240.0"
+    assert clients.suction_states == [
+        module.RobotClients.SUCK,
+        module.RobotClients.BLOW,
+        module.RobotClients.OFF,
+    ]
+    assert clients.actual_pose_calls == 0
+    assert not (tmp_path / "方块视觉伺服.csv").exists()
+    assert not (tmp_path / "托盘视觉伺服.csv").exists()
 
 
-def test_servo_finish_pose_read_failure_writes_message_without_raising(monkeypatch):
+def test_calibration_and_formal_modes_keep_same_motion_sequence(monkeypatch, tmp_path):
+    module = _load_task_runner(monkeypatch)
+    formal_clients = _FakeClients()
+    calibration_clients = _FakeClients()
+
+    def build_runner(clients, calibration_mode, output_dir):
+        runner = module.TaskRunner(
+            clients=clients,
+            execution_config=replace(
+                load_execution_config(),
+                calibration_mode=calibration_mode,
+            ),
+            visual_config=load_visual_servo_config(),
+            servo_csv_output_dir=output_dir,
+        )
+        runner._align = lambda *_args, **_kwargs: (
+            True,
+            [1, 2, 200, -180, 0, 90],
+            None,
+            "成功",
+        )
+        return runner
+
+    build_runner(formal_clients, False, tmp_path / "formal").execute_all(1)
+    build_runner(calibration_clients, True, tmp_path / "calibration").execute_all(1)
+
+    assert calibration_clients.moves == formal_clients.moves
+    assert calibration_clients.suction_states == [module.RobotClients.OFF]
+
+
+def test_servo_finish_pose_read_failure_returns_blank_xyz(monkeypatch):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
     clients.get_actual_pose = lambda: (_ for _ in ()).throw(RuntimeError("控制器离线"))
@@ -337,33 +356,57 @@ def test_servo_finish_pose_read_failure_writes_message_without_raising(monkeypat
     result = runner._read_actual_pose_for_csv()
 
     assert result["实测TCP位置X"] == ""
-    assert result["实测相机光心位置X"] == ""
-    assert result["实测位姿读取信息"] == "读取异常: 控制器离线"
+    assert result["实测TCP位置Y"] == ""
+    assert result["实测TCP位置Z"] == ""
 
 
-def test_tcp_calibration_world_coordinates_are_blank_in_csv(monkeypatch, tmp_path):
+def test_calibration_failure_writes_one_failure_row_and_closes_csv(monkeypatch, tmp_path):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
-    target = clients.get_task_target(0)
-    target.pick_high_world_position_valid = False
-    target.pick_rough_localization_source = "tcp_calibration"
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=load_execution_config(),
+        execution_config=replace(load_execution_config(), calibration_mode=True),
         visual_config=load_visual_servo_config(),
         servo_csv_output_dir=tmp_path,
     )
-    runner._align = lambda *_args, **_kwargs: (True, [0, 0, 200, -180, 0, 90], None, "成功")
-    clients.get_task_target = lambda _index: target
+    runner._align = lambda *_args, **_kwargs: (False, [0, 0, 200, -180, 0, 90], None, "未识别")
 
-    runner.execute_all(1)
+    with pytest.raises(RuntimeError, match="方块视觉伺服失败"):
+        runner.execute_all(1)
 
-    row = _read_csv_rows(tmp_path / "方块视觉伺服.csv")[0]
-    assert row["高位世界坐标有效"] == "False"
-    assert row["粗定位来源"] == "tcp_calibration"
-    assert row["高位世界坐标X"] == ""
-    assert row["高位世界坐标Y"] == ""
-    assert row["高位世界坐标Z"] == ""
+    block_rows = _read_csv_rows(tmp_path / "方块视觉伺服.csv")
+    board_rows = _read_csv_rows(tmp_path / "托盘视觉伺服.csv")
+    assert [row["事件"] for row in block_rows] == ["伺服失败"]
+    assert board_rows == []
+    assert clients.suction_states == [module.RobotClients.OFF]
+    assert clients.actual_pose_calls == 1
+    assert runner.servo_csv_logger.is_open is False
+
+
+def test_calibration_mode_refuses_motion_when_suction_off_fails(monkeypatch, tmp_path):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+
+    def fail_to_turn_off(state):
+        clients.suction_states.append(state)
+        raise RuntimeError("吸盘无法关闭")
+
+    clients.set_suction = fail_to_turn_off
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=replace(load_execution_config(), calibration_mode=True),
+        visual_config=load_visual_servo_config(),
+        servo_csv_output_dir=tmp_path,
+    )
+
+    with pytest.raises(RuntimeError, match="吸盘无法关闭"):
+        runner.execute_all(1)
+
+    assert clients.suction_states == [module.RobotClients.OFF]
+    assert clients.moves == []
+    assert clients.actual_pose_calls == 0
+    assert runner.state is module.TaskState.FAILED
+    assert runner.servo_csv_logger.is_open is False
 
 
 def test_interactive_prepare_retries_after_failed_high_localization(monkeypatch):

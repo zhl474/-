@@ -27,6 +27,10 @@
 - `image_process/config/*_pixel_to_tcp_calibration.yaml`：方块和托盘各自的正式部署标定。
 - `image_process/config/task_layout.yaml`：基础任务唯一摆放表。
 
+`execution.yaml` 根节点的 `calibration_mode` 是抓放/标定唯一模式开关。
+`false` 为正式抓放，不读写标定 CSV；`true` 为标定采集，执行相同运动和视觉
+伺服，但全程关闭吸气/吹气，并覆盖记录方块和托盘的精简标定 CSV。
+
 高位粗定位固定使用对象各自的像素到 TCP 标定。标定样本凸包只用于分析采样覆盖，
 不作为正式抓取范围；运行时由图像输入有效性、预测 TCP 安全范围和最终抓取高度把关。默认
 `calibrated_height` 由方块观察 TCP Z 减去 `192 mm` 推导表面高度；需要深度时可通过
@@ -50,5 +54,14 @@ roslaunch competition competition.launch
 ```bash
 /home/zhl/fr3env/fr3env/bin/python tools/hardware/测试舵机.py
 ```
+
+像素到 TCP 标定脚本一次分析方块和托盘 CSV：
+
+```bash
+/home/zhl/fr3env/fr3env/bin/python tools/vision/pixel_to_tcp_calibration_analysis.py
+```
+
+产物位于 `pixel_to_tcp_calibration_results/`。只有数据数量、完整性、TCP 平面和映射拟合
+检查通过时才生成标定 YAML；确认报告后再手动复制到 `image_process/config/`。
 
 硬件回归顺序固定为：仅启动节点、高位识别不运动、单块低速抓放、完整基础任务、完整进阶任务。视觉伺服失败后禁止继续下探；持块摆放失败时保持吸盘状态并停止自动运动。
