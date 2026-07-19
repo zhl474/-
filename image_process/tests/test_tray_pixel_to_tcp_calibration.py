@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from competition_lib.pixel_to_tcp_calibration import load_pixel_to_tcp_calibration
+from image_process_lib.pixel_to_tcp_calibration import load_pixel_to_tcp_calibration
 from tools.vision.visual_servo_geometry_analysis import TRAY_ANALYSIS_SPEC, run_geometry_analysis
 
 
@@ -65,11 +65,15 @@ def test_tray_analysis_outputs_grid_diagnostics_and_subject_yaml(tmp_path):
 
     calibration_path = output_dir / "托盘像素到TCP标定结果.yaml"
     grid_error_path = output_dir / "托盘格点OOF误差.csv"
-    calibration = load_pixel_to_tcp_calibration(calibration_path)
+    calibration = load_pixel_to_tcp_calibration(
+        calibration_path,
+        expected_subject="tray",
+    )
     grid_errors = pd.read_csv(grid_error_path, encoding="utf-8-sig")
 
     assert calibration.model_name == "affine"
     assert calibration.metadata["calibration_subject"] == "tray"
     assert calibration.metadata["metrics"]["sample_count"] == 34
+    assert calibration.metadata["coverage"]["extrapolation_policy"] == "diagnostic_only"
     assert {"托盘行", "托盘列", "affine_OOF三维误差"}.issubset(grid_errors.columns)
     assert len(grid_errors) == 34

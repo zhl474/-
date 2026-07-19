@@ -37,6 +37,7 @@ class _FakeClients:
     def __init__(self):
         self.moves = []
         self.suction_states = []
+        self.prepare_requests = []
 
     def get_task_target(self, _index):
         return types.SimpleNamespace(
@@ -50,17 +51,17 @@ class _FakeClients:
             pick_surface_z_mm=180.0,
             pick_surface_z_valid=True,
             pick_high_detected_pixel_xy=[120.5, 220.5],
-            pick_high_depth_sample_pixel_xy=[120.0, 220.0],
+            pick_high_depth_sample_pixel_xy=[0.0, 0.0],
             pick_high_image_center_xy=[640.0, 360.0],
-            pick_high_world_position=[-100.0, 20.0, 180.0],
-            pick_high_world_position_valid=True,
-            pick_rough_localization_source="depth",
+            pick_high_world_position=[0.0, 0.0, 0.0],
+            pick_high_world_position_valid=False,
+            pick_rough_localization_source="tcp_calibration",
             place_high_detected_pixel_xy=[320.5, 420.5],
-            place_high_depth_sample_pixel_xy=[320.0, 420.0],
+            place_high_depth_sample_pixel_xy=[0.0, 0.0],
             place_high_image_center_xy=[640.0, 360.0],
-            place_high_world_position=[-200.0, 30.0, 160.0],
-            place_high_world_position_valid=True,
-            place_rough_localization_source="depth",
+            place_high_world_position=[0.0, 0.0, 0.0],
+            place_high_world_position_valid=False,
+            place_rough_localization_source="tcp_calibration",
         )
 
     def move_arm(self, pose, speed, wait_sec=0.0, wait_until_stable=False):
@@ -71,6 +72,10 @@ class _FakeClients:
 
     def set_suction(self, state):
         self.suction_states.append(state)
+
+    def prepare_task(self, advanced=False, place_order=()):
+        self.prepare_requests.append((advanced, list(place_order)))
+        return types.SimpleNamespace(success=True, task_count=1, message="成功")
 
     def get_actual_pose(self):
         return types.SimpleNamespace(
@@ -101,7 +106,7 @@ def test_pick_alignment_failure_never_descends_or_starts_suction(monkeypatch, tm
     assert [row["事件"] for row in rows] == ["伺服开始", "伺服失败"]
 
 
-def test_pick_uses_depth_surface_height_and_configured_offset(monkeypatch):
+def test_pick_uses_surface_height_and_configured_offset(monkeypatch):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
     execution_config = replace(load_execution_config(), pick_surface_offset_mm=-2.5)
@@ -140,7 +145,7 @@ def test_place_keeps_dynamic_observation_height_and_directly_releases(monkeypatc
     assert not hasattr(execution_config, "place_lift_step_mm")
 
 
-def test_pick_rejects_missing_depth_height_before_moving(monkeypatch):
+def test_pick_rejects_missing_surface_height_before_moving(monkeypatch):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
     target = clients.get_task_target(0)
@@ -151,11 +156,96 @@ def test_pick_rejects_missing_depth_height_before_moving(monkeypatch):
         visual_config=load_visual_servo_config(),
     )
 
-    with pytest.raises(RuntimeError, match="缺少有效深度高度"):
+    with pytest.raises(RuntimeError, match="缺少有效抓取表面高度"):
         runner._pick(target)
 
     assert clients.moves == []
     assert clients.suction_states == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("pick_observation_pose", [0, 0, float("nan"), -180, 0, 90], "方块观察位"),
+        ("pick_observation_pose", [0, 0, 164.9, -180, 0, 90], "低于 TCP 安全下限"),
+        ("pick_surface_z_mm", float("inf"), "方块抓取表面高度"),
+        ("pick_surface_z_mm", 2.0, "最终抓取位"),
+    ],
+)
+def test_pick_rejects_invalid_pose_or_height_before_moving(
+    monkeypatch, field, value, message
+):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    target = clients.get_task_target(0)
+    setattr(target, field, value)
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=load_execution_config(),
+        visual_config=load_visual_servo_config(),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        runner._pick(target)
+
+    assert clients.moves == []
+    assert clients.suction_states == []
+
+
+def test_place_rejects_low_observation_height_before_moving(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    target = clients.get_task_target(0)
+    target.place_observation_pose[2] = 160.0
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=load_execution_config(),
+        visual_config=load_visual_servo_config(),
+    )
+
+    with pytest.raises(RuntimeError, match="托盘观察位.*低于 TCP 安全下限"):
+        runner._place(target)
+
+    assert clients.moves == []
+    assert clients.suction_states == []
+
+
+def test_place_rejects_low_aligned_release_height_before_final_move(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=load_execution_config(),
+        visual_config=load_visual_servo_config(),
+    )
+    runner._align = lambda *_args, **_kwargs: (
+        True,
+        [11, 12, 160, -180, 0, 90],
+        None,
+        "成功",
+    )
+
+    with pytest.raises(RuntimeError, match="最终摆放位.*低于 TCP 安全下限"):
+        runner._place(clients.get_task_target(0))
+
+    assert len(clients.moves) == 1
+    assert clients.suction_states == []
+
+
+def test_prepare_waits_for_shooting_pose_to_stabilize(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=load_execution_config(),
+        visual_config=load_visual_servo_config(),
+    )
+
+    response = runner.prepare(advanced=True, place_order=[1, 2])
+
+    assert response.success is True
+    assert clients.moves[0][3] is True
+    assert clients.prepare_requests == [(True, [1, 2])]
 
 
 def test_execute_all_writes_block_and_board_csv_diagnostics(monkeypatch, tmp_path, capsys):
@@ -186,8 +276,9 @@ def test_execute_all_writes_block_and_board_csv_diagnostics(monkeypatch, tmp_pat
     assert [row["事件"] for row in board_rows] == ["伺服开始", "伺服成功"]
     block_result = block_rows[-1]
     assert block_result["高位检测像素X"] == "120.5"
-    assert block_result["高位世界坐标X"] == "-100.0"
-    assert block_result["粗定位来源"] == "depth"
+    assert block_result["高位世界坐标X"] == ""
+    assert block_result["高位世界坐标有效"] == "False"
+    assert block_result["粗定位来源"] == "tcp_calibration"
     assert block_result["低位目标像素X"] == "323.0"
     assert block_result["低位图像中心X"] == "320.0"
     assert block_result["实测TCP位置X"] == "1.0"
@@ -250,12 +341,12 @@ def test_servo_finish_pose_read_failure_writes_message_without_raising(monkeypat
     assert result["实测位姿读取信息"] == "读取异常: 控制器离线"
 
 
-def test_fallback_world_coordinates_are_blank_in_csv(monkeypatch, tmp_path):
+def test_tcp_calibration_world_coordinates_are_blank_in_csv(monkeypatch, tmp_path):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
     target = clients.get_task_target(0)
     target.pick_high_world_position_valid = False
-    target.pick_rough_localization_source = "fallback"
+    target.pick_rough_localization_source = "tcp_calibration"
     runner = module.TaskRunner(
         clients=clients,
         execution_config=load_execution_config(),
@@ -269,13 +360,13 @@ def test_fallback_world_coordinates_are_blank_in_csv(monkeypatch, tmp_path):
 
     row = _read_csv_rows(tmp_path / "方块视觉伺服.csv")[0]
     assert row["高位世界坐标有效"] == "False"
-    assert row["粗定位来源"] == "fallback"
+    assert row["粗定位来源"] == "tcp_calibration"
     assert row["高位世界坐标X"] == ""
     assert row["高位世界坐标Y"] == ""
     assert row["高位世界坐标Z"] == ""
 
 
-def test_interactive_prepare_retries_after_failed_rough_localization(monkeypatch):
+def test_interactive_prepare_retries_after_failed_high_localization(monkeypatch):
     module = _load_task_runner(monkeypatch)
     runner = module.TaskRunner(
         clients=_FakeClients(),

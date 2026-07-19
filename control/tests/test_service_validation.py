@@ -288,3 +288,47 @@ def test_move_arm_skips_stability_wait_when_not_requested(monkeypatch):
     assert response.success is True
     assert calls == ["set_speed", "MoveL"]
     assert log_calls == []
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_calls", "expected_message"),
+    [
+        (0, [("电磁阀", False), ("气泵", True)], "吸盘开始吸气"),
+        (1, [("电磁阀", True), ("气泵", True)], "吸盘开始喷气"),
+        (2, [("电磁阀", False), ("气泵", False)], "吸盘已关闭"),
+    ],
+)
+def test_set_suction_executes_real_hardware_sequence(
+    monkeypatch, state, expected_calls, expected_message
+):
+    module = _load_controller(monkeypatch)
+    calls = []
+    node = object.__new__(module.ControlNode)
+    node.sucker = types.SimpleNamespace(
+        set_solenoid_valve=lambda enabled: calls.append(("电磁阀", enabled)),
+        set_pump_motor=lambda enabled: calls.append(("气泵", enabled)),
+    )
+    request = types.SimpleNamespace(state=state, SUCK=0, BLOW=1, OFF=2)
+
+    response = node.set_suction(request)
+
+    assert response.success is True
+    assert response.message == expected_message
+    assert calls == expected_calls
+
+
+def test_set_suction_rejects_unknown_state_without_hardware_action(monkeypatch):
+    module = _load_controller(monkeypatch)
+    calls = []
+    node = object.__new__(module.ControlNode)
+    node.sucker = types.SimpleNamespace(
+        set_solenoid_valve=lambda enabled: calls.append(("电磁阀", enabled)),
+        set_pump_motor=lambda enabled: calls.append(("气泵", enabled)),
+    )
+    request = types.SimpleNamespace(state=9, SUCK=0, BLOW=1, OFF=2)
+
+    response = node.set_suction(request)
+
+    assert response.success is False
+    assert "未知吸盘状态" in response.message
+    assert calls == []

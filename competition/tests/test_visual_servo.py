@@ -1,8 +1,15 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
+import yaml
 
-from competition_lib.config import load_execution_config, load_visual_servo_config
+from competition_lib.config import (
+    DEFAULT_EXECUTION_CONFIG_PATH,
+    load_execution_config,
+    load_visual_servo_config,
+)
 from competition_lib.visual_servo import (
     limit_xy_step,
     pixel_error_to_robot_delta,
@@ -19,11 +26,27 @@ def test_current_execution_and_servo_configs_are_valid():
     visual = load_visual_servo_config()
     assert execution.arm_speed > 0
     assert execution.servo_speed > 0
+    assert execution.minimum_tcp_z_mm == 165.0
     assert len(execution.shooting_pose) == 6
     assert np.asarray(visual["pixel_to_robot_matrix"]).shape == (2, 2)
-    assert visual["block_servo_height_offset_mm"] > 0
-    assert visual["board_servo_height_offset_mm"] > 0
-    assert "servo_height_offset_mm" not in visual
+    assert "block_servo_height_offset_mm" not in visual
+    assert "board_servo_height_offset_mm" not in visual
+
+
+@pytest.mark.parametrize("invalid_minimum_z", [0.0, -1.0])
+def test_execution_config_rejects_non_positive_minimum_tcp_z(tmp_path, invalid_minimum_z):
+    config_data = yaml.safe_load(
+        Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
+    )
+    config_data["motion"]["minimum_tcp_z_mm"] = invalid_minimum_z
+    config_path = tmp_path / "无效最低高度.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="minimum_tcp_z_mm 必须是大于 0 的有限数值"):
+        load_execution_config(config_path)
 
 
 def test_step_limit_applies_minimum_and_maximum():

@@ -665,7 +665,8 @@ def build_pixel_to_tcp_calibration(
                 "v": [float(np.min(uv[:, 1])), float(np.max(uv[:, 1]))],
             },
             "pixel_convex_hull": hull.tolist(),
-            "extrapolation_policy": "reject_by_default",
+            # 样本凸包只描述本次采样覆盖，不代表正式任务的最大抓取范围。
+            "extrapolation_policy": "diagnostic_only",
         },
         "usage_note": (
             "仅适用于高位相机的高位检测像素。输出仅含 TCP XYZ；"

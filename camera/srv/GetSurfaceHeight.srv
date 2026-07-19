@@ -2,5 +2,5 @@ int32 x
 int32 y
 ---
 bool success
-float64[3] world_position
+float64 surface_z_mm
 string message

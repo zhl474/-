@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import yaml
@@ -12,6 +12,7 @@ import yaml
 
 CALIBRATION_SCHEMA_VERSION = 1
 CALIBRATION_TYPE = "pixel_to_tcp_position"
+CALIBRATION_SUBJECTS = frozenset({"block", "tray"})
 _DENOMINATOR_EPS = 1e-12
 
 
@@ -93,14 +94,9 @@ class PixelToTcpCalibration:
             raise ValueError("tolerance_px 必须是非负有限数值")
         return _point_in_convex_hull(pixel, self.pixel_convex_hull, tolerance)
 
-    def predict(self, pixel_xy: Sequence[float], *, allow_extrapolation: bool = False) -> np.ndarray:
-        """将一组高位检测像素 [X, Y] 转换为 TCP 位置 [X, Y, Z]，单位为毫米。"""
+    def predict(self, pixel_xy: Sequence[float]) -> np.ndarray:
+        """将高位检测像素转换为 TCP XYZ；样本凸包仅供覆盖诊断，不限制预测。"""
         pixel = _finite_array(pixel_xy, (2,), "pixel_xy")
-        if not allow_extrapolation and not self.is_pixel_within_coverage(pixel):
-            raise ValueError(
-                "输入像素位于标定样本覆盖凸包之外，默认拒绝外推；"
-                "确认安全后可传入 allow_extrapolation=True"
-            )
 
         if self.model_name in {"affine", "poly2", "poly3"}:
             prediction = self._predict_polynomial(pixel)
@@ -179,8 +175,40 @@ def _validate_model(name: Any, parameters: Mapping[str, Any]) -> str:
     return str(name)
 
 
-def load_pixel_to_tcp_calibration(path: str | Path) -> PixelToTcpCalibration:
-    """读取并校验 `像素到TCP标定结果.yaml`，返回可直接预测的标定对象。"""
+def _validate_calibration_subject(
+    document: Mapping[str, Any],
+    expected_subject: Optional[str],
+) -> None:
+    """校验标定对象类型，避免方块与托盘标定文件被误用。"""
+    if expected_subject is not None and (
+        not isinstance(expected_subject, str)
+        or expected_subject not in CALIBRATION_SUBJECTS
+    ):
+        raise ValueError(
+            f"expected_subject 仅支持 block 或 tray，当前为：{expected_subject}"
+        )
+
+    actual_subject = document.get("calibration_subject")
+    if actual_subject is not None and (
+        not isinstance(actual_subject, str)
+        or actual_subject not in CALIBRATION_SUBJECTS
+    ):
+        raise ValueError(
+            f"calibration_subject 仅支持 block 或 tray，当前为：{actual_subject}"
+        )
+    if expected_subject is not None and actual_subject != expected_subject:
+        actual_text = "缺失" if actual_subject is None else str(actual_subject)
+        raise ValueError(
+            f"标定主体不匹配：期望 {expected_subject}，文件为 {actual_text}"
+        )
+
+
+def load_pixel_to_tcp_calibration(
+    path: str | Path,
+    *,
+    expected_subject: Optional[str] = None,
+) -> PixelToTcpCalibration:
+    """读取并校验像素到 TCP YAML，按需强制匹配方块或托盘主体。"""
     calibration_path = Path(path).expanduser()
     try:
         with calibration_path.open("r", encoding="utf-8") as file:
@@ -195,6 +223,7 @@ def load_pixel_to_tcp_calibration(path: str | Path) -> PixelToTcpCalibration:
         raise ValueError(f"仅支持 schema_version={CALIBRATION_SCHEMA_VERSION} 的 TCP 标定文件")
     if document.get("calibration_type") != CALIBRATION_TYPE:
         raise ValueError(f"calibration_type 必须为 {CALIBRATION_TYPE}")
+    _validate_calibration_subject(document, expected_subject)
 
     input_info = _require_mapping(document.get("input"), "input")
     output_info = _require_mapping(document.get("output"), "output")

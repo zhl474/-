@@ -84,7 +84,7 @@ def read_stable_frame(camera):
 def make_record(row, col, pixel_xy, depth_image, camera):
     """把一个浮点格点像素转换为相机坐标，并保留完整诊断信息。"""
     pixel_x, pixel_y = float(pixel_xy[0]), float(pixel_xy[1])
-    # 这里与现有 RoughLocalizer 的采样规则一致：先四舍五入到整数深度像素。
+    # 与正式表面高度服务保持一致：先四舍五入到整数深度像素。
     sample_x = int(round(pixel_x))
     sample_y = int(round(pixel_y))
     image_height, image_width = depth_image.shape[:2]

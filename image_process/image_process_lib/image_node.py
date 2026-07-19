@@ -30,7 +30,7 @@ from image_process_lib.block_scene_detector import detect_blocks_in_image
 from image_process_lib.block_servo_detector import detect_block_with_high_prior_roi
 from image_process_lib.advanced_planner import AdvancedPlanner
 from image_process_lib.debug_output import DebugVideoRecorder, save_image_to_path
-from image_process_lib.rough_localization import RoughLocalizer
+from image_process_lib.high_pixel_to_tcp_localizer import HighPixelToTcpLocalizer
 from image_process_lib.task_planner import (
     ObservedBlock,
     PlacementTarget,
@@ -48,38 +48,31 @@ from image_process.srv import (
     PrepareTask,
     PrepareTaskResponse,
 )
-from camera.srv import PixelToWorld
+from camera.srv import GetSurfaceHeight
 
 
 PACKAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC_DIR = os.path.abspath(os.path.join(PACKAGE_DIR, ".."))
 COMPETITION_DIR = os.path.join(SRC_DIR, "competition")
-CAMERA_DIR = os.path.join(SRC_DIR, "camera")
-VISUAL_SERVO_CONFIG_PATH = os.path.join(COMPETITION_DIR, "config", "visual_servo.yaml")
 EXECUTION_CONFIG_PATH = os.path.join(COMPETITION_DIR, "config", "execution.yaml")
-T_WRIST2CAMERA_PATH = os.path.join(CAMERA_DIR, "config", "T_wrist2camera.npy")
 DETECTION_MODEL_PATH = os.path.join(COMPETITION_DIR, "model", "best5.14.pt")
 BOARD_MODEL_PATH = os.path.join(COMPETITION_DIR, "model", "best.pt")
 SEGMENTATION_MODEL_PATH = os.path.join(COMPETITION_DIR, "model", "best_seg.engine")
 JINJIE_LIB_PATH = os.path.join(SRC_DIR, "jinjie", "jinjie_libtetris.so")
 TASK_LAYOUT_PATH = os.path.join(PACKAGE_DIR, "config", "task_layout.yaml")
 PERCEPTION_CONFIG_PATH = os.path.join(PACKAGE_DIR, "config", "perception.yaml")
+DEFAULT_BLOCK_CALIBRATION_PATH = os.path.join(
+    PACKAGE_DIR,
+    "config",
+    "block_pixel_to_tcp_calibration.yaml",
+)
+DEFAULT_TRAY_CALIBRATION_PATH = os.path.join(
+    PACKAGE_DIR,
+    "config",
+    "tray_pixel_to_tcp_calibration.yaml",
+)
 DEFAULT_DEBUG_DIR = os.path.expanduser("~/.ros/single_arm_tetris")
-
-
-def load_servo_height_offsets_mm(config_path=VISUAL_SERVO_CONFIG_PATH):
-    """从视觉伺服配置读取方块和托盘各自的观察高度偏移。"""
-    if not os.path.exists(config_path):
-        return 200.0, 200.0
-    with open(config_path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    offsets = (
-        float(data.get("block_servo_height_offset_mm", 200.0)),
-        float(data.get("board_servo_height_offset_mm", 200.0)),
-    )
-    if not np.all(np.isfinite(offsets)) or min(offsets) <= 0.0:
-        raise ValueError("方块和托盘视觉伺服观察高度偏置必须是大于 0 的有限数值")
-    return offsets
+PICK_HEIGHT_MODES = {"calibrated_height", "depth_height"}
 
 
 class ImageProcessor:
@@ -119,8 +112,19 @@ class ImageProcessor:
             rospy.get_param("~segmentation_model_path", model_config.get("segmentation")),
             SEGMENTATION_MODEL_PATH,
         )
-        hand_eye_matrix_path = rospy.get_param(
-            "~hand_eye_matrix_path", src_path(calibration_config.get("hand_eye_matrix"), T_WRIST2CAMERA_PATH)
+        block_calibration_path = src_path(
+            rospy.get_param(
+                "~block_pixel_to_tcp_calibration_path",
+                calibration_config.get("block_pixel_to_tcp"),
+            ),
+            DEFAULT_BLOCK_CALIBRATION_PATH,
+        )
+        tray_calibration_path = src_path(
+            rospy.get_param(
+                "~tray_pixel_to_tcp_calibration_path",
+                calibration_config.get("tray_pixel_to_tcp"),
+            ),
+            DEFAULT_TRAY_CALIBRATION_PATH,
         )
         self.task_layout_path = rospy.get_param("~task_layout_path", TASK_LAYOUT_PATH)
         self.advanced_library_path = rospy.get_param("~advanced_library_path", JINJIE_LIB_PATH)
@@ -142,13 +146,6 @@ class ImageProcessor:
         self.model = YOLO(detection_model_path)
 
         self.board_theta = 0.0
-        (
-            self.block_servo_height_offset_mm,
-            self.board_servo_height_offset_mm,
-        ) = load_servo_height_offsets_mm()
-        self.T_wrist2camera_mm = np.load(hand_eye_matrix_path)
-        if self.T_wrist2camera_mm.shape != (4, 4) or not np.all(np.isfinite(self.T_wrist2camera_mm)):
-            raise ValueError("手眼标定矩阵 T_wrist2camera.npy 无效，请重新标定")
         self.save_top_surface_mask_vis = rospy.get_param("~save_top_surface_mask_vis", False)
         self.top_surface_mask_vis_path = rospy.get_param(
             "~top_surface_mask_vis_path",
@@ -226,16 +223,8 @@ class ImageProcessor:
         )
         self.block_angle_step_deg = float(rospy.get_param("~block_angle_step_deg", block_servo["angle_step_deg"]))
 
-        # 高位全场识别后，用像素偏差粗估方块机械臂坐标。
-        rough_config = perception_config["high_rough_localization"]
-        self.high_rough_x_mm_per_pixel = float(rough_config["x_mm_per_pixel"])
-        self.high_rough_y_mm_per_pixel = float(rough_config["y_mm_per_pixel"])
         fallback_config = perception_config.get("fallback", {})
-        self.depth_fallback_enabled = bool(fallback_config.get("depth_pixel_estimate", True))
         block_detection_module.ALLOW_COLOR_FALLBACK = bool(fallback_config.get("color_segmentation", True))
-
-        self.pixel2world_client = rospy.ServiceProxy("/camera/pixel_to_world", PixelToWorld)
-        self.pixel2world_client.wait_for_service()
 
         with open(EXECUTION_CONFIG_PATH, "r", encoding="utf-8") as config_file:
             execution_config = yaml.safe_load(config_file) or {}
@@ -248,14 +237,71 @@ class ImageProcessor:
         self.shooting_angle = [float(value) for value in execution_config["shooting_pose"]]
         if len(self.shooting_angle) != 6 or not np.all(np.isfinite(self.shooting_angle)):
             raise ValueError("shooting_pose 必须包含 6 个有限数值")
-        self.rough_localizer = RoughLocalizer(
+        motion_config = execution_config.get("motion", {})
+        self.minimum_tcp_z_mm = float(motion_config.get("minimum_tcp_z_mm", 165.0))
+        self.pick_surface_offset_mm = float(motion_config.get("pick_surface_offset_mm", 0.0))
+        if not np.isfinite(self.minimum_tcp_z_mm) or self.minimum_tcp_z_mm <= 0.0:
+            raise ValueError("minimum_tcp_z_mm 必须是大于 0 的有限数值")
+        if not np.isfinite(self.pick_surface_offset_mm):
+            raise ValueError("pick_surface_offset_mm 必须是有限数值")
+
+        localization_config = perception_config.get("high_tcp_localization", {})
+        if not isinstance(localization_config, dict):
+            raise ValueError("high_tcp_localization 必须是字典")
+
+        def finite_range(name, default):
+            values = np.asarray(localization_config.get(name, default), dtype=float)
+            if values.shape != (2,) or not np.all(np.isfinite(values)) or values[0] >= values[1]:
+                raise ValueError(f"high_tcp_localization.{name} 必须是递增的两个有限数值")
+            return tuple(float(value) for value in values)
+
+        safe_x_range_mm = finite_range("safe_x_range_mm", [-444.224, -148.17])
+        safe_y_range_mm = finite_range("safe_y_range_mm", [-263.279, 315.925])
+        self.high_tcp_localizer = HighPixelToTcpLocalizer(
+            block_calibration_path=block_calibration_path,
+            tray_calibration_path=tray_calibration_path,
             shooting_pose=self.shooting_angle,
-            wrist_to_camera_mm=self.T_wrist2camera_mm,
-            pixel_to_world_client=self.pixel2world_client,
-            x_mm_per_pixel=self.high_rough_x_mm_per_pixel,
-            y_mm_per_pixel=self.high_rough_y_mm_per_pixel,
-            fallback_enabled=self.depth_fallback_enabled,
-            warning_func=self.print_yellow_warning,
+            tcp_min_xyz=(safe_x_range_mm[0], safe_y_range_mm[0], self.minimum_tcp_z_mm),
+            tcp_max_xyz=(safe_x_range_mm[1], safe_y_range_mm[1], None),
+        )
+
+        pick_height_config = perception_config.get("pick_height", {})
+        if not isinstance(pick_height_config, dict):
+            raise ValueError("pick_height 必须是字典")
+        self.pick_height_mode = str(
+            rospy.get_param(
+                "~pick_height_mode",
+                pick_height_config.get("mode", "calibrated_height"),
+            )
+        ).strip()
+        if self.pick_height_mode not in PICK_HEIGHT_MODES:
+            raise ValueError(
+                "pick_height_mode 仅支持 calibrated_height 或 depth_height"
+            )
+        self.block_observation_height_mm = float(
+            pick_height_config.get("block_observation_height_mm", 192.0)
+        )
+        if (
+            not np.isfinite(self.block_observation_height_mm)
+            or self.block_observation_height_mm <= 0.0
+        ):
+            raise ValueError("block_observation_height_mm 必须是大于 0 的有限数值")
+
+        # 默认标定高度模式完全不创建深度服务客户端，避免启动时隐式依赖深度链路。
+        self.surface_height_client = None
+        if self.pick_height_mode == "depth_height":
+            self.surface_height_client = rospy.ServiceProxy(
+                "/camera/surface_height",
+                GetSurfaceHeight,
+            )
+            # 不在节点初始化阶段阻塞等待；服务暂不可用时由本轮任务准备明确失败，
+            # 后续高位交互重试仍可在服务恢复后继续。
+
+        rospy.loginfo(
+            "高位 TCP 标定已加载：方块=%s，托盘=%s，高度模式=%s",
+            block_calibration_path,
+            tray_calibration_path,
+            self.pick_height_mode,
         )
         self.image_sub = rospy.Subscriber("/camera/image_raw", Image, self.image_callback)
         self.prepare_task_service = rospy.Service("/perception/prepare_task", PrepareTask, self.prepare_task)
@@ -270,11 +316,6 @@ class ImageProcessor:
         )
         rospy.on_shutdown(self.close_debug_video_recorders)
         rospy.loginfo("图像处理服务已启动")
-
-    def print_yellow_warning(self, message):
-        """输出黄色警告，现场调试时用于区分深度回退。"""
-        rospy.logwarn(message)
-        print(f"\033[93m{message}\033[0m")
 
     def close_debug_video_recorders(self):
         """节点退出时释放视频文件句柄，避免最后几帧没有写入文件。"""
@@ -390,11 +431,6 @@ class ImageProcessor:
         except Exception as e:
             rospy.logerr("图像转换失败: %s" % e)
 
-    def get_image_snapshot(self):
-        """在锁内复制当前图像，服务处理期间始终使用同一帧。"""
-        with self.image_condition:
-            return None if self.latest_image is None else self.latest_image.copy()
-
     def get_image_snapshot_newer_than(self, request_stamp):
         """等待发布时间晚于本次请求的图像，避免使用请求前的缓存帧。"""
         with self.image_condition:
@@ -410,29 +446,56 @@ class ImageProcessor:
                 self.image_condition.wait(remaining_sec)
             return self.latest_image.copy()
 
-    def make_depth_first_servo_pose(self, px, py, image_shape, label, height_offset_mm):
-        """兼容节点内部调用，实际粗定位由 RoughLocalizer 完成。"""
-        return self.rough_localizer.locate(px, py, image_shape, label, height_offset_mm)
-
     @staticmethod
-    def make_high_localization_diagnostic(px, py, image_shape, world_position, localization_source):
-        """整理高位识别到粗定位的原始数据，供主进程输出诊断日志。"""
+    def make_high_localization_diagnostic(
+        px,
+        py,
+        image_shape,
+        depth_sample_pixel_xy=(0.0, 0.0),
+    ):
+        """整理高位像素标定诊断字段，并保留现有服务字段兼容性。"""
         height, width = image_shape[:2]
-        world = np.asarray(world_position, dtype=float)
-        world_valid = (
-            str(localization_source) == "depth"
-            and world.shape == (3,)
-            and np.all(np.isfinite(world))
-        )
         return {
             "high_detected_pixel_xy": (float(px), float(py)),
-            # 深度服务内部会对检测像素四舍五入，此处单独保存以便排查一像素误差。
-            "high_depth_sample_pixel_xy": (float(round(float(px))), float(round(float(py)))),
+            "high_depth_sample_pixel_xy": tuple(
+                float(value) for value in depth_sample_pixel_xy
+            ),
             "high_image_center_xy": (float(width) / 2.0, float(height) / 2.0),
-            "high_world_position": tuple(world.tolist()) if world_valid else (0.0, 0.0, 0.0),
-            "high_world_position_valid": bool(world_valid),
-            "rough_localization_source": str(localization_source),
+            # 新流程不再计算高位世界坐标，旧字段固定标记为无效占位。
+            "high_world_position": (0.0, 0.0, 0.0),
+            "high_world_position_valid": False,
+            "rough_localization_source": "tcp_calibration",
         }
+
+    def resolve_pick_surface_height(self, px, py, predicted_tcp_z_mm):
+        """按配置解析方块表面绝对 Z，并返回实际深度采样像素。"""
+        predicted_tcp_z_mm = float(predicted_tcp_z_mm)
+        if not np.isfinite(predicted_tcp_z_mm):
+            raise ValueError("方块标定观察 TCP Z 不是有限数值")
+
+        if self.pick_height_mode == "calibrated_height":
+            surface_z_mm = predicted_tcp_z_mm - self.block_observation_height_mm
+            depth_sample_pixel_xy = (0.0, 0.0)
+        else:
+            if self.surface_height_client is None:
+                raise RuntimeError("depth_height 模式未初始化表面高度服务客户端")
+            sample_x = int(round(float(px)))
+            sample_y = int(round(float(py)))
+            response = self.surface_height_client(sample_x, sample_y)
+            if not response.success:
+                raise RuntimeError(f"方块表面高度获取失败: {response.message}")
+            surface_z_mm = float(response.surface_z_mm)
+            depth_sample_pixel_xy = (float(sample_x), float(sample_y))
+
+        if not np.isfinite(surface_z_mm):
+            raise ValueError(f"方块表面高度不是有限数值: {surface_z_mm}")
+        pick_tcp_z_mm = surface_z_mm + self.pick_surface_offset_mm
+        if not np.isfinite(pick_tcp_z_mm) or pick_tcp_z_mm < self.minimum_tcp_z_mm:
+            raise ValueError(
+                f"最终抓取 TCP Z={pick_tcp_z_mm:.3f} mm 低于安全下限 "
+                f"{self.minimum_tcp_z_mm:.3f} mm"
+            )
+        return float(surface_z_mm), depth_sample_pixel_xy
 
     def compute_board_theta_from_grid_points(self, grid_points):
         """只根据托盘四角像素计算托盘旋转角，不再依赖九点坐标标定。"""
@@ -491,20 +554,19 @@ class ImageProcessor:
             if category not in counts:
                 rospy.logwarn("忽略未知方块类别: %s", category)
                 continue
-            servo_pose, localization_source, world_position = self.make_depth_first_servo_pose(
+            servo_pose = self.high_tcp_localizer.locate_block(
+                (block["px"], block["py"])
+            )
+            pick_surface_z_mm, depth_sample_pixel_xy = self.resolve_pick_surface_height(
                 block["px"],
                 block["py"],
-                image.shape,
-                f"方块 {category}",
-                self.block_servo_height_offset_mm,
+                servo_pose[2],
             )
-            has_valid_surface_z = localization_source == "depth" and len(world_position) == 3
             diagnostic = self.make_high_localization_diagnostic(
                 block["px"],
                 block["py"],
                 image.shape,
-                world_position,
-                localization_source,
+                depth_sample_pixel_xy,
             )
             counts[category] += 1
             observed_blocks.append(
@@ -512,19 +574,13 @@ class ImageProcessor:
                     category=category,
                     observation_pose=tuple(servo_pose),
                     detected_angle_deg=float(block["theta"]),
-                    pick_surface_z_mm=float(world_position[2]) if has_valid_surface_z else 0.0,
-                    pick_surface_z_valid=has_valid_surface_z,
+                    pick_surface_z_mm=pick_surface_z_mm,
+                    pick_surface_z_valid=True,
                     **diagnostic,
                 )
             )
         if not observed_blocks:
             raise RuntimeError("没有可用于任务规划的已知类别方块")
-        invalid_depth_count = sum(not block.pick_surface_z_valid for block in observed_blocks)
-        if invalid_depth_count:
-            raise RuntimeError(
-                f"{invalid_depth_count} 个方块缺少有效深度高度，已取消任务准备；"
-                "请调整相机视野、方块摆放或光照后重试"
-            )
         return observed_blocks, [counts[category] for category in BLOCK_CATEGORY_NAMES]
 
     def _load_layout_for_request(self, request, cube_counts):
@@ -546,19 +602,13 @@ class ImageProcessor:
                 float(item["row"]),
                 float(item["col"]),
             )
-            servo_pose, localization_source, world_position = self.make_depth_first_servo_pose(
-                target_point[0],
-                target_point[1],
-                image_shape,
-                f"托盘目标 {item['index']}",
-                self.board_servo_height_offset_mm,
+            servo_pose = self.high_tcp_localizer.locate_tray(
+                (target_point[0], target_point[1])
             )
             diagnostic = self.make_high_localization_diagnostic(
                 target_point[0],
                 target_point[1],
                 image_shape,
-                world_position,
-                localization_source,
             )
             targets.append(
                 PlacementTarget(
@@ -579,9 +629,14 @@ class ImageProcessor:
         self.board_grid_points = None
         self.board_grid_image_shape = None
         self.board_grid_image = None
-        image = self.get_image_snapshot()
+        request_stamp = rospy.Time.now()
+        image = self.get_image_snapshot_newer_than(request_stamp)
         if image is None:
-            return PrepareTaskResponse(success=False, task_count=0, message="没有可用图像")
+            return PrepareTaskResponse(
+                success=False,
+                task_count=0,
+                message=f"等待高位新图像超时（{self.fresh_image_timeout_sec:.1f} 秒）",
+            )
         try:
             self._detect_board_for_task(image)
             observed_blocks, cube_counts = self._detect_blocks_for_task(image)

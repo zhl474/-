@@ -83,9 +83,16 @@ class TaskRunner:
             rospy.logerr("任务状态: %s", state.value)
 
     def _align(self, offset_func, start_pose, log_label, event_callback=None):
+        start_pose = self._validate_motion_pose(start_pose, f"{log_label}起始位")
+
+        def move_checked(pose, *args, **kwargs):
+            """视觉伺服每轮运动前复核位姿，避免无效识别结果生成危险命令。"""
+            checked_pose = self._validate_motion_pose(pose, f"{log_label}修正位")
+            return self.clients.move_arm(checked_pose, *args, **kwargs)
+
         return run_offset_visual_servo_alignment(
             offset_func,
-            self.clients.move_arm,
+            move_checked,
             start_pose,
             self.visual_config,
             speed=self.config.servo_speed,
@@ -100,6 +107,32 @@ class TaskRunner:
             log_label=log_label,
             event_callback=event_callback,
         )
+
+    def _validate_motion_pose(self, pose, label):
+        """校验一条正式 TCP 运动命令，并返回规范化后的六维位姿。"""
+        try:
+            values = [float(value) for value in pose]
+        except (TypeError, ValueError):
+            raise RuntimeError(f"{label}必须包含 6 个有限数值")
+        if len(values) != 6 or not all(math.isfinite(value) for value in values):
+            raise RuntimeError(f"{label}必须包含 6 个有限数值")
+        if values[2] < self.config.minimum_tcp_z_mm:
+            raise RuntimeError(
+                f"{label} Z={values[2]:.2f} mm 低于 TCP 安全下限 "
+                f"{self.config.minimum_tcp_z_mm:.2f} mm"
+            )
+        return values
+
+    @staticmethod
+    def _validate_finite_value(value, label):
+        """校验单个任务高度等标量，避免 NaN 或无穷值进入运动计算。"""
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise RuntimeError(f"{label}必须是有限数值")
+        if not math.isfinite(number):
+            raise RuntimeError(f"{label}必须是有限数值")
+        return number
 
     @staticmethod
     def _finite_values(values, length):
@@ -257,13 +290,24 @@ class TaskRunner:
 
     def _pick(self, target, task_index=None):
         if not getattr(target, "pick_surface_z_valid", False):
-            raise RuntimeError("方块缺少有效深度高度，已取消抓取")
-        pick_surface_z_mm = float(getattr(target, "pick_surface_z_mm", float("nan")))
-        if not math.isfinite(pick_surface_z_mm):
-            raise RuntimeError("方块表面深度高度无效，已取消抓取")
+            raise RuntimeError("方块缺少有效抓取表面高度，已取消抓取")
+        pick_surface_z_mm = self._validate_finite_value(
+            getattr(target, "pick_surface_z_mm", None),
+            "方块抓取表面高度",
+        )
+        pick_z_mm = self._validate_finite_value(
+            pick_surface_z_mm + self.config.pick_surface_offset_mm,
+            "最终抓取高度",
+        )
+        rough_pose = self._validate_motion_pose(target.pick_observation_pose, "方块观察位")
+        lift_pose = list(rough_pose)
+        lift_pose[2] = self.config.lift_z
+        lift_pose = self._validate_motion_pose(lift_pose, "抓取抬升位")
+        pick_pose = list(lift_pose)
+        pick_pose[2] = pick_z_mm
+        pick_pose = self._validate_motion_pose(pick_pose, "最终抓取位")
 
         _, place_angle, motor_wait = self.angle_planner.plan(target.rotation_delta_deg)
-        rough_pose = list(target.pick_observation_pose)
         self._set_state(TaskState.PICK_COARSE)
         self.clients.move_arm(rough_pose, self.config.arm_speed, wait_until_stable=True)
         if motor_wait > 0:
@@ -296,11 +340,13 @@ class TaskRunner:
 
         sucker_pose = apply_camera_to_sucker_offset(camera_pose, self.visual_config)
         sucker_pose[2] = self.config.lift_z
+        sucker_pose = self._validate_motion_pose(sucker_pose, "吸盘抓取抬升位")
         self.clients.move_arm(sucker_pose, self.config.arm_speed)
 
         self._set_state(TaskState.PICKING)
         pick_pose = list(sucker_pose)
-        pick_pose[2] = pick_surface_z_mm + self.config.pick_surface_offset_mm
+        pick_pose[2] = pick_z_mm
+        pick_pose = self._validate_motion_pose(pick_pose, "最终抓取位")
         self.clients.move_arm(pick_pose, self.config.pick_speed)
         self.clients.set_suction(RobotClients.SUCK)
         self.holding_block = True
@@ -308,7 +354,7 @@ class TaskRunner:
         self.angle_planner.commit_place_angle(place_angle)
 
     def _place(self, target, task_index=None):
-        rough_pose = list(target.place_observation_pose)
+        rough_pose = self._validate_motion_pose(target.place_observation_pose, "托盘观察位")
         self._set_state(TaskState.PLACE_COARSE)
         self.clients.move_arm(rough_pose, self.config.arm_speed, wait_until_stable=True)
 
@@ -338,6 +384,8 @@ class TaskRunner:
         )
 
         place_pose = apply_camera_to_sucker_offset(camera_pose, self.visual_config)
+        # 托盘标定给出的观察 Z 同时就是吹气释放 Z，此处只应用吸盘 XY 偏移。
+        place_pose = self._validate_motion_pose(place_pose, "最终摆放位")
         self.clients.move_arm(place_pose, self.config.arm_speed)
 
         self._set_state(TaskState.PLACING)
@@ -346,7 +394,8 @@ class TaskRunner:
 
     def prepare(self, advanced=False, place_order=()):
         self._set_state(TaskState.PREPARING)
-        self.clients.move_arm(self.config.shooting_pose, self.config.arm_speed)
+        shooting_pose = self._validate_motion_pose(self.config.shooting_pose, "高位拍摄位")
+        self.clients.move_arm(shooting_pose, self.config.arm_speed, wait_until_stable=True)
         return self.clients.prepare_task(advanced=advanced, place_order=place_order)
 
     def execute_all(self, task_count):

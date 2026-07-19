@@ -7,15 +7,24 @@ models:
   segmentation: competition/model/best_seg.engine
 
 calibration:
-  hand_eye_matrix: camera/config/T_wrist2camera.npy
+  # 正式运行部署副本；也可由对应 ROS 私有参数覆盖。
+  block_pixel_to_tcp: image_process/config/block_pixel_to_tcp_calibration.yaml
+  tray_pixel_to_tcp: image_process/config/tray_pixel_to_tcp_calibration.yaml
+
+high_tcp_localization:
+  # 高位标定预测出的观察 TCP 必须落在实测安全 XY 范围内。
+  safe_x_range_mm: [-444.224, -148.17]
+  safe_y_range_mm: [-263.279, 315.925]
+
+pick_height:
+  # calibrated_height：由观察 TCP Z 减固定观察高度推导方块表面 Z。
+  # depth_height：调用 /camera/surface_height 获取方块表面绝对 Z。
+  mode: calibrated_height
+  block_observation_height_mm: 192.0
 
 fallback:
-  depth_pixel_estimate: true
+  # 该回退仅属于方块上表面分割，不参与高位 TCP 粗定位。
   color_segmentation: true
-
-high_rough_localization:
-  x_mm_per_pixel: 0.5
-  y_mm_per_pixel: 0.5
 
 block_servo:
   angle_window_deg: 5.0

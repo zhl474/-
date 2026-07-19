@@ -18,11 +18,11 @@ class ObservedBlock:
     category: str
     observation_pose: Sequence[float]
     detected_angle_deg: float
-    # 高位深度相机测得的方块上表面绝对 Z；无有效深度时为 0。
+    # 所选高度策略得到的方块上表面绝对 Z，单位 mm。
     pick_surface_z_mm: float = 0.0
-    # false 表示本次粗定位使用了无深度的像素比例回退，禁止按深度高度抓取。
+    # false 表示高度策略失败，执行端禁止继续下探抓取。
     pick_surface_z_valid: bool = False
-    # 以下字段仅用于粗定位误差排查，保存高位识别到粗定位的原始链路。
+    # 以下字段保留现有服务兼容性，并保存高位像素到 TCP 标定诊断。
     high_detected_pixel_xy: Sequence[float] = (0.0, 0.0)
     high_depth_sample_pixel_xy: Sequence[float] = (0.0, 0.0)
     high_image_center_xy: Sequence[float] = (0.0, 0.0)
@@ -39,7 +39,7 @@ class PlacementTarget:
     desired_angle_deg: float
     category: str
     observation_pose: Sequence[float]
-    # 以下字段仅用于粗定位误差排查，保存高位托盘格点的原始链路。
+    # 以下字段保留现有服务兼容性，并保存高位托盘像素标定诊断。
     high_detected_pixel_xy: Sequence[float] = (0.0, 0.0)
     high_depth_sample_pixel_xy: Sequence[float] = (0.0, 0.0)
     high_image_center_xy: Sequence[float] = (0.0, 0.0)
@@ -60,7 +60,7 @@ class TaskTarget:
     rotation_delta_deg: float
     pick_surface_z_mm: float
     pick_surface_z_valid: bool
-    # 抓取侧与摆放侧分别保留，避免任务分配后丢失高位原始定位数据。
+    # 抓取侧与摆放侧分别保留，避免任务分配后丢失高位标定诊断数据。
     pick_high_detected_pixel_xy: Sequence[float] = (0.0, 0.0)
     pick_high_depth_sample_pixel_xy: Sequence[float] = (0.0, 0.0)
     pick_high_image_center_xy: Sequence[float] = (0.0, 0.0)

@@ -8,7 +8,3 @@ pixel_to_robot_matrix:
   - [0.2, 0.0]
 # 相机中心对准目标后，吸盘中心需要移动的 [X, Y] 偏移，单位 mm。
 camera_to_sucker_offset_mm: [-94.1, -13.8]
-# 高位深度定位得到方块上表面世界坐标后，方块视觉伺服观察位相对目标 Z 的抬高量，单位 mm。
-block_servo_height_offset_mm: 192.0
-# 高位深度定位得到托盘表面世界坐标后，托盘视觉伺服观察位相对目标 Z 的抬高量，单位 mm。
-board_servo_height_offset_mm: 187.5

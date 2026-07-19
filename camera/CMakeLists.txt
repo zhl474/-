@@ -8,7 +8,7 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
 )
 
-add_service_files(FILES PixelToWorld.srv)
+add_service_files(FILES GetSurfaceHeight.srv)
 generate_messages()
 
 catkin_package(CATKIN_DEPENDS cv_bridge message_runtime rospy sensor_msgs)

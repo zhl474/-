@@ -43,7 +43,6 @@ from image_process_lib.template_match.kernels_create import (
     get_template_rect_size,
 )
 from image_process_lib.template_match.template_match import get_rect
-from image_process_lib.rough_localization import RoughLocalizer
 
 
 def _legacy_l_yellow():
@@ -729,6 +728,7 @@ def _load_process_module_with_stubs(monkeypatch, module_name):
     rospy.logerr = lambda *_args, **_kwargs: None
     rospy.init_node = lambda *_args, **_kwargs: None
     rospy.spin = lambda: None
+    rospy.Time = types.SimpleNamespace(now=lambda: 100)
 
     sensor_msgs = _install_module_stub(monkeypatch, "sensor_msgs")
     sensor_msgs.msg = _install_module_stub(monkeypatch, "sensor_msgs.msg")
@@ -756,8 +756,7 @@ def _load_process_module_with_stubs(monkeypatch, module_name):
 
     camera = _install_module_stub(monkeypatch, "camera")
     camera.srv = _install_module_stub(monkeypatch, "camera.srv")
-    camera.srv.PixelToWorld = type("PixelToWorld", (ServiceStub,), {})
-    camera.srv.PixelToWorldRequest = type("PixelToWorldRequest", (ServiceStub,), {})
+    camera.srv.GetSurfaceHeight = type("GetSurfaceHeight", (ServiceStub,), {})
 
     process_path = os.path.join(PACKAGE_DIR, "scripts", "process.py")
     spec = importlib.util.spec_from_file_location(module_name, process_path)
@@ -770,6 +769,196 @@ def test_process_module_imports_with_ros_stubs(monkeypatch):
     module = _load_process_module_with_stubs(monkeypatch, "process_import_smoke")
     assert hasattr(module, "ImageProcessor")
     assert callable(module.main)
+
+
+def test_default_calibrated_height_initialization_never_creates_depth_client(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_default_without_depth")
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    monkeypatch.setattr(image_node_module, "YOLO", lambda _path: object())
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "Subscriber",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "Service",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "on_shutdown",
+        lambda _callback: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "ServiceProxy",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("默认 calibrated_height 不应创建深度服务客户端")
+        ),
+    )
+
+    processor = module.ImageProcessor()
+
+    assert processor.pick_height_mode == "calibrated_height"
+    assert processor.surface_height_client is None
+
+
+def test_depth_height_initialization_does_not_block_waiting_for_service(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_depth_client_without_wait")
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    original_get_param = image_node_module.rospy.get_param
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "get_param",
+        lambda name, default=None: (
+            "depth_height"
+            if name == "~pick_height_mode"
+            else original_get_param(name, default)
+        ),
+    )
+    monkeypatch.setattr(image_node_module, "YOLO", lambda _path: object())
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "Subscriber",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "Service",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "on_shutdown",
+        lambda _callback: None,
+        raising=False,
+    )
+    proxy_calls = []
+
+    class SurfaceHeightClient:
+        def wait_for_service(self):
+            raise AssertionError("depth_height 初始化不应阻塞等待服务")
+
+    surface_height_client = SurfaceHeightClient()
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "ServiceProxy",
+        lambda service_name, service_type: (
+            proxy_calls.append((service_name, service_type)) or surface_height_client
+        ),
+    )
+
+    processor = module.ImageProcessor()
+
+    assert processor.pick_height_mode == "depth_height"
+    assert processor.surface_height_client is surface_height_client
+    assert proxy_calls == [("/camera/surface_height", image_node_module.GetSurfaceHeight)]
+
+
+@pytest.mark.parametrize(
+    "private_paths,expected_relative_paths",
+    [
+        (
+            {},
+            (
+                "image_process/config/block_pixel_to_tcp_calibration.yaml",
+                "image_process/config/tray_pixel_to_tcp_calibration.yaml",
+            ),
+        ),
+        (
+            {
+                "~block_pixel_to_tcp_calibration_path": "custom/方块标定.yaml",
+                "~tray_pixel_to_tcp_calibration_path": "custom/托盘标定.yaml",
+            },
+            ("custom/方块标定.yaml", "custom/托盘标定.yaml"),
+        ),
+    ],
+)
+def test_relative_calibration_paths_from_yaml_and_private_params_use_src_dir(
+    monkeypatch,
+    private_paths,
+    expected_relative_paths,
+):
+    module = _load_process_module_with_stubs(
+        monkeypatch,
+        "process_relative_calibration_paths",
+    )
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    original_get_param = image_node_module.rospy.get_param
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "get_param",
+        lambda name, default=None: private_paths.get(name, original_get_param(name, default)),
+    )
+    monkeypatch.setattr(image_node_module, "YOLO", lambda _path: object())
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "Subscriber",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "Service",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "on_shutdown",
+        lambda _callback: None,
+        raising=False,
+    )
+    received = {}
+
+    def make_localizer(**kwargs):
+        received.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(image_node_module, "HighPixelToTcpLocalizer", make_localizer)
+
+    module.ImageProcessor()
+
+    expected_block, expected_tray = (
+        os.path.join(image_node_module.SRC_DIR, relative_path)
+        for relative_path in expected_relative_paths
+    )
+    assert received["block_calibration_path"] == expected_block
+    assert received["tray_calibration_path"] == expected_tray
+
+
+@pytest.mark.parametrize("minimum_tcp_z_mm", [0.0, -1.0])
+def test_image_node_rejects_nonpositive_minimum_tcp_z(
+    monkeypatch,
+    tmp_path,
+    minimum_tcp_z_mm,
+):
+    module = _load_process_module_with_stubs(
+        monkeypatch,
+        f"process_bad_minimum_z_{minimum_tcp_z_mm}",
+    )
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    execution_path = tmp_path / "execution.yaml"
+    execution_path.write_text(
+        yaml.safe_dump(
+            {
+                "shooting_pose": [-250.0, 20.0, 380.0, -180.0, 0.0, 90.0],
+                "motion": {
+                    "minimum_tcp_z_mm": minimum_tcp_z_mm,
+                    "pick_surface_offset_mm": 162.0,
+                },
+                "servo": {},
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(image_node_module, "EXECUTION_CONFIG_PATH", str(execution_path))
+    monkeypatch.setattr(image_node_module, "YOLO", lambda _path: object())
+
+    with pytest.raises(ValueError, match="minimum_tcp_z_mm 必须是大于 0"):
+        module.ImageProcessor()
 
 
 def _make_timestamp_snapshot_processor(module, timeout_sec=0.05):
@@ -853,17 +1042,17 @@ def test_task_target_service_returns_high_localization_diagnostics(monkeypatch):
             pick_surface_z_mm=7.0,
             pick_surface_z_valid=True,
             pick_high_detected_pixel_xy=(100.5, 200.5),
-            pick_high_depth_sample_pixel_xy=(100.0, 200.0),
+            pick_high_depth_sample_pixel_xy=(0.0, 0.0),
             pick_high_image_center_xy=(640.0, 360.0),
-            pick_high_world_position=(1.0, 2.0, 3.0),
-            pick_high_world_position_valid=True,
-            pick_rough_localization_source="depth",
+            pick_high_world_position=(0.0, 0.0, 0.0),
+            pick_high_world_position_valid=False,
+            pick_rough_localization_source="tcp_calibration",
             place_high_detected_pixel_xy=(300.5, 400.5),
-            place_high_depth_sample_pixel_xy=(300.0, 400.0),
+            place_high_depth_sample_pixel_xy=(0.0, 0.0),
             place_high_image_center_xy=(640.0, 360.0),
-            place_high_world_position=(4.0, 5.0, 6.0),
-            place_high_world_position_valid=True,
-            place_rough_localization_source="depth",
+            place_high_world_position=(0.0, 0.0, 0.0),
+            place_high_world_position_valid=False,
+            place_rough_localization_source="tcp_calibration",
         )
     ]
 
@@ -871,27 +1060,28 @@ def test_task_target_service_returns_high_localization_diagnostics(monkeypatch):
 
     assert response.success is True
     assert response.pick_high_detected_pixel_xy == [100.5, 200.5]
-    assert response.pick_high_world_position == [1.0, 2.0, 3.0]
-    assert response.pick_rough_localization_source == "depth"
+    assert response.pick_high_world_position == [0.0, 0.0, 0.0]
+    assert response.pick_high_world_position_valid is False
+    assert response.pick_rough_localization_source == "tcp_calibration"
     assert response.place_high_detected_pixel_xy == [300.5, 400.5]
-    assert response.place_high_world_position == [4.0, 5.0, 6.0]
+    assert response.place_high_world_position == [0.0, 0.0, 0.0]
+    assert response.place_rough_localization_source == "tcp_calibration"
 
 
-def test_high_localization_diagnostic_marks_pixel_fallback_without_world_coordinate(monkeypatch):
-    module = _load_process_module_with_stubs(monkeypatch, "process_fallback_diagnostics")
+def test_high_localization_diagnostic_marks_tcp_calibration_without_world_coordinate(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_tcp_calibration_diagnostics")
 
     diagnostic = module.ImageProcessor.make_high_localization_diagnostic(
         100.6,
         200.4,
         (720, 1280, 3),
-        [],
-        "fallback",
+        (101.0, 200.0),
     )
 
     assert diagnostic["high_depth_sample_pixel_xy"] == (101.0, 200.0)
     assert diagnostic["high_world_position_valid"] is False
     assert diagnostic["high_world_position"] == (0.0, 0.0, 0.0)
-    assert diagnostic["rough_localization_source"] == "fallback"
+    assert diagnostic["rough_localization_source"] == "tcp_calibration"
 
 
 def test_prepare_task_clears_previous_result_when_image_is_missing(monkeypatch):
@@ -901,13 +1091,48 @@ def test_prepare_task_clears_previous_result_when_image_is_missing(monkeypatch):
     processor.board_grid_points = object()
     processor.board_grid_image_shape = (1, 1)
     processor.board_grid_image = object()
-    processor.get_image_snapshot = lambda: None
+    processor.fresh_image_timeout_sec = 0.5
+    received_stamps = []
+    processor.get_image_snapshot_newer_than = lambda stamp: received_stamps.append(stamp) or None
 
     response = processor.prepare_task(types.SimpleNamespace(advanced=False, place_order=[]))
 
     assert response.success is False
     assert processor.task_targets == []
     assert processor.board_grid_points is None
+    assert received_stamps == [100]
+
+
+def test_prepare_task_uses_one_snapshot_and_clears_targets_when_any_point_fails(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_prepare_point_failure")
+    processor = object.__new__(module.ImageProcessor)
+    processor.task_targets = [object()]
+    processor.board_grid_points = object()
+    processor.board_grid_image_shape = (1, 1)
+    processor.board_grid_image = object()
+    processor.fresh_image_timeout_sec = 0.5
+    snapshot = np.zeros((6, 8, 3), dtype=np.uint8)
+    processor.get_image_snapshot_newer_than = lambda _stamp: snapshot
+    received_images = []
+    processor._detect_board_for_task = lambda image: received_images.append(image)
+    processor._detect_blocks_for_task = lambda image: (
+        received_images.append(image) or ([object()], [1, 0, 0, 0, 0, 0, 0])
+    )
+    processor._load_layout_for_request = lambda _request, _counts: ([object()], "测试布局")
+
+    def fail_tray_calibration(_layout, _image_shape):
+        raise ValueError("托盘预测 TCP 超出安全范围")
+
+    processor._build_placement_targets = fail_tray_calibration
+
+    response = processor.prepare_task(types.SimpleNamespace(advanced=False, place_order=[]))
+
+    assert response.success is False
+    assert response.task_count == 0
+    assert "超出安全范围" in response.message
+    assert processor.task_targets == []
+    assert len(received_images) == 2
+    assert all(image is snapshot for image in received_images)
 
 
 def test_block_offset_service_uses_configured_angle_prior(monkeypatch):
@@ -964,72 +1189,141 @@ def test_competition_module_imports_with_service_stubs(monkeypatch):
     assert callable(module.main)
 
 
-def test_depth_first_servo_pose_uses_individual_height_offsets_when_depth_valid(monkeypatch):
-    localizer = RoughLocalizer(
-        shooting_pose=[0, 0, 0, 0, 0, 0],
-        wrist_to_camera_mm=np.array([
-            [1.0, 0.0, 0.0, 10.0],
-            [0.0, 1.0, 0.0, 20.0],
-            [0.0, 0.0, 1.0, 30.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ]),
-        pixel_to_world_client=lambda _x, _y: types.SimpleNamespace(
-            success=True, world_position=[100.0, 200.0, 50.0], message="成功"
-        ),
-        x_mm_per_pixel=0.5,
-        y_mm_per_pixel=0.5,
-        fallback_enabled=True,
-        warning_func=lambda _message: None,
+def test_calibrated_height_uses_predicted_tcp_z_without_depth_client(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_calibrated_height")
+    processor = object.__new__(module.ImageProcessor)
+    processor.pick_height_mode = "calibrated_height"
+    processor.block_observation_height_mm = 192.0
+    processor.pick_surface_offset_mm = 162.0
+    processor.minimum_tcp_z_mm = 165.0
+    processor.surface_height_client = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("标定高度模式不应调用深度服务")
     )
 
-    block_pose, source, world_position = localizer.locate(
-        12.2, 33.8, (720, 1280, 3), "方块测试", 180.0
+    surface_z, sample_pixel = processor.resolve_pick_surface_height(12.2, 33.8, 200.5)
+
+    assert surface_z == pytest.approx(8.5)
+    assert sample_pixel == (0.0, 0.0)
+
+
+def test_block_task_detection_uses_calibrated_tcp_pose_and_surface_height(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_block_tcp_pipeline")
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    monkeypatch.setattr(image_node_module, "load_template_geometry", lambda _mode: {})
+    monkeypatch.setattr(image_node_module, "save_image_to_path", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        image_node_module,
+        "detect_blocks_in_image",
+        lambda *_args, **_kwargs: ([{
+            "category": "T",
+            "px": 500.0,
+            "py": 300.0,
+            "theta": 12.5,
+        }], np.zeros((4, 4, 3), dtype=np.uint8)),
     )
-    board_pose, board_source, board_world_position = localizer.locate(
-        12.2, 33.8, (720, 1280, 3), "托盘测试", 210.0
+    processor = object.__new__(module.ImageProcessor)
+    processor.model = object()
+    processor.save_top_surface_mask_vis = False
+    processor.high_template_match_debug_path = ""
+    processor.pick_height_mode = "calibrated_height"
+    processor.block_observation_height_mm = 192.0
+    processor.pick_surface_offset_mm = 162.0
+    processor.minimum_tcp_z_mm = 165.0
+    processor.surface_height_client = None
+    processor.high_tcp_localizer = types.SimpleNamespace(
+        locate_block=lambda pixel: [-250.0, 20.0, 200.0, -180.0, 0.0, 90.0]
     )
 
-    assert source == "depth"
-    assert world_position == [100.0, 200.0, 50.0]
-    assert block_pose == [90.0, 180.0, 230.0, 0.0, 0.0, 0.0]
-    assert board_source == "depth"
-    assert board_world_position == [100.0, 200.0, 50.0]
-    assert board_pose == [90.0, 180.0, 260.0, 0.0, 0.0, 0.0]
-
-
-def test_depth_first_servo_pose_falls_back_when_depth_invalid(monkeypatch):
-    warnings = []
-    localizer = RoughLocalizer(
-        shooting_pose=[100.0, 200.0, 0.0, 0.0, 0.0, 0.0],
-        wrist_to_camera_mm=np.eye(4),
-        pixel_to_world_client=lambda _x, _y: types.SimpleNamespace(
-            success=False, world_position=[0.0, 0.0, 0.0], message="无效深度"
-        ),
-        x_mm_per_pixel=0.5,
-        y_mm_per_pixel=0.25,
-        fallback_enabled=True,
-        warning_func=warnings.append,
+    blocks, counts = processor._detect_blocks_for_task(
+        np.zeros((720, 1280, 3), dtype=np.uint8)
     )
 
-    pose, source, world_position = localizer.locate(150.0, 40.0, (100, 200, 3), "测试", 200.0)
+    assert len(blocks) == 1
+    assert sum(counts) == 1
+    assert blocks[0].observation_pose == (-250.0, 20.0, 200.0, -180.0, 0.0, 90.0)
+    assert blocks[0].pick_surface_z_mm == pytest.approx(8.0)
+    assert blocks[0].pick_surface_z_valid is True
+    assert blocks[0].high_world_position_valid is False
+    assert blocks[0].rough_localization_source == "tcp_calibration"
 
-    assert source == "fallback"
-    assert world_position == []
-    assert pose == [97.5, 225.0, 200.0, 0.0, 0.0, 0.0]
-    assert warnings and "回退旧粗估" in warnings[0]
 
-
-def test_depth_failure_does_not_fallback_when_disabled():
-    localizer = RoughLocalizer(
-        shooting_pose=[0, 0, 0, 0, 0, 0],
-        wrist_to_camera_mm=np.eye(4),
-        pixel_to_world_client=lambda _x, _y: types.SimpleNamespace(
-            success=False, world_position=[0, 0, 0], message="深度无效"
-        ),
-        x_mm_per_pixel=0.5,
-        y_mm_per_pixel=0.5,
-        fallback_enabled=False,
-        warning_func=lambda _message: None,
+def test_tray_target_uses_independent_tcp_calibration_and_predicted_z(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_tray_tcp_pipeline")
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    monkeypatch.setattr(
+        image_node_module,
+        "interpolate_grid_point",
+        lambda *_args: (700.0, 300.0),
     )
-    with pytest.raises(ValueError, match="深度无效"):
-        localizer.locate(1, 1, (10, 10, 3), "测试", 200.0)
+    processor = object.__new__(module.ImageProcessor)
+    processor.board_grid_points = object()
+    received_pixels = []
+    processor.high_tcp_localizer = types.SimpleNamespace(
+        locate_tray=lambda pixel: received_pixels.append(pixel)
+        or [-280.0, 40.0, 190.5, -180.0, 0.0, 90.0]
+    )
+    layout = [{
+        "index": 0,
+        "row": 1.0,
+        "col": 2.0,
+        "angle_deg": 0.0,
+        "category": "T",
+    }]
+
+    targets = processor._build_placement_targets(layout, (720, 1280))
+
+    assert received_pixels == [(700.0, 300.0)]
+    assert targets[0].observation_pose == (-280.0, 40.0, 190.5, -180.0, 0.0, 90.0)
+    assert targets[0].high_world_position_valid is False
+    assert targets[0].rough_localization_source == "tcp_calibration"
+
+
+def test_depth_height_uses_rounded_pixel_and_surface_height_service(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_depth_height")
+    processor = object.__new__(module.ImageProcessor)
+    processor.pick_height_mode = "depth_height"
+    processor.block_observation_height_mm = 192.0
+    processor.pick_surface_offset_mm = 162.0
+    processor.minimum_tcp_z_mm = 165.0
+    received = []
+    processor.surface_height_client = lambda x, y: received.append((x, y)) or types.SimpleNamespace(
+        success=True,
+        surface_z_mm=7.25,
+        message="成功",
+    )
+
+    surface_z, sample_pixel = processor.resolve_pick_surface_height(12.2, 33.8, 200.5)
+
+    assert received == [(12, 34)]
+    assert surface_z == pytest.approx(7.25)
+    assert sample_pixel == (12.0, 34.0)
+
+
+def test_depth_height_failure_never_falls_back_to_calibrated_height(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_depth_height_failure")
+    processor = object.__new__(module.ImageProcessor)
+    processor.pick_height_mode = "depth_height"
+    processor.block_observation_height_mm = 192.0
+    processor.pick_surface_offset_mm = 162.0
+    processor.minimum_tcp_z_mm = 165.0
+    processor.surface_height_client = lambda _x, _y: types.SimpleNamespace(
+        success=False,
+        surface_z_mm=0.0,
+        message="深度无效",
+    )
+
+    with pytest.raises(RuntimeError, match="深度无效"):
+        processor.resolve_pick_surface_height(12.2, 33.8, 200.5)
+
+
+def test_calibrated_height_rejects_low_final_pick_z_during_high_preparation(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_low_calibrated_pick_z")
+    processor = object.__new__(module.ImageProcessor)
+    processor.pick_height_mode = "calibrated_height"
+    processor.block_observation_height_mm = 192.0
+    processor.pick_surface_offset_mm = 162.0
+    processor.minimum_tcp_z_mm = 165.0
+    processor.surface_height_client = None
+
+    with pytest.raises(ValueError, match="最终抓取 TCP Z=.*低于安全下限"):
+        processor.resolve_pick_surface_height(12.2, 33.8, 193.0)

@@ -253,7 +253,6 @@ class ControlNode:
             return RotateToolResponse(success=False, message=str(exc))
 
     def set_suction(self, request):
-        return SetSuctionResponse(success=True, message="1")#关闭吸盘测试
         try:
             if request.state == request.SUCK:
                 self.sucker.set_solenoid_valve(False)

@@ -93,3 +93,4 @@ coverage:
   # 样本凸包只描述本次随机标定点覆盖，不作为正式抓取范围。
   extrapolation_policy: diagnostic_only
 usage_note: 仅适用于高位相机的高位检测像素。输出仅含 TCP XYZ；调用方须自行提供或沿用 TCP 姿态 R/P/YAW。
+calibration_subject: block

@@ -8,12 +8,15 @@ import pandas as pd
 import pytest
 import yaml
 
-from competition_lib.pixel_to_tcp_calibration import load_pixel_to_tcp_calibration
+from image_process_lib.pixel_to_tcp_calibration import load_pixel_to_tcp_calibration
 from tools.vision.visual_servo_geometry_analysis import analyze
 
 
-def _homography_payload():
-    return {
+SRC_DIR = Path(__file__).resolve().parents[2]
+
+
+def _homography_payload(subject="block"):
+    payload = {
         "schema_version": 1,
         "calibration_type": "pixel_to_tcp_position",
         "input": {"coordinate": "high_detection_pixel_xy", "unit": "pixel"},
@@ -32,6 +35,9 @@ def _homography_payload():
             "pixel_convex_hull": [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
         },
     }
+    if subject is not None:
+        payload["calibration_subject"] = subject
+    return payload
 
 
 def _write_yaml(path: Path, payload: dict) -> Path:
@@ -97,11 +103,13 @@ def test_analysis_outputs_loadable_affine_tcp_calibration(tmp_path):
     report_path = output_dir / "分析报告.json"
 
     assert calibration_path.is_file()
+    # 分析工具当前的旧方块输出没有主体字段；不指定期望主体时保持兼容加载。
     calibration = load_pixel_to_tcp_calibration(calibration_path)
     assert calibration.model_name == "affine"
     assert calibration.metadata["metrics"]["sample_count"] == 35
     assert calibration.metadata["output"]["coordinate"] == "tcp_position_xyz"
     assert calibration.metadata["output"]["orientation_included"] is False
+    assert calibration.metadata["coverage"]["extrapolation_policy"] == "diagnostic_only"
 
     pixel = [184.0, 142.0]
     expected = [0.5 * pixel[0] - 0.2 * pixel[1] + 300.0, -0.1 * pixel[0] + 0.4 * pixel[1] - 120.0, 0.0]
@@ -110,17 +118,78 @@ def test_analysis_outputs_loadable_affine_tcp_calibration(tmp_path):
     assert '"selected_model": "affine"' in report_path.read_text(encoding="utf-8")
 
 
-def test_homography_calibration_prediction_and_coverage_rejection(tmp_path):
-    calibration = load_pixel_to_tcp_calibration(_write_yaml(tmp_path / "单应.yaml", _homography_payload()))
+def test_homography_calibration_uses_hull_only_for_coverage_diagnostics(tmp_path):
+    calibration = load_pixel_to_tcp_calibration(
+        _write_yaml(tmp_path / "单应.yaml", _homography_payload()),
+        expected_subject="block",
+    )
 
     assert np.allclose(calibration.predict([2.0, 3.0]), [12.0, 23.0, 30.0])
     assert calibration.is_pixel_within_coverage([10.0, 5.0]) is True
-    with pytest.raises(ValueError, match="凸包之外"):
-        calibration.predict([11.0, 5.0])
+    assert calibration.is_pixel_within_coverage([11.0, 5.0]) is False
     assert np.allclose(
-        calibration.predict([11.0, 5.0], allow_extrapolation=True),
+        calibration.predict([11.0, 5.0]),
         [21.0, 25.0, 30.0],
     )
+
+
+def test_loader_rejects_subject_mismatch_and_missing_subject(tmp_path):
+    block_path = _write_yaml(tmp_path / "方块.yaml", _homography_payload("block"))
+    with pytest.raises(ValueError, match="期望 tray.*文件为 block"):
+        load_pixel_to_tcp_calibration(block_path, expected_subject="tray")
+
+    legacy_path = _write_yaml(tmp_path / "旧方块.yaml", _homography_payload(None))
+    with pytest.raises(ValueError, match="期望 block.*文件为 缺失"):
+        load_pixel_to_tcp_calibration(legacy_path, expected_subject="block")
+    # 不指定主体时继续兼容旧分析输出。
+    assert load_pixel_to_tcp_calibration(legacy_path).model_name == "homography"
+
+
+def test_loader_reports_missing_file(tmp_path):
+    with pytest.raises(ValueError, match="无法读取 TCP 标定文件"):
+        load_pixel_to_tcp_calibration(
+            tmp_path / "不存在的标定.yaml",
+            expected_subject="block",
+        )
+
+
+def test_old_competition_calibration_module_is_removed_and_not_imported():
+    old_module = SRC_DIR / "competition" / "competition_lib" / "pixel_to_tcp_calibration.py"
+    assert not old_module.exists()
+
+    stale_imports = []
+    for package_name in ("camera", "competition", "control", "image_process"):
+        for source_path in (SRC_DIR / package_name).rglob("*.py"):
+            if "tests" in source_path.parts:
+                continue
+            source_text = source_path.read_text(encoding="utf-8")
+            if "competition_lib.pixel_to_tcp_calibration" in source_text:
+                stale_imports.append(str(source_path.relative_to(SRC_DIR)))
+    assert stale_imports == []
+
+
+@pytest.mark.parametrize("pixel", [[np.nan, 1.0], [np.inf, 1.0], [1.0, -np.inf]])
+def test_prediction_rejects_nonfinite_pixel(tmp_path, pixel):
+    calibration = load_pixel_to_tcp_calibration(
+        _write_yaml(tmp_path / "有效标定.yaml", _homography_payload()),
+        expected_subject="block",
+    )
+
+    with pytest.raises(ValueError, match="pixel_xy.*有限数值"):
+        calibration.predict(pixel)
+
+
+def test_prediction_rejects_nonfinite_overflow_result(tmp_path):
+    overflow_payload = _homography_payload()
+    overflow_payload["model"]["parameters"]["H"][0][0] = 1e308
+    calibration = load_pixel_to_tcp_calibration(
+        _write_yaml(tmp_path / "溢出标定.yaml", overflow_payload),
+        expected_subject="block",
+    )
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        with pytest.raises(ValueError, match="标定预测结果包含非有限数值"):
+            calibration.predict([2.0, 3.0])
 
 
 def test_loader_rejects_invalid_model_shape_and_homography_denominator(tmp_path):
@@ -146,6 +215,9 @@ def test_loader_rejects_invalid_model_shape_and_homography_denominator(tmp_path)
 
     zero_denominator = _homography_payload()
     zero_denominator["model"]["parameters"]["H"][2] = [0.0, 0.0, 0.0]
-    calibration = load_pixel_to_tcp_calibration(_write_yaml(tmp_path / "零分母.yaml", zero_denominator))
+    calibration = load_pixel_to_tcp_calibration(
+        _write_yaml(tmp_path / "零分母.yaml", zero_denominator),
+        expected_subject="block",
+    )
     with pytest.raises(ValueError, match="齐次分母"):
         calibration.predict([2.0, 3.0])
