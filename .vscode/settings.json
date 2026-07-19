@@ -1,3 +1,8 @@
 {
-    "ROS2.distro": "noetic"
+    "ROS2.distro": "noetic",
+    "python.REPL.enableREPLSmartSend": false,
+    "python.defaultInterpreterPath": "/home/zhl/fr3env/fr3env/bin/python",
+    "python.analysis.extraPaths": [
+        "/opt/ros/noetic/lib/python3/dist-packages"
+    ]
 }
