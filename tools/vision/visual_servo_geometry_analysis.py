@@ -38,6 +38,8 @@ import yaml
 COL_RUN = "运行编号"
 COL_TASK = "任务序号"
 COL_CATEGORY = "方块类别"
+COL_TRAY_ROW = "托盘行"
+COL_TRAY_COL = "托盘列"
 COL_EVENT = "事件"
 
 COL_PIXEL = ["高位检测像素X", "高位检测像素Y"]
@@ -47,6 +49,35 @@ COL_TCP = ["实测TCP位置X", "实测TCP位置Y", "实测TCP位置Z"]
 SUCCESS_EVENT = "伺服成功"
 TCP_CALIBRATION_FILENAME = "像素到TCP标定结果.yaml"
 TCP_CALIBRATION_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class AnalysisSpec:
+    """方块与托盘共用的几何分析对象配置。"""
+
+    subject_label: str
+    sample_label: str
+    output_prefix: str = ""
+    calibration_filename: str = TCP_CALIBRATION_FILENAME
+    calibration_subject: Optional[str] = None
+    extra_unique_columns: Tuple[str, ...] = ()
+    tray_grid_diagnostic: bool = False
+
+
+BLOCK_ANALYSIS_SPEC = AnalysisSpec(
+    subject_label="方块",
+    sample_label="方块",
+)
+
+TRAY_ANALYSIS_SPEC = AnalysisSpec(
+    subject_label="托盘",
+    sample_label="托盘目标",
+    output_prefix="托盘",
+    calibration_filename="托盘像素到TCP标定结果.yaml",
+    calibration_subject="tray",
+    extra_unique_columns=(COL_TRAY_ROW, COL_TRAY_COL),
+    tray_grid_diagnostic=True,
+)
 
 
 # ----------------------------- 直接运行配置 -----------------------------
@@ -140,12 +171,20 @@ def key_to_text(key: Any) -> str:
     return str(key)
 
 
-# ----------------------------- 方块级数据整理 -----------------------------
-def prepare_block_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """保留存在方块类别的记录，清理事件文本和数值列。"""
+# ----------------------------- 样本级数据整理 -----------------------------
+def prepare_analysis_rows(df: pd.DataFrame, spec: AnalysisSpec) -> pd.DataFrame:
+    """保留有效样本记录，清理事件文本和数值列。"""
     require_columns(
         df,
-        [COL_TASK, COL_CATEGORY, COL_EVENT, *COL_PIXEL, *COL_WORLD, *COL_TCP],
+        [
+            COL_TASK,
+            COL_CATEGORY,
+            COL_EVENT,
+            *COL_PIXEL,
+            *COL_WORLD,
+            *COL_TCP,
+            *spec.extra_unique_columns,
+        ],
     )
 
     out = df.copy()
@@ -153,7 +192,10 @@ def prepare_block_rows(df: pd.DataFrame) -> pd.DataFrame:
     out[COL_CATEGORY] = normalize_text(out[COL_CATEGORY])
     out = out[out[COL_CATEGORY] != ""].copy()
 
-    to_numeric_inplace(out, [COL_TASK, *COL_PIXEL, *COL_WORLD, *COL_TCP])
+    to_numeric_inplace(
+        out,
+        [COL_TASK, *COL_PIXEL, *COL_WORLD, *COL_TCP, *spec.extra_unique_columns],
+    )
     return out
 
 
@@ -572,13 +614,14 @@ def build_pixel_to_tcp_calibration(
     selected_model_name: str,
     selected_model: Dict[str, Any],
     selected_cv_summary: Mapping[str, Any],
+    calibration_subject: Optional[str] = None,
 ) -> Dict[str, Any]:
     """生成供运行代码加载的像素到 TCP XYZ 标定文件内容。"""
     hull = pixel_convex_hull(uv)
     uv = np.asarray(uv, dtype=float)
     parameters = model_to_jsonable(selected_model)
     cv = model_to_jsonable(dict(selected_cv_summary))
-    return {
+    calibration = {
         "schema_version": TCP_CALIBRATION_SCHEMA_VERSION,
         "calibration_type": "pixel_to_tcp_position",
         "description": "高位检测像素坐标到伺服成功实测 TCP 位置的离线标定结果",
@@ -629,6 +672,9 @@ def build_pixel_to_tcp_calibration(
             "调用方须自行提供或沿用 TCP 姿态 R/P/YAW。"
         ),
     }
+    if calibration_subject:
+        calibration["calibration_subject"] = str(calibration_subject)
+    return calibration
 
 
 def write_pixel_to_tcp_calibration(
@@ -637,6 +683,8 @@ def write_pixel_to_tcp_calibration(
     selected_model_name: str,
     selected_model: Dict[str, Any],
     selected_cv_summary: Mapping[str, Any],
+    filename: str = TCP_CALIBRATION_FILENAME,
+    calibration_subject: Optional[str] = None,
 ) -> Path:
     """写出可直接由 competition_lib 加载的 YAML 标定结果。"""
     calibration = build_pixel_to_tcp_calibration(
@@ -644,8 +692,9 @@ def write_pixel_to_tcp_calibration(
         selected_model_name,
         selected_model,
         selected_cv_summary,
+        calibration_subject=calibration_subject,
     )
-    output_path = output_dir / TCP_CALIBRATION_FILENAME
+    output_path = output_dir / filename
     with output_path.open("w", encoding="utf-8") as file:
         yaml.safe_dump(calibration, file, allow_unicode=True, sort_keys=False)
     return output_path
@@ -738,14 +787,19 @@ def plot_mapping_cv(cv_summary: pd.DataFrame, output_path: Path) -> None:
     plt.close(fig)
 
 
-def plot_mapping_oof_errors(oof_table: pd.DataFrame, model_names: Sequence[str], output_path: Path) -> None:
+def plot_mapping_oof_errors(
+    oof_table: pd.DataFrame,
+    model_names: Sequence[str],
+    output_path: Path,
+    subject_label: str,
+) -> None:
     fig, ax = plt.subplots(figsize=(10, 5))
     x = np.arange(len(oof_table))
     for model_name in model_names:
         ax.plot(x, oof_table[f"{model_name}_OOF三维误差"], marker="o", markersize=3, label=model_name)
-    ax.set_xlabel("方块样本索引")
+    ax.set_xlabel(f"{subject_label}样本索引")
     ax.set_ylabel("OOF 三维欧氏误差")
-    ax.set_title("各映射模型逐点交叉验证误差")
+    ax.set_title(f"{subject_label}各映射模型逐点交叉验证误差")
     ax.legend()
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -753,14 +807,56 @@ def plot_mapping_oof_errors(oof_table: pd.DataFrame, model_names: Sequence[str],
     plt.close(fig)
 
 
+def plot_tray_grid_oof_errors(
+    grid_oof_table: pd.DataFrame,
+    selected_model_name: str,
+    output_path: Path,
+) -> None:
+    """按托盘行列绘制自动选中模型的 OOF 三维误差，定位标定薄弱格点。"""
+    error_col = f"{selected_model_name}_OOF三维误差"
+    rows = pd.to_numeric(grid_oof_table[COL_TRAY_ROW], errors="coerce")
+    cols = pd.to_numeric(grid_oof_table[COL_TRAY_COL], errors="coerce")
+    errors = pd.to_numeric(grid_oof_table[error_col], errors="coerce")
+    valid = np.isfinite(rows) & np.isfinite(cols) & np.isfinite(errors)
+    if not valid.any():
+        raise ValueError("托盘格点 OOF 误差图缺少有效的行、列或误差数据")
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    scatter = ax.scatter(
+        cols[valid],
+        rows[valid],
+        c=errors[valid],
+        cmap="YlOrRd",
+        s=86,
+        edgecolors="black",
+        linewidths=0.5,
+    )
+    for row, col, error in zip(rows[valid], cols[valid], errors[valid]):
+        ax.annotate(f"{error:.2f}", (col, row), xytext=(4, 4), textcoords="offset points", fontsize=8)
+    colorbar = fig.colorbar(scatter, ax=ax)
+    colorbar.set_label("OOF 三维误差（毫米）")
+    ax.set_xlabel("托盘列")
+    ax.set_ylabel("托盘行")
+    ax.set_title(f"托盘格点 OOF 误差（{selected_model_name}）")
+    ax.invert_yaxis()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
 # ----------------------------- 主流程 -----------------------------
-def analyze(args: argparse.Namespace) -> None:
+def run_geometry_analysis(args: argparse.Namespace, spec: AnalysisSpec = BLOCK_ANALYSIS_SPEC) -> None:
+    """执行方块或托盘的共用几何分析、诊断输出与可调用标定导出。"""
     input_path = Path(args.input_csv).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    def output_path(filename: str) -> Path:
+        return output_dir / f"{spec.output_prefix}{filename}"
+
     df, encoding = read_csv_auto(input_path)
-    block_df = prepare_block_rows(df)
+    block_df = prepare_analysis_rows(df, spec)
     key_cols = build_key_columns(block_df)
 
     success_rows, success_validation = extract_success_rows(block_df, key_cols)
@@ -782,19 +878,19 @@ def analyze(args: argparse.Namespace) -> None:
         args.planarity_ratio_tol,
     )
 
-    # 每个方块的高位像素、世界坐标，必须在各事件行间一致。
+    # 每个样本的高位像素、世界坐标和对象特有字段必须在各事件行间一致。
     high_task, high_consistency = extract_unique_task_values(
         block_df,
         key_cols,
-        [*COL_PIXEL, *COL_WORLD],
+        [*COL_PIXEL, *COL_WORLD, *spec.extra_unique_columns],
         consistency_tol=args.unique_value_tol,
     )
     inconsistent = high_consistency[~high_consistency["全部唯一"]]
     if not inconsistent.empty:
-        inconsistent.to_csv(output_dir / "高位字段不唯一_异常任务.csv", index=False, encoding="utf-8-sig")
+        inconsistent.to_csv(output_path("高位字段不唯一_异常任务.csv"), index=False, encoding="utf-8-sig")
         raise ValueError(
-            "部分方块的高位像素/世界坐标在事件行之间并不唯一。"
-            "详情已写入：高位字段不唯一_异常任务.csv"
+            f"部分{spec.sample_label}的高位像素/世界坐标在事件行之间并不唯一。"
+            f"详情已写入：{output_path('高位字段不唯一_异常任务.csv').name}"
         )
 
     high_valid = high_task[finite_rows(high_task, COL_WORLD)].copy()
@@ -875,10 +971,13 @@ def analyze(args: argparse.Namespace) -> None:
         selected_model_name,
         final_models[selected_model_name],
         selected_cv_summary,
+        filename=spec.calibration_filename,
+        calibration_subject=spec.calibration_subject,
     )
 
-    # 输出逐点 OOF 预测，便于快速定位离群方块，而不靠人工逐行看原日志。
-    oof_table = mapping_df.loc[:, [*key_cols, COL_CATEGORY, *COL_PIXEL, *COL_TCP]].copy()
+    # 输出逐点 OOF 预测，便于快速定位离群样本，而不靠人工逐行看原日志。
+    metadata_cols = list(dict.fromkeys([*key_cols, COL_CATEGORY, *spec.extra_unique_columns]))
+    oof_table = mapping_df.loc[:, [*metadata_cols, *COL_PIXEL, *COL_TCP]].copy()
     for model_name, pred in oof_predictions.items():
         oof_table[f"{model_name}_预测TCP_X"] = pred[:, 0]
         oof_table[f"{model_name}_预测TCP_Y"] = pred[:, 1]
@@ -886,11 +985,11 @@ def analyze(args: argparse.Namespace) -> None:
         oof_table[f"{model_name}_OOF三维误差"] = np.linalg.norm(pred - xyz, axis=1)
 
     # 输出平面逐点距离。
-    tcp_point_table = success_rows.loc[:, [*key_cols, COL_CATEGORY, *COL_TCP]].copy()
+    tcp_point_table = success_rows.loc[:, [*metadata_cols, *COL_TCP]].copy()
     tcp_point_table["到TCP拟合平面有符号距离"] = tcp_plane.signed_distances
     tcp_point_table["到TCP拟合平面绝对距离"] = np.abs(tcp_plane.signed_distances)
 
-    world_point_table = high_valid.loc[:, [*key_cols, COL_CATEGORY, *COL_WORLD]].copy()
+    world_point_table = high_valid.loc[:, [*metadata_cols, *COL_WORLD]].copy()
     world_point_table["到高位世界拟合平面有符号距离"] = world_plane.signed_distances
     world_point_table["到高位世界拟合平面绝对距离"] = np.abs(world_plane.signed_distances)
 
@@ -944,17 +1043,25 @@ def analyze(args: argparse.Namespace) -> None:
     }
 
     # 文件输出
-    success_validation.to_csv(output_dir / "成功行唯一性检查.csv", index=False, encoding="utf-8-sig")
-    high_consistency.to_csv(output_dir / "高位字段唯一性检查.csv", index=False, encoding="utf-8-sig")
-    tcp_point_table.to_csv(output_dir / "TCP平面逐点距离.csv", index=False, encoding="utf-8-sig")
-    world_point_table.to_csv(output_dir / "高位世界平面逐点距离.csv", index=False, encoding="utf-8-sig")
-    plane_summary.to_csv(output_dir / "平面拟合汇总.csv", index=False, encoding="utf-8-sig")
+    success_validation.to_csv(output_path("成功行唯一性检查.csv"), index=False, encoding="utf-8-sig")
+    high_consistency.to_csv(output_path("高位字段唯一性检查.csv"), index=False, encoding="utf-8-sig")
+    tcp_point_table.to_csv(output_path("TCP平面逐点距离.csv"), index=False, encoding="utf-8-sig")
+    world_point_table.to_csv(output_path("高位世界平面逐点距离.csv"), index=False, encoding="utf-8-sig")
+    plane_summary.to_csv(output_path("平面拟合汇总.csv"), index=False, encoding="utf-8-sig")
     cv_summary.sort_values("CV三维RMSE").to_csv(
-        output_dir / "像素到TCP映射_交叉验证汇总.csv",
+        output_path("像素到TCP映射_交叉验证汇总.csv"),
         index=False,
         encoding="utf-8-sig",
     )
-    oof_table.to_csv(output_dir / "像素到TCP映射_OOF逐点预测.csv", index=False, encoding="utf-8-sig")
+    oof_table.to_csv(output_path("像素到TCP映射_OOF逐点预测.csv"), index=False, encoding="utf-8-sig")
+    if spec.tray_grid_diagnostic:
+        selected_error_col = f"{selected_model_name}_OOF三维误差"
+        grid_columns = [*metadata_cols, *COL_PIXEL, *COL_TCP, selected_error_col]
+        oof_table.loc[:, grid_columns].to_csv(
+            output_path("格点OOF误差.csv"),
+            index=False,
+            encoding="utf-8-sig",
+        )
 
     json_report = {
         "input": {
@@ -962,10 +1069,13 @@ def analyze(args: argparse.Namespace) -> None:
             "encoding": encoding,
             "key_columns": key_cols,
             "raw_rows": len(df),
+            "analysis_rows": len(block_df),
+            # 兼容已有方块分析报告的字段名；托盘报告同样表示分析样本行数。
             "block_rows": len(block_df),
             "success_points": len(tcp_points),
             "mapping_points": len(mapping_df),
         },
+        "analysis_subject": spec.calibration_subject or "block",
         "thresholds": {
             "plane_rmse_tol": args.plane_rmse_tol,
             "plane_max_tol": args.plane_max_tol,
@@ -985,20 +1095,41 @@ def analyze(args: argparse.Namespace) -> None:
             name: model_to_jsonable(model) for name, model in final_models.items()
         },
     }
-    with (output_dir / "分析报告.json").open("w", encoding="utf-8") as f:
+    with output_path("分析报告.json").open("w", encoding="utf-8") as f:
         json.dump(json_report, f, ensure_ascii=False, indent=2)
 
     if not args.skip_plots:
         configure_matplotlib()
-        plot_plane_fit(tcp_points, tcp_plane, "伺服成功 TCP 点平面拟合", output_dir / "TCP平面拟合.png")
-        plot_plane_fit(world_points, world_plane, "高位世界坐标点平面拟合", output_dir / "高位世界平面拟合.png")
-        plot_mapping_cv(cv_summary, output_dir / "像素到TCP映射_CV误差.png")
-        plot_mapping_oof_errors(oof_table, model_names, output_dir / "像素到TCP映射_逐点OOF误差.png")
+        plot_plane_fit(
+            tcp_points,
+            tcp_plane,
+            f"{spec.subject_label}伺服成功 TCP 点平面拟合",
+            output_path("TCP平面拟合.png"),
+        )
+        plot_plane_fit(
+            world_points,
+            world_plane,
+            f"{spec.subject_label}高位世界坐标点平面拟合",
+            output_path("高位世界平面拟合.png"),
+        )
+        plot_mapping_cv(cv_summary, output_path("像素到TCP映射_CV误差.png"))
+        plot_mapping_oof_errors(
+            oof_table,
+            model_names,
+            output_path("像素到TCP映射_逐点OOF误差.png"),
+            spec.subject_label,
+        )
+        if spec.tray_grid_diagnostic:
+            plot_tray_grid_oof_errors(
+                oof_table,
+                selected_model_name,
+                output_path("格点OOF误差.png"),
+            )
 
     print("=" * 72)
     print(f"输入文件：{input_path}")
     print(f"输出目录：{output_dir}")
-    print(f"成功 TCP 点数：{len(tcp_points)}")
+    print(f"{spec.subject_label}成功 TCP 点数：{len(tcp_points)}")
     print(f"高位世界点数：{len(world_points)}")
     print(f"映射样本数：{len(mapping_df)}")
     print(f"像素到TCP标定文件：{calibration_path}")
@@ -1023,6 +1154,11 @@ def analyze(args: argparse.Namespace) -> None:
     print("映射模型机械选择：")
     print(json.dumps(model_choice, ensure_ascii=False, indent=2))
     print("=" * 72)
+
+
+def analyze(args: argparse.Namespace) -> None:
+    """兼容原方块标定入口，内部使用共用分析核心。"""
+    run_geometry_analysis(args, BLOCK_ANALYSIS_SPEC)
 
 
 def build_parser() -> argparse.ArgumentParser:
