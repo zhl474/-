@@ -195,6 +195,10 @@
     "推荐最简模型": "homography",
     "机械判读": "单应模型更合适；这是平面成像常见的投影关系，不属于任意复杂非线性。"
   },
+  "pixel_to_tcp_calibration": {
+    "path": "/home/zhl/SingleArmTetris/SingleArmTetris/src/visual_servo_geometry_results/像素到TCP标定结果.yaml",
+    "selected_model": "homography"
+  },
   "mapping_models": {
     "affine": {
       "kind": "polynomial",

@@ -21,7 +21,7 @@ import os
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import cv2
 # 当前执行环境的 ~/.config/matplotlib 不可写。将字体缓存放入临时目录，避免每次运行均产生警告。
@@ -31,6 +31,7 @@ import matplotlib.pyplot as plt
 from matplotlib import font_manager
 import numpy as np
 import pandas as pd
+import yaml
 
 
 # ----------------------------- 列名配置 -----------------------------
@@ -44,6 +45,8 @@ COL_WORLD = ["高位世界坐标X", "高位世界坐标Y", "高位世界坐标Z"
 COL_TCP = ["实测TCP位置X", "实测TCP位置Y", "实测TCP位置Z"]
 
 SUCCESS_EVENT = "伺服成功"
+TCP_CALIBRATION_FILENAME = "像素到TCP标定结果.yaml"
+TCP_CALIBRATION_SCHEMA_VERSION = 1
 
 
 # ----------------------------- 直接运行配置 -----------------------------
@@ -537,15 +540,115 @@ def choose_simplest_near_best_model(
 
 
 def model_to_jsonable(model: Dict[str, Any]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
-    for key, value in model.items():
+    """将 Numpy 模型参数转换为 JSON/YAML 可序列化的 Python 基础类型。"""
+    def to_builtin(value: Any) -> Any:
         if isinstance(value, np.ndarray):
-            out[key] = value.tolist()
-        elif isinstance(value, (np.floating, np.integer)):
-            out[key] = value.item()
-        else:
-            out[key] = value
-    return out
+            return value.tolist()
+        if isinstance(value, (np.floating, np.integer)):
+            return value.item()
+        if isinstance(value, dict):
+            return {key: to_builtin(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [to_builtin(item) for item in value]
+        return value
+
+    return to_builtin(model)
+
+
+def pixel_convex_hull(uv: np.ndarray) -> np.ndarray:
+    """计算标定样本的像素凸包，拒绝所有点共线的退化覆盖区域。"""
+    unique_points = np.unique(np.asarray(uv, dtype=float), axis=0)
+    if unique_points.shape[0] < 3:
+        raise ValueError("像素到TCP标定至少需要 3 个不同的像素点")
+    # OpenCV 的 convexHull 仅接受 float32 或 int32。
+    hull = cv2.convexHull(unique_points.astype(np.float32)).reshape(-1, 2)
+    if hull.shape[0] < 3 or abs(cv2.contourArea(hull.astype(np.float32))) <= 1e-9:
+        raise ValueError("标定像素点共线，无法建立二维像素到TCP标定")
+    return hull
+
+
+def build_pixel_to_tcp_calibration(
+    uv: np.ndarray,
+    selected_model_name: str,
+    selected_model: Dict[str, Any],
+    selected_cv_summary: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """生成供运行代码加载的像素到 TCP XYZ 标定文件内容。"""
+    hull = pixel_convex_hull(uv)
+    uv = np.asarray(uv, dtype=float)
+    parameters = model_to_jsonable(selected_model)
+    cv = model_to_jsonable(dict(selected_cv_summary))
+    return {
+        "schema_version": TCP_CALIBRATION_SCHEMA_VERSION,
+        "calibration_type": "pixel_to_tcp_position",
+        "description": "高位检测像素坐标到伺服成功实测 TCP 位置的离线标定结果",
+        "input": {
+            "coordinate": "high_detection_pixel_xy",
+            "columns": list(COL_PIXEL),
+            "axes": ["u", "v"],
+            "unit": "pixel",
+        },
+        "output": {
+            "coordinate": "tcp_position_xyz",
+            "columns": list(COL_TCP),
+            "axes": ["x", "y", "z"],
+            "unit": "mm",
+            "orientation_included": False,
+        },
+        "model": {
+            "name": selected_model_name,
+            "parameters": parameters,
+        },
+        "metrics": {
+            "sample_count": int(len(uv)),
+            "cross_validation": {
+                "folds": int(cv["折数"]),
+                "three_dimensional_rmse_mm": float(cv["CV三维RMSE"]),
+                "three_dimensional_mae_mm": float(cv["CV三维MAE"]),
+                "three_dimensional_p95_mm": float(cv["CV三维P95"]),
+                "three_dimensional_max_error_mm": float(cv["CV三维最大误差"]),
+                "axis_rmse_mm": [
+                    float(cv["CV_X_RMSE"]),
+                    float(cv["CV_Y_RMSE"]),
+                    float(cv["CV_Z_RMSE"]),
+                ],
+            },
+            "full_training_three_dimensional_rmse_mm": float(cv["全数据训练RMSE"]),
+        },
+        "coverage": {
+            "sample_count": int(len(uv)),
+            "pixel_range": {
+                "u": [float(np.min(uv[:, 0])), float(np.max(uv[:, 0]))],
+                "v": [float(np.min(uv[:, 1])), float(np.max(uv[:, 1]))],
+            },
+            "pixel_convex_hull": hull.tolist(),
+            "extrapolation_policy": "reject_by_default",
+        },
+        "usage_note": (
+            "仅适用于高位相机的高位检测像素。输出仅含 TCP XYZ；"
+            "调用方须自行提供或沿用 TCP 姿态 R/P/YAW。"
+        ),
+    }
+
+
+def write_pixel_to_tcp_calibration(
+    output_dir: Path,
+    uv: np.ndarray,
+    selected_model_name: str,
+    selected_model: Dict[str, Any],
+    selected_cv_summary: Mapping[str, Any],
+) -> Path:
+    """写出可直接由 competition_lib 加载的 YAML 标定结果。"""
+    calibration = build_pixel_to_tcp_calibration(
+        uv,
+        selected_model_name,
+        selected_model,
+        selected_cv_summary,
+    )
+    output_path = output_dir / TCP_CALIBRATION_FILENAME
+    with output_path.open("w", encoding="utf-8") as file:
+        yaml.safe_dump(calibration, file, allow_unicode=True, sort_keys=False)
+    return output_path
 
 
 # ----------------------------- 绘图 -----------------------------
@@ -762,6 +865,17 @@ def analyze(args: argparse.Namespace) -> None:
         cv_summary,
         slack=args.simple_model_slack,
     )
+    selected_model_name = str(model_choice["推荐最简模型"])
+    selected_cv_summary = cv_summary.loc[
+        cv_summary["模型"] == selected_model_name
+    ].iloc[0].to_dict()
+    calibration_path = write_pixel_to_tcp_calibration(
+        output_dir,
+        uv,
+        selected_model_name,
+        final_models[selected_model_name],
+        selected_cv_summary,
+    )
 
     # 输出逐点 OOF 预测，便于快速定位离群方块，而不靠人工逐行看原日志。
     oof_table = mapping_df.loc[:, [*key_cols, COL_CATEGORY, *COL_PIXEL, *COL_TCP]].copy()
@@ -863,6 +977,10 @@ def analyze(args: argparse.Namespace) -> None:
         "world_plane": {**world_plane.to_jsonable(), "judgement": world_judge},
         "parallelism": parallel_summary,
         "mapping_model_choice": model_choice,
+        "pixel_to_tcp_calibration": {
+            "path": str(calibration_path),
+            "selected_model": selected_model_name,
+        },
         "mapping_models": {
             name: model_to_jsonable(model) for name, model in final_models.items()
         },
@@ -883,6 +1001,7 @@ def analyze(args: argparse.Namespace) -> None:
     print(f"成功 TCP 点数：{len(tcp_points)}")
     print(f"高位世界点数：{len(world_points)}")
     print(f"映射样本数：{len(mapping_df)}")
+    print(f"像素到TCP标定文件：{calibration_path}")
     print("-" * 72)
     print(
         "TCP 平面："
