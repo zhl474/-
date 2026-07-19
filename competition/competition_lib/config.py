@@ -16,6 +16,7 @@ DEFAULT_VISUAL_SERVO_CONFIG_PATH = os.path.join(PACKAGE_DIR, "config", "visual_s
 @dataclass(frozen=True)
 class ExecutionConfig:
     calibration_mode: bool
+    visual_servo_enabled: bool
     shooting_pose: tuple
     arm_speed: int
     pick_speed: int
@@ -59,6 +60,10 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
     motor = data.get("tool_motor", {})
     config = ExecutionConfig(
         calibration_mode=_strict_bool(data.get("calibration_mode", False), "calibration_mode"),
+        visual_servo_enabled=_strict_bool(
+            servo.get("enabled", True),
+            "servo.enabled",
+        ),
         shooting_pose=_finite_pose(data.get("shooting_pose"), "shooting_pose"),
         arm_speed=int(motion["arm_speed"]),
         pick_speed=int(motion["pick_speed"]),

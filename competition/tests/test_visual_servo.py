@@ -28,6 +28,7 @@ def test_current_execution_and_servo_configs_are_valid():
     assert execution.servo_speed > 0
     assert execution.minimum_tcp_z_mm == 165.0
     assert execution.calibration_mode is False
+    assert execution.visual_servo_enabled is True
     assert len(execution.shooting_pose) == 6
     assert np.asarray(visual["pixel_to_robot_matrix"]).shape == (2, 2)
     assert "block_servo_height_offset_mm" not in visual
@@ -62,6 +63,54 @@ def test_execution_config_rejects_nonboolean_calibration_mode(tmp_path, invalid_
     )
 
     with pytest.raises(ValueError, match="calibration_mode 必须是 YAML 布尔值"):
+        load_execution_config(config_path)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_执行配置读取视觉伺服开关(tmp_path, enabled):
+    config_data = yaml.safe_load(
+        Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
+    )
+    config_data["servo"]["enabled"] = enabled
+    config_path = tmp_path / "视觉伺服开关.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    assert load_execution_config(config_path).visual_servo_enabled is enabled
+
+
+def test_执行配置缺少视觉伺服开关时默认开启(tmp_path):
+    config_data = yaml.safe_load(
+        Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
+    )
+    config_data["servo"].pop("enabled")
+    config_path = tmp_path / "旧版执行配置.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    assert load_execution_config(config_path).visual_servo_enabled is True
+
+
+@pytest.mark.parametrize("invalid_value", ["false", "true", 0, 1, None])
+def test_执行配置拒绝非布尔视觉伺服开关(
+    tmp_path,
+    invalid_value,
+):
+    config_data = yaml.safe_load(
+        Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
+    )
+    config_data["servo"]["enabled"] = invalid_value
+    config_path = tmp_path / "错误视觉伺服开关.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="servo.enabled 必须是 YAML 布尔值"):
         load_execution_config(config_path)
 
 
@@ -128,7 +177,7 @@ def test_alignment_stops_after_consecutive_misses():
     assert "连续多帧" in result[3]
 
 
-def test_alignment_writes_correction_event_without_terminal_detail(capsys):
+def test_alignment_writes_correction_event_and_terminal_error_log(capsys):
     events = []
     run_offset_visual_servo_alignment(
         lambda: _response(dx=3, dy=1),
@@ -146,7 +195,8 @@ def test_alignment_writes_correction_event_without_terminal_detail(capsys):
         event_callback=events.append,
     )
 
-    assert capsys.readouterr().out == ""
+    output = capsys.readouterr().out
+    assert "[方块视觉伺服] 第 1 轮误差=(+3.00,+1.00)px，修正=(+3.000,+1.000)mm" in output
     assert len(events) == 1
     assert events[0]["事件"] == "执行修正"
     assert events[0]["伺服轮次"] == 1
@@ -196,6 +246,48 @@ def test_alignment_emits_missing_target_event_before_failure():
 
     assert result[0] is False
     assert [event["事件"] for event in events] == ["目标丢失", "目标丢失"]
+
+
+def test_alignment_logs_stable_frame_and_timing(capsys):
+    result = run_offset_visual_servo_alignment(
+        lambda: _response(dx=1, dy=-0.5),
+        lambda *_args, **_kwargs: None,
+        [0, 0, 200, 0, 0, 0],
+        {"pixel_to_robot_matrix": [[1, 0], [0, 1]]},
+        speed=25,
+        error_threshold_px=2,
+        max_step_mm=5,
+        max_iter=1,
+        success_stable_frames=1,
+        max_missed_frames=2,
+        settle_sec=0,
+        timing_debug=True,
+        log_label="托盘视觉伺服",
+    )
+
+    output = capsys.readouterr().out
+    assert result[0] is True
+    assert "[托盘视觉伺服] 第 1 轮误差=(+1.00,-0.50)px，满足阈值 2.00px，稳定帧 1/1" in output
+    assert "[托盘视觉伺服耗时] 第 1 轮 图像服务=" in output
+
+
+def test_alignment_logs_missing_target(capsys):
+    run_offset_visual_servo_alignment(
+        lambda: _response(found=False, message="未识别到方块"),
+        lambda *_args, **_kwargs: None,
+        [0, 0, 200, 0, 0, 0],
+        {"pixel_to_robot_matrix": [[1, 0], [0, 1]]},
+        speed=25,
+        error_threshold_px=2,
+        max_step_mm=5,
+        max_iter=1,
+        success_stable_frames=1,
+        max_missed_frames=1,
+        settle_sec=0,
+        log_label="方块视觉伺服",
+    )
+
+    assert "[方块视觉伺服] 第 1 轮未识别，连续丢失 1/1: 未识别到方块" in capsys.readouterr().out
 
 
 def test_alignment_motion_requests_stability_wait():

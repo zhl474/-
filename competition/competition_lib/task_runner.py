@@ -70,8 +70,15 @@ class TaskRunner:
         self.state = TaskState.IDLE
         self.holding_block = False
         self.execution_start_time = None
+        self.visual_servo_enabled = self.config.visual_servo_enabled
+        if self.config.calibration_mode and not self.visual_servo_enabled:
+            rospy.logwarn(
+                "标定采集依赖视觉伺服精确位姿，已忽略 servo.enabled=false 并强制开启视觉伺服"
+            )
+            self.visual_servo_enabled = True
         mode_name = "标定采集模式" if self.config.calibration_mode else "正式运行模式"
-        print(f"\033[96m当前模式：{mode_name}\033[0m")
+        servo_mode_name = "开启（闭环）" if self.visual_servo_enabled else "关闭（开环）"
+        print(f"\033[96m当前模式：{mode_name}；视觉伺服：{servo_mode_name}\033[0m")
 
     def _set_state(self, state):
         self.state = state
@@ -199,38 +206,67 @@ class TaskRunner:
             "最终抓取高度",
         )
         rough_pose = self._validate_motion_pose(target.pick_observation_pose, "方块观察位")
-        lift_pose = list(rough_pose)
-        lift_pose[2] = self.config.lift_z
-        lift_pose = self._validate_motion_pose(lift_pose, "抓取抬升位")
-        pick_pose = list(lift_pose)
-        pick_pose[2] = pick_z_mm
-        pick_pose = self._validate_motion_pose(pick_pose, "最终抓取位")
+
+        # 开环模式必须在任何运动前校验偏置后的上方位和下探位。
+        open_loop_sucker_pose = None
+        if not self.visual_servo_enabled:
+            open_loop_sucker_pose = apply_camera_to_sucker_offset(
+                rough_pose,
+                self.visual_config,
+            )
+            open_loop_sucker_pose[2] = self.config.lift_z
+            open_loop_sucker_pose = self._validate_motion_pose(
+                open_loop_sucker_pose,
+                "开环吸盘抓取上方位",
+            )
+            open_loop_pick_pose = list(open_loop_sucker_pose)
+            open_loop_pick_pose[2] = pick_z_mm
+            self._validate_motion_pose(open_loop_pick_pose, "开环最终抓取位")
+        else:
+            # 闭环最终 XY 尚未得到，先用粗定位姿态校验本次下探高度。
+            pick_height_check_pose = list(rough_pose)
+            pick_height_check_pose[2] = pick_z_mm
+            self._validate_motion_pose(pick_height_check_pose, "最终抓取位")
 
         _, place_angle, motor_wait = self.angle_planner.plan(target.rotation_delta_deg)
         self._set_state(TaskState.PICK_COARSE)
-        self.clients.move_arm(rough_pose, self.config.arm_speed, wait_until_stable=True)
-        if motor_wait > 0:
-            time.sleep(motor_wait)
+        if self.visual_servo_enabled:
+            self.clients.move_arm(rough_pose, self.config.arm_speed, wait_until_stable=True)
+            if motor_wait > 0:
+                time.sleep(motor_wait)
 
-        self._set_state(TaskState.PICK_ALIGN)
-        try:
-            success, camera_pose, last_response, message = self._align(
-                lambda: self.clients.detect_block_offset(target.category, target.detected_angle_deg),
-                rough_pose,
-                "方块视觉伺服",
+            self._set_state(TaskState.PICK_ALIGN)
+            try:
+                success, camera_pose, last_response, message = self._align(
+                    lambda: self.clients.detect_block_offset(
+                        target.category,
+                        target.detected_angle_deg,
+                    ),
+                    rough_pose,
+                    "方块视觉伺服",
+                )
+            except Exception:
+                self._record_servo_result(target, "pick", False)
+                raise
+            if not success:
+                self._record_servo_result(target, "pick", False)
+                raise RuntimeError(f"方块视觉伺服失败: {message}")
+            self._record_servo_result(target, "pick", True)
+
+            sucker_pose = apply_camera_to_sucker_offset(camera_pose, self.visual_config)
+            sucker_pose[2] = self.config.lift_z
+            sucker_pose = self._validate_motion_pose(sucker_pose, "吸盘抓取抬升位")
+            self.clients.move_arm(sucker_pose, self.config.arm_speed)
+        else:
+            sucker_pose = open_loop_sucker_pose
+            # 必须确认已经到达方块上方，随后才允许下探，避免斜向轨迹碰撞。
+            self.clients.move_arm(
+                sucker_pose,
+                self.config.arm_speed,
+                wait_until_stable=False,
             )
-        except Exception as exc:
-            self._record_servo_result(target, "pick", False)
-            raise
-        if not success:
-            self._record_servo_result(target, "pick", False)
-            raise RuntimeError(f"方块视觉伺服失败: {message}")
-        self._record_servo_result(target, "pick", True)
-
-        sucker_pose = apply_camera_to_sucker_offset(camera_pose, self.visual_config)
-        sucker_pose[2] = self.config.lift_z
-        sucker_pose = self._validate_motion_pose(sucker_pose, "吸盘抓取抬升位")
-        self.clients.move_arm(sucker_pose, self.config.arm_speed)
+            if motor_wait > 0:
+                time.sleep(motor_wait)
 
         self._set_state(TaskState.PICKING)
         pick_pose = list(sucker_pose)
@@ -245,28 +281,48 @@ class TaskRunner:
 
     def _place(self, target, task_index=None):
         rough_pose = self._validate_motion_pose(target.place_observation_pose, "托盘观察位")
-        self._set_state(TaskState.PLACE_COARSE)
-        self.clients.move_arm(rough_pose, self.config.arm_speed, wait_until_stable=True)
-
-        self._set_state(TaskState.PLACE_ALIGN)
-        try:
-            success, camera_pose, last_response, message = self._align(
-                lambda: self.clients.detect_board_offset(target.row, target.col),
+        open_loop_place_pose = None
+        if not self.visual_servo_enabled:
+            open_loop_place_pose = apply_camera_to_sucker_offset(
                 rough_pose,
-                "托盘视觉伺服",
+                self.visual_config,
             )
-        except Exception as exc:
-            self._record_servo_result(target, "place", False)
-            raise
-        if not success:
-            self._record_servo_result(target, "place", False)
-            raise RuntimeError(f"托盘视觉伺服失败: {message}")
-        self._record_servo_result(target, "place", True)
+            # 托盘高位标定给出的 Z 就是释放 Z，只应用吸盘 XY 偏移。
+            open_loop_place_pose = self._validate_motion_pose(
+                open_loop_place_pose,
+                "开环最终摆放位",
+            )
 
-        place_pose = apply_camera_to_sucker_offset(camera_pose, self.visual_config)
-        # 托盘标定给出的观察 Z 同时就是吹气释放 Z，此处只应用吸盘 XY 偏移。
-        place_pose = self._validate_motion_pose(place_pose, "最终摆放位")
-        self.clients.move_arm(place_pose, self.config.arm_speed)
+        self._set_state(TaskState.PLACE_COARSE)
+        if self.visual_servo_enabled:
+            self.clients.move_arm(rough_pose, self.config.arm_speed, wait_until_stable=True)
+
+            self._set_state(TaskState.PLACE_ALIGN)
+            try:
+                success, camera_pose, last_response, message = self._align(
+                    lambda: self.clients.detect_board_offset(target.row, target.col),
+                    rough_pose,
+                    "托盘视觉伺服",
+                )
+            except Exception:
+                self._record_servo_result(target, "place", False)
+                raise
+            if not success:
+                self._record_servo_result(target, "place", False)
+                raise RuntimeError(f"托盘视觉伺服失败: {message}")
+            self._record_servo_result(target, "place", True)
+
+            place_pose = apply_camera_to_sucker_offset(camera_pose, self.visual_config)
+            # 托盘标定给出的观察 Z 同时就是吹气释放 Z，此处只应用吸盘 XY 偏移。
+            place_pose = self._validate_motion_pose(place_pose, "最终摆放位")
+            self.clients.move_arm(place_pose, self.config.arm_speed)
+        else:
+            place_pose = open_loop_place_pose
+            self.clients.move_arm(
+                place_pose,
+                self.config.arm_speed,
+                wait_until_stable=False,
+            )
 
         self._set_state(TaskState.PLACING)
         if not self.config.calibration_mode:

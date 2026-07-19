@@ -13,6 +13,7 @@ def _load_task_runner(monkeypatch):
     rospy = types.ModuleType("rospy")
     rospy.loginfo = lambda *_args, **_kwargs: None
     rospy.logerr = lambda *_args, **_kwargs: None
+    rospy.logwarn = lambda *_args, **_kwargs: None
     monkeypatch.setitem(sys.modules, "rospy", rospy)
 
     clients_module = types.ModuleType("competition_lib.ros_clients")
@@ -39,6 +40,8 @@ class _FakeClients:
         self.suction_states = []
         self.prepare_requests = []
         self.actual_pose_calls = 0
+        self.block_offset_requests = []
+        self.board_offset_requests = []
 
     def get_task_target(self, _index):
         return types.SimpleNamespace(
@@ -78,6 +81,14 @@ class _FakeClients:
         self.prepare_requests.append((advanced, list(place_order)))
         return types.SimpleNamespace(success=True, task_count=1, message="成功")
 
+    def detect_block_offset(self, category, high_angle_deg):
+        self.block_offset_requests.append((category, high_angle_deg))
+        return types.SimpleNamespace(found=True)
+
+    def detect_board_offset(self, row, col):
+        self.board_offset_requests.append((row, col))
+        return types.SimpleNamespace(found=True)
+
     def get_actual_pose(self):
         self.actual_pose_calls += 1
         return types.SimpleNamespace(
@@ -111,6 +122,30 @@ def test_formal_pick_alignment_failure_never_writes_csv_or_reads_actual_pose(
     assert not (tmp_path / "托盘视觉伺服.csv").exists()
 
 
+def test_闭环模式调用方块和托盘低位检测(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=load_execution_config(),
+        visual_config=load_visual_servo_config(),
+    )
+
+    def align_once(offset_func, start_pose, _label):
+        offset_func()
+        return True, list(start_pose), None, "成功"
+
+    runner._align = align_once
+    target = clients.get_task_target(0)
+    target.pick_surface_z_mm = 8.0
+
+    runner._pick(target)
+    runner._place(target)
+
+    assert clients.block_offset_requests == [("T", 0.0)]
+    assert clients.board_offset_requests == [(1.0, 1.0)]
+
+
 def test_pick_uses_surface_height_and_configured_offset(monkeypatch):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
@@ -125,6 +160,62 @@ def test_pick_uses_surface_height_and_configured_offset(monkeypatch):
     runner._pick(clients.get_task_target(0))
 
     assert clients.moves[2][0][2] == 177.5
+
+
+def test_开环抓取先到上方再下探抬回且不调用对准(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    execution_config = replace(
+        load_execution_config(),
+        visual_servo_enabled=False,
+    )
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=execution_config,
+        visual_config=load_visual_servo_config(),
+    )
+    runner._align = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("开环抓取不应调用视觉伺服")
+    )
+    target = clients.get_task_target(0)
+    target.pick_surface_z_mm = 8.0
+
+    runner._pick(target)
+
+    expected_poses = [
+        [-94.1, -13.8, 197.0, -180.0, 0.0, 90.0],
+        [-94.1, -13.8, 170.0, -180.0, 0.0, 90.0],
+        [-94.1, -13.8, 197.0, -180.0, 0.0, 90.0],
+    ]
+    assert len(clients.moves) == len(expected_poses)
+    for move, expected_pose in zip(clients.moves, expected_poses):
+        assert move[0] == pytest.approx(expected_pose)
+    assert clients.moves[0][3] is True
+    assert clients.moves[1][1] == execution_config.pick_speed
+    assert clients.suction_states == [module.RobotClients.SUCK]
+    assert clients.block_offset_requests == []
+    assert runner.state is module.TaskState.PICKING
+
+
+def test_开环抓取在运动前拒绝无效粗定位位姿(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=replace(
+            load_execution_config(),
+            visual_servo_enabled=False,
+        ),
+        visual_config=load_visual_servo_config(),
+    )
+    target = clients.get_task_target(0)
+    target.pick_observation_pose[0] = float("nan")
+
+    with pytest.raises(RuntimeError, match="方块观察位"):
+        runner._pick(target)
+
+    assert clients.moves == []
+    assert clients.suction_states == []
 
 
 def test_place_keeps_dynamic_observation_height_and_directly_releases(monkeypatch):
@@ -148,6 +239,34 @@ def test_place_keeps_dynamic_observation_height_and_directly_releases(monkeypatc
     assert not hasattr(execution_config, "place_high_z")
     assert not hasattr(execution_config, "place_down_z")
     assert not hasattr(execution_config, "place_lift_step_mm")
+
+
+def test_开环摆放应用xy偏置并保留托盘高度(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    execution_config = replace(
+        load_execution_config(),
+        visual_servo_enabled=False,
+    )
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=execution_config,
+        visual_config=load_visual_servo_config(),
+    )
+    runner._align = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("开环摆放不应调用视觉伺服")
+    )
+
+    runner._place(clients.get_task_target(0))
+
+    assert len(clients.moves) == 1
+    assert clients.moves[0][0] == pytest.approx(
+        [-84.1, -3.8, 200.0, -180.0, 0.0, 90.0]
+    )
+    assert clients.moves[0][3] is True
+    assert clients.suction_states == [module.RobotClients.BLOW]
+    assert clients.board_offset_requests == []
+    assert runner.state is module.TaskState.PLACING
 
 
 def test_pick_rejects_missing_surface_height_before_moving(monkeypatch):
@@ -283,6 +402,47 @@ def test_calibration_mode_writes_one_final_row_per_target(monkeypatch, tmp_path,
     assert block_rows[0]["实测TCP位置X"] == "1.0"
     assert board_rows[0]["高位检测像素X"] == "320.5"
     assert clients.actual_pose_calls == 2
+    assert clients.suction_states == [module.RobotClients.OFF]
+
+
+def test_标定模式警告并强制开启视觉伺服(
+    monkeypatch,
+    tmp_path,
+):
+    module = _load_task_runner(monkeypatch)
+    warnings = []
+    monkeypatch.setattr(
+        module.rospy,
+        "logwarn",
+        lambda message, *args: warnings.append(message % args if args else message),
+    )
+    clients = _FakeClients()
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=replace(
+            load_execution_config(),
+            calibration_mode=True,
+            visual_servo_enabled=False,
+        ),
+        visual_config=load_visual_servo_config(),
+        servo_csv_output_dir=tmp_path,
+    )
+    align_labels = []
+    runner._align = lambda _func, pose, label: align_labels.append(label) or (
+        True,
+        list(pose),
+        None,
+        "成功",
+    )
+
+    runner.execute_all(1)
+
+    assert runner.visual_servo_enabled is True
+    assert len(warnings) == 1
+    assert "强制开启视觉伺服" in warnings[0]
+    assert align_labels == ["方块视觉伺服", "托盘视觉伺服"]
+    assert len(_read_csv_rows(tmp_path / "方块视觉伺服.csv")) == 1
+    assert len(_read_csv_rows(tmp_path / "托盘视觉伺服.csv")) == 1
     assert clients.suction_states == [module.RobotClients.OFF]
 
 
