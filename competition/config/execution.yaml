@@ -44,7 +44,7 @@ servo:
   # true：执行方块和托盘低位视觉伺服；false：使用高位粗定位结果开环抓放。
   # 本开关在比赛节点启动时读取，修改后需要重启节点。
   # 标定采集依赖视觉伺服结果，因此 calibration_mode=true 时会强制按 true 执行。
-  enabled: false
+  enabled: true
 
   # 是否输出视觉伺服分阶段耗时。调试时开启，正式运行时关闭以避免日志 I/O 影响闭环频率。
   timing_debug: false
@@ -52,7 +52,7 @@ servo:
   # 视觉伺服成功阈值，单位 px。
   # 每轮取 max(abs(dx), abs(dy))；不超过该值才算一帧对准。
   # 调小会更精确但更难稳定，调大会更容易结束但残余偏差更大。
-  error_threshold_px: 4.0
+  error_threshold_px: 3.0
 
   # 单轮机械臂 XY 修正的最小长度，单位 mm。
   # 只有像素误差仍超出成功阈值时才生效，用于避免修正量小到机械臂不响应。
