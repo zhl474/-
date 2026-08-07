@@ -2,6 +2,9 @@
 """图像快照、任务规划和视觉伺服检测的 ROS 服务组合节点。"""
 
 import os
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 
@@ -26,12 +29,22 @@ from image_process_lib.board_scene_detector import (
 )
 from image_process_lib.board_servo_detector import detect_nearest_board_dot_in_roi
 from image_process_lib.block_category import BLOCK_CATEGORY_NAMES, normalize_category_name
-from image_process_lib.block_scene_detector import detect_blocks_in_image
+from image_process_lib.block_scene_detector import (
+    detect_blocks_in_image,
+    rematch_blocks_from_masks,
+)
 from image_process_lib.block_servo_detector import detect_block_with_high_prior_roi
 from image_process_lib.advanced_planner import AdvancedPlanner
 from image_process_lib.debug_output import DebugVideoRecorder, save_image_to_path
 from image_process_lib.depth_rough_localization import DepthRoughLocalizer, fit_z_plane
 from image_process_lib.high_pixel_to_tcp_localizer import HighPixelToTcpLocalizer
+from image_process_lib.high_mask_edit_session import (
+    会话环境变量,
+    创建高位Mask编辑会话,
+    预览设备环境变量,
+    编辑取消退出码,
+    读取已提交高位Mask,
+)
 from image_process_lib.task_planner import (
     ObservedBlock,
     PlacementTarget,
@@ -74,6 +87,12 @@ DEFAULT_TRAY_CALIBRATION_PATH = os.path.join(
     "tray_pixel_to_tcp_calibration.yaml",
 )
 DEFAULT_DEBUG_DIR = os.path.expanduser("~/.ros/single_arm_tetris")
+DEFAULT_HIGH_MASK_EDITOR_SCRIPT = os.path.join(
+    SRC_DIR,
+    "tools",
+    "high_mask_editor_demo",
+    "high_mask_session_editor.py",
+)
 
 
 class ImageProcessor:
@@ -81,6 +100,9 @@ class ImageProcessor:
         self.bridge = CvBridge()
         self.image_lock = threading.Lock()
         self.image_condition = threading.Condition(self.image_lock)
+        self.prepare_task_lock = threading.Lock()
+        self.high_mask_editor_process_lock = threading.Lock()
+        self.active_high_mask_editor_process = None
         self.latest_image = None
         self.latest_image_stamp = None
         self.fresh_image_timeout_sec = float(rospy.get_param("~fresh_image_timeout_sec", 0.5))
@@ -100,6 +122,36 @@ class ImageProcessor:
         def src_path(value, fallback):
             raw_path = str(value or fallback)
             return raw_path if os.path.isabs(raw_path) else os.path.join(SRC_DIR, raw_path)
+
+        manual_editor_config = perception_config.get("high_mask_manual_editor", {})
+        if not isinstance(manual_editor_config, dict):
+            raise ValueError("perception.yaml 的 high_mask_manual_editor 必须是字典")
+        manual_editor_enabled = rospy.get_param(
+            "~high_mask_manual_editor_enabled",
+            manual_editor_config.get("enabled", False),
+        )
+        if not isinstance(manual_editor_enabled, bool):
+            raise ValueError("high_mask_manual_editor.enabled 必须是布尔值")
+        self.high_mask_manual_editor_enabled = manual_editor_enabled
+        self.high_mask_editor_script_path = src_path(
+            rospy.get_param(
+                "~high_mask_editor_script_path",
+                manual_editor_config.get("script"),
+            ),
+            DEFAULT_HIGH_MASK_EDITOR_SCRIPT,
+        )
+        self.high_mask_editor_preview_device = str(rospy.get_param(
+            "~high_mask_editor_preview_device",
+            manual_editor_config.get("preview_device", "cuda"),
+        )).strip().lower()
+        if self.high_mask_editor_preview_device not in ("cpu", "cuda"):
+            raise ValueError("high_mask_manual_editor.preview_device 只能是 cpu 或 cuda")
+        if self.high_mask_manual_editor_enabled and not os.path.isfile(
+            self.high_mask_editor_script_path
+        ):
+            raise FileNotFoundError(
+                f"高位 Mask 编辑子进程脚本不存在: {self.high_mask_editor_script_path}"
+            )
 
         detection_model_path = src_path(
             rospy.get_param("~detection_model_path", model_config.get("detection")),
@@ -400,8 +452,28 @@ class ImageProcessor:
         self.board_offset_service = rospy.Service(
             "/perception/board_offset", DetectBoardOffset, self.detect_board_offset_service
         )
-        rospy.on_shutdown(self.close_debug_video_recorders)
+        rospy.on_shutdown(self.close_runtime_resources)
         rospy.loginfo("图像处理服务已启动")
+
+    def terminate_high_mask_editor_process(self):
+        """节点退出时终止仍在等待人工输入的独立 GUI 子进程。"""
+        with self.high_mask_editor_process_lock:
+            process = self.active_high_mask_editor_process
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2.0)
+        except Exception as exc:
+            rospy.logwarn("终止高位 Mask 编辑子进程失败: %s", exc)
+
+    def close_runtime_resources(self):
+        """节点退出时统一关闭 GUI 子进程和调试视频。"""
+        self.terminate_high_mask_editor_process()
+        self.close_debug_video_recorders()
 
     def close_debug_video_recorders(self):
         """节点退出时释放视频文件句柄，避免最后几帧没有写入文件。"""
@@ -699,6 +771,64 @@ class ImageProcessor:
         self.board_theta = self.compute_board_theta_from_grid_points(self.board_grid_points)
         rospy.loginfo("托盘像素角度: %.2f 度", self.board_theta)
 
+    def _run_high_mask_manual_editor(self, image, blocks):
+        """在独立无 ROS 子进程中编辑 Mask，并只返回严格校验后的二值结果。"""
+        if not self.high_mask_manual_editor_enabled:
+            return [block["mask"].copy() for block in blocks]
+        if not os.environ.get("DISPLAY", "").strip():
+            raise RuntimeError(
+                "高位 Mask 人工编辑已启用，但图像节点环境中没有 DISPLAY；"
+                "请从图形桌面终端启动节点，或关闭 high_mask_manual_editor.enabled"
+            )
+        if not os.path.isfile(self.high_mask_editor_script_path):
+            raise RuntimeError(f"高位 Mask 编辑脚本不存在: {self.high_mask_editor_script_path}")
+
+        with tempfile.TemporaryDirectory(prefix="single_arm_tetris_high_mask_") as temp_dir:
+            manifest_path = 创建高位Mask编辑会话(temp_dir, image, blocks)
+            child_env = os.environ.copy()
+            child_env[会话环境变量] = str(manifest_path)
+            child_env[预览设备环境变量] = self.high_mask_editor_preview_device
+            if self.high_mask_editor_preview_device == "cpu":
+                child_env["CUDA_VISIBLE_DEVICES"] = ""
+            child_env["PYTHONUNBUFFERED"] = "1"
+            matplotlib_cache = os.path.join(temp_dir, "matplotlib_cache")
+            os.makedirs(matplotlib_cache, exist_ok=True)
+            child_env["MPLCONFIGDIR"] = matplotlib_cache
+
+            rospy.loginfo(
+                "等待高位 Mask 人工编辑，预览设备=%s，"
+                "按 Enter/Q 提交，Esc 取消本轮识别",
+                self.high_mask_editor_preview_device,
+            )
+            process = subprocess.Popen(
+                [sys.executable, self.high_mask_editor_script_path],
+                cwd=SRC_DIR,
+                env=child_env,
+            )
+            with self.high_mask_editor_process_lock:
+                if self.active_high_mask_editor_process is not None:
+                    process.terminate()
+                    process.wait(timeout=2.0)
+                    raise RuntimeError("已有高位 Mask 编辑子进程正在运行")
+                self.active_high_mask_editor_process = process
+            try:
+                while process.poll() is None:
+                    if rospy.is_shutdown():
+                        self.terminate_high_mask_editor_process()
+                        raise RuntimeError("ROS 节点正在退出，已取消高位 Mask 编辑")
+                    time.sleep(0.1)
+                exit_code = int(process.returncode)
+            finally:
+                with self.high_mask_editor_process_lock:
+                    if self.active_high_mask_editor_process is process:
+                        self.active_high_mask_editor_process = None
+
+            if exit_code == 编辑取消退出码:
+                raise RuntimeError("用户取消了本轮高位 Mask 编辑，请重新识别")
+            if exit_code != 0:
+                raise RuntimeError(f"高位 Mask 编辑子进程异常退出，退出码={exit_code}")
+            return 读取已提交高位Mask(manifest_path, blocks)
+
     def _detect_blocks_raw(self, image):
         """识别高位方块，仅整理类别、像素和角度，不生成机械臂位姿。"""
         geometry = load_template_geometry("high")
@@ -709,9 +839,18 @@ class ImageProcessor:
             crop_margin=8,
             save_mask_overlay=self.save_top_surface_mask_vis,
         )
-        save_image_to_path(self.high_template_match_debug_path, debug_image)
         if not blocks:
             raise RuntimeError("高位没有识别到方块")
+        if getattr(self, "high_mask_manual_editor_enabled", False):
+            edited_masks = self._run_high_mask_manual_editor(image, blocks)
+            blocks, debug_image = rematch_blocks_from_masks(
+                image,
+                blocks,
+                edited_masks,
+                template_geometry=geometry,
+                save_mask_overlay=self.save_top_surface_mask_vis,
+            )
+        save_image_to_path(self.high_template_match_debug_path, debug_image)
         if self.save_top_surface_mask_vis:
             mask_image = blocks[-1].get("mask_overlay")
             if mask_image is None:
@@ -923,6 +1062,22 @@ class ImageProcessor:
         return observed_blocks, placement_targets
 
     def prepare_task(self, request):
+        """串行执行高位准备，禁止并发弹出两个人工编辑窗口。"""
+        prepare_lock = getattr(self, "prepare_task_lock", None)
+        acquired = prepare_lock is None or prepare_lock.acquire(blocking=False)
+        if not acquired:
+            return PrepareTaskResponse(
+                success=False,
+                task_count=0,
+                message="已有一轮高位识别或人工编辑正在进行，请勿并发请求",
+            )
+        try:
+            return self._prepare_task_locked(request)
+        finally:
+            if prepare_lock is not None:
+                prepare_lock.release()
+
+    def _prepare_task_locked(self, request):
         """用同一高位图像快照完成托盘、方块识别与任务规划。"""
         self.task_targets = []
         self.board_grid_points = None

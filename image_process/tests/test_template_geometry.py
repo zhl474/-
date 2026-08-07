@@ -1449,6 +1449,298 @@ def test_block_task_detection_uses_calibrated_tcp_pose_and_surface_height(monkey
     assert blocks[0].rough_localization_source == "tcp_calibration"
 
 
+@pytest.mark.parametrize(
+    ("preview_device", "expected_cuda_visible_devices"),
+    [("cpu", ""), ("cuda", "7")],
+)
+def test_high_mask_editor_subprocess_uses_configured_device_and_validated_commit(
+    monkeypatch,
+    tmp_path,
+    preview_device,
+    expected_cuda_visible_devices,
+):
+    module = _load_process_module_with_stubs(monkeypatch, "process_high_mask_editor_success")
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "7")
+    editor_script = tmp_path / "editor.py"
+    editor_script.write_text("# 测试占位脚本\n", encoding="utf-8")
+    manifest_paths = []
+    monkeypatch.setattr(
+        image_node_module,
+        "创建高位Mask编辑会话",
+        lambda temp_dir, _image, _blocks: manifest_paths.append(
+            os.path.join(temp_dir, "session.json")
+        ) or manifest_paths[-1],
+    )
+    expected_mask = np.full((4, 5), 255, dtype=np.uint8)
+    monkeypatch.setattr(
+        image_node_module,
+        "读取已提交高位Mask",
+        lambda manifest, blocks: [expected_mask.copy()],
+    )
+    popen_calls = []
+
+    class CompletedProcess:
+        returncode = 0
+
+        @staticmethod
+        def poll():
+            return 0
+
+    def fake_popen(args, cwd, env):
+        popen_calls.append((args, cwd, env))
+        return CompletedProcess()
+
+    monkeypatch.setattr(image_node_module.subprocess, "Popen", fake_popen)
+    processor = object.__new__(module.ImageProcessor)
+    processor.high_mask_manual_editor_enabled = True
+    processor.high_mask_editor_script_path = str(editor_script)
+    processor.high_mask_editor_preview_device = preview_device
+    processor.high_mask_editor_process_lock = threading.Lock()
+    processor.active_high_mask_editor_process = None
+    block = {
+        "category": "T",
+        "mask": np.zeros((4, 5), dtype=np.uint8),
+        "crop_box": (0, 0, 5, 4),
+        "detection_box": (0.0, 0.0, 5.0, 4.0),
+    }
+
+    masks = processor._run_high_mask_manual_editor(
+        np.zeros((8, 10, 3), dtype=np.uint8),
+        [block],
+    )
+
+    assert np.array_equal(masks[0], expected_mask)
+    assert popen_calls[0][0] == [sys.executable, str(editor_script)]
+    assert popen_calls[0][1] == image_node_module.SRC_DIR
+    assert popen_calls[0][2]["CUDA_VISIBLE_DEVICES"] == expected_cuda_visible_devices
+    assert (
+        popen_calls[0][2][image_node_module.预览设备环境变量]
+        == preview_device
+    )
+    assert popen_calls[0][2][image_node_module.会话环境变量] == manifest_paths[0]
+    assert processor.active_high_mask_editor_process is None
+
+
+def test_high_mask_editor_cancel_rejects_current_detection(monkeypatch, tmp_path):
+    module = _load_process_module_with_stubs(monkeypatch, "process_high_mask_editor_cancel")
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    monkeypatch.setenv("DISPLAY", ":0")
+    editor_script = tmp_path / "editor.py"
+    editor_script.write_text("# 测试占位脚本\n", encoding="utf-8")
+    monkeypatch.setattr(
+        image_node_module,
+        "创建高位Mask编辑会话",
+        lambda temp_dir, _image, _blocks: os.path.join(temp_dir, "session.json"),
+    )
+
+    class CancelledProcess:
+        returncode = image_node_module.编辑取消退出码
+
+        @staticmethod
+        def poll():
+            return image_node_module.编辑取消退出码
+
+    monkeypatch.setattr(
+        image_node_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: CancelledProcess(),
+    )
+    processor = object.__new__(module.ImageProcessor)
+    processor.high_mask_manual_editor_enabled = True
+    processor.high_mask_editor_script_path = str(editor_script)
+    processor.high_mask_editor_preview_device = "cpu"
+    processor.high_mask_editor_process_lock = threading.Lock()
+    processor.active_high_mask_editor_process = None
+
+    with pytest.raises(RuntimeError, match="用户取消"):
+        processor._run_high_mask_manual_editor(
+            np.zeros((8, 10, 3), dtype=np.uint8),
+            [{
+                "category": "T",
+                "mask": np.zeros((4, 5), dtype=np.uint8),
+                "crop_box": (0, 0, 5, 4),
+                "detection_box": (0.0, 0.0, 5.0, 4.0),
+            }],
+        )
+
+
+def test_disabled_high_mask_editor_does_not_create_session_or_subprocess(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_high_mask_editor_disabled")
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    monkeypatch.setattr(
+        image_node_module,
+        "创建高位Mask编辑会话",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("禁用人工编辑时不应创建临时会话")
+        ),
+    )
+    monkeypatch.setattr(
+        image_node_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("禁用人工编辑时不应启动子进程")
+        ),
+    )
+    processor = object.__new__(module.ImageProcessor)
+    processor.high_mask_manual_editor_enabled = False
+    original_mask = np.zeros((4, 5), dtype=np.uint8)
+    original_mask[1:3, 2:4] = 255
+
+    masks = processor._run_high_mask_manual_editor(
+        np.zeros((8, 10, 3), dtype=np.uint8),
+        [{"mask": original_mask}],
+    )
+
+    assert np.array_equal(masks[0], original_mask)
+    assert masks[0] is not original_mask
+
+
+def test_prepare_task_rejects_concurrent_request_without_taking_snapshot(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_prepare_task_concurrent")
+    processor = object.__new__(module.ImageProcessor)
+    processor.prepare_task_lock = threading.Lock()
+    processor.prepare_task_lock.acquire()
+    processor.get_image_snapshot_newer_than = lambda _stamp: (_ for _ in ()).throw(
+        AssertionError("并发请求不应获取新快照")
+    )
+
+    try:
+        response = processor.prepare_task(types.SimpleNamespace())
+    finally:
+        processor.prepare_task_lock.release()
+
+    assert response.success is False
+    assert response.task_count == 0
+    assert "并发" in response.message
+
+
+def test_shutdown_terminates_active_high_mask_editor_process(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_high_mask_editor_shutdown")
+
+    class RunningProcess:
+        def __init__(self):
+            self.running = True
+            self.terminate_called = False
+            self.wait_calls = []
+
+        def poll(self):
+            return None if self.running else 0
+
+        def terminate(self):
+            self.terminate_called = True
+            self.running = False
+
+        def wait(self, timeout):
+            self.wait_calls.append(timeout)
+            return 0
+
+    process = RunningProcess()
+    processor = object.__new__(module.ImageProcessor)
+    processor.high_mask_editor_process_lock = threading.Lock()
+    processor.active_high_mask_editor_process = process
+    recorder_closed = []
+    processor.close_debug_video_recorders = lambda: recorder_closed.append(True)
+
+    processor.close_runtime_resources()
+
+    assert process.terminate_called is True
+    assert process.wait_calls == [2.0]
+    assert recorder_closed == [True]
+
+
+@pytest.mark.parametrize("calibration_mode", [False, True])
+def test_manual_editor_failure_stops_before_localization_depth_and_planning(
+    monkeypatch,
+    calibration_mode,
+):
+    module = _load_process_module_with_stubs(
+        monkeypatch,
+        f"process_high_mask_failure_order_{calibration_mode}",
+    )
+    processor = object.__new__(module.ImageProcessor)
+    processor.task_targets = [object()]
+    processor.board_grid_points = object()
+    processor.board_grid_image_shape = (1, 1)
+    processor.board_grid_image = np.zeros((1, 1, 3), dtype=np.uint8)
+    processor.calibration_mode = calibration_mode
+    processor.get_image_snapshot_newer_than = lambda _stamp: np.zeros(
+        (20, 30, 3),
+        dtype=np.uint8,
+    )
+    processor._detect_board_for_task = lambda _image: None
+    processor._detect_blocks_raw = lambda _image: (_ for _ in ()).throw(
+        RuntimeError("用户取消了本轮高位 Mask 编辑")
+    )
+    processor.high_tcp_localizer = types.SimpleNamespace(
+        locate_block=lambda _pixel: (_ for _ in ()).throw(
+            AssertionError("编辑失败后不应执行像素转 TCP")
+        )
+    )
+    processor._build_calibration_targets = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("编辑失败后不应执行深度采样")
+    )
+    processor._load_layout_for_request = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("编辑失败后不应进入任务规划")
+    )
+
+    response = processor._prepare_task_locked(types.SimpleNamespace())
+
+    assert response.success is False
+    assert response.task_count == 0
+    assert "用户取消" in response.message
+    assert processor.task_targets == []
+
+
+def test_block_raw_detection_applies_manual_masks_before_return(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_high_mask_editor_order")
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    image = np.zeros((20, 30, 3), dtype=np.uint8)
+    original_mask = np.zeros((10, 12), dtype=np.uint8)
+    edited_mask = np.full((10, 12), 255, dtype=np.uint8)
+    raw_block = {
+        "category": "T",
+        "score": 0.9,
+        "px": 1.0,
+        "py": 2.0,
+        "theta": 3.0,
+        "mask": original_mask,
+        "crop_box": (0, 0, 12, 10),
+        "detection_box": (1.0, 1.0, 11.0, 9.0),
+    }
+    monkeypatch.setattr(image_node_module, "load_template_geometry", lambda _name: {})
+    monkeypatch.setattr(
+        image_node_module,
+        "detect_blocks_in_image",
+        lambda *_args, **_kwargs: ([raw_block], image.copy()),
+    )
+    call_order = []
+
+    def fake_rematch(_image, blocks, masks, **_kwargs):
+        call_order.append("父进程重匹配")
+        assert np.array_equal(masks[0], edited_mask)
+        updated = dict(blocks[0], px=50.0, py=60.0, theta=70.0, mask=masks[0])
+        return [updated], image.copy()
+
+    monkeypatch.setattr(image_node_module, "rematch_blocks_from_masks", fake_rematch)
+    monkeypatch.setattr(image_node_module, "save_image_to_path", lambda *_args: True)
+    processor = object.__new__(module.ImageProcessor)
+    processor.model = object()
+    processor.save_top_surface_mask_vis = False
+    processor.high_template_match_debug_path = ""
+    processor.high_mask_manual_editor_enabled = True
+    processor._run_high_mask_manual_editor = lambda _image, _blocks: (
+        call_order.append("人工编辑") or [edited_mask]
+    )
+
+    blocks, counts = processor._detect_blocks_raw(image)
+
+    assert call_order == ["人工编辑", "父进程重匹配"]
+    assert blocks == [{"category": "T", "px": 50.0, "py": 60.0, "theta": 70.0}]
+    assert sum(counts) == 1
+
+
 def test_tray_target_uses_independent_tcp_calibration_and_predicted_z(monkeypatch):
     module = _load_process_module_with_stubs(monkeypatch, "process_tray_tcp_pipeline")
     image_node_module = sys.modules[module.ImageProcessor.__module__]

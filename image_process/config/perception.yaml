@@ -6,6 +6,14 @@ models:
   # 方块上表面分割模型。正式运行使用 TensorRT engine 加速。
   segmentation: competition/model/best_seg.engine
 
+# 高位方块 Seg/模板匹配完成后，在像素转 TCP、深度采样和任务规划前人工修正 Mask。
+# GUI 始终运行在独立无 ROS 子进程中；false 时完全沿用原自动识别流程。
+high_mask_manual_editor:
+  enabled: true
+  script: tools/high_mask_editor_demo/high_mask_session_editor.py
+  # 人工编辑期间不运行其他 GPU 推理时使用 cuda；需要隔离显存时可改为 cpu。
+  preview_device: cuda
+
 calibration:
   # 正式运行部署副本；也可由对应 ROS 私有参数覆盖。
   block_pixel_to_tcp: image_process/config/block_pixel_to_tcp_calibration.yaml
