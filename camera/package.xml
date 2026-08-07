@@ -2,7 +2,7 @@
 <package format="2">
   <name>camera</name>
   <version>0.1.0</version>
-  <description>Gemini335 彩色图像发布与表面高度查询服务</description>
+  <description>Gemini335 彩色图像发布与批量稳定世界坐标查询服务</description>
   <maintainer email="zhl@todo.todo">zhl</maintainer>
   <license>Proprietary</license>
   <buildtool_depend>catkin</buildtool_depend>

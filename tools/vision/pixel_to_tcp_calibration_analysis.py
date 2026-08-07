@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -51,6 +52,12 @@ COL_CATEGORY = "方块类别"
 COL_EVENT = "事件"
 COL_PIXEL = ["高位检测像素X", "高位检测像素Y"]
 COL_TCP = ["实测TCP位置X", "实测TCP位置Y", "实测TCP位置Z"]
+COL_TCP_XY = COL_TCP[:2]
+COL_TARGET_Z = "标定目标TCP位置Z"
+COL_WORLD_Z = "高位世界坐标Z"
+COL_DEPTH_VALID_COUNT = "深度有效帧数"
+COL_DEPTH_MAD = "深度MAD毫米"
+COL_SOURCE = "粗定位来源"
 REQUIRED_COLUMNS = [COL_CATEGORY, COL_EVENT, *COL_PIXEL, *COL_TCP]
 SUCCESS_EVENT = "伺服成功"
 FAILURE_EVENT = "伺服失败"
@@ -515,6 +522,159 @@ def remove_stale_calibration(path: Path) -> None:
         path.unlink()
 
 
+def fit_xy_mapping(model_name: str, uv: np.ndarray, tcp_xy: np.ndarray) -> Dict[str, Any]:
+    """拟合 schema v2 的像素到 TCP XY 模型。"""
+    if model_name == "affine":
+        return fit_polynomial_mapping(uv, tcp_xy, degree=1)
+    if model_name == "poly2":
+        return fit_polynomial_mapping(uv, tcp_xy, degree=2)
+    if model_name == "poly3":
+        return fit_polynomial_mapping(uv, tcp_xy, degree=3)
+    if model_name == "homography":
+        if len(uv) < 4:
+            raise ValueError("二维单应模型至少需要 4 个训练点")
+        matrix, _ = cv2.findHomography(
+            uv.astype(np.float64),
+            tcp_xy.astype(np.float64),
+            method=0,
+        )
+        if matrix is None or not np.isfinite(matrix).all() or abs(matrix[2, 2]) < 1e-12:
+            raise RuntimeError("二维单应矩阵拟合失败")
+        return {"kind": "homography", "H": matrix / matrix[2, 2]}
+    raise KeyError(f"未知 XY 映射模型: {model_name}")
+
+
+def predict_xy_mapping(model_name: str, model: Mapping[str, Any], uv: np.ndarray) -> np.ndarray:
+    """使用 schema v2 候选模型预测 TCP XY。"""
+    if model_name in {"affine", "poly2", "poly3"}:
+        return predict_polynomial_mapping(model, uv)
+    if model_name == "homography":
+        return cv2.perspectiveTransform(
+            uv.astype(np.float64).reshape(-1, 1, 2),
+            np.asarray(model["H"], dtype=float),
+        ).reshape(-1, 2)
+    raise KeyError(f"未知 XY 映射模型: {model_name}")
+
+
+def cross_validate_xy_mapping(model_name, uv, tcp_xy, folds, seed):
+    """对像素到 TCP XY 模型执行 K 折交叉验证。"""
+    fold_indices = make_kfold_indices(len(uv), folds, seed)
+    predictions = np.full_like(tcp_xy, np.nan, dtype=float)
+    all_indices = np.arange(len(uv))
+    for test_indices in fold_indices:
+        train_mask = np.ones(len(uv), dtype=bool)
+        train_mask[test_indices] = False
+        train_indices = all_indices[train_mask]
+        model = fit_xy_mapping(model_name, uv[train_indices], tcp_xy[train_indices])
+        predictions[test_indices] = predict_xy_mapping(model_name, model, uv[test_indices])
+    if not np.isfinite(predictions).all():
+        raise RuntimeError(f"{model_name} 的 XY OOF 预测包含无效数值")
+    residual = predictions - tcp_xy
+    distance = np.linalg.norm(residual, axis=1)
+    axis_rmse = np.sqrt(np.mean(residual**2, axis=0))
+    return {
+        "模型": model_name,
+        "样本数": int(len(uv)),
+        "折数": int(len(fold_indices)),
+        "CV二维RMSE": float(np.sqrt(np.mean(distance**2))),
+        "CV二维MAE": float(np.mean(distance)),
+        "CV二维P95": float(np.percentile(distance, 95)),
+        "CV二维最大误差": float(np.max(distance)),
+        "CV_X_RMSE": float(axis_rmse[0]),
+        "CV_Y_RMSE": float(axis_rmse[1]),
+    }, predictions
+
+
+def choose_xy_model(summaries):
+    """在二维近最优误差内选择最简单的映射模型。"""
+    rmse_by_model = {row["模型"]: float(row["CV二维RMSE"]) for row in summaries}
+    best_name = min(rmse_by_model, key=rmse_by_model.get)
+    best_rmse = rmse_by_model[best_name]
+    limit = best_rmse * (1.0 + SIMPLE_MODEL_SLACK)
+    selected = next(name for name in MODEL_NAMES if rmse_by_model.get(name, np.inf) <= limit)
+    return {
+        "CV最优模型": best_name,
+        "CV最优RMSE_mm": best_rmse,
+        "近最优容差比例": SIMPLE_MODEL_SLACK,
+        "推荐最简模型": selected,
+    }
+
+
+def fit_vertical_z_plane(tcp_xy, target_z):
+    """使用外部深度锚定的目标 Z 拟合 z=a*x+b*y+c。"""
+    xy = np.asarray(tcp_xy, dtype=float)
+    z = np.asarray(target_z, dtype=float)
+    design = np.column_stack([xy[:, 0], xy[:, 1], np.ones(len(xy))])
+    coefficients, _residual_sum, rank, _singular = np.linalg.lstsq(design, z, rcond=None)
+    if rank < 3:
+        raise ValueError("方块实测 TCP XY 共线，无法拟合 Z 平面")
+    residual = design @ coefficients - z
+    return coefficients, residual, float(np.sqrt(np.mean(residual**2)))
+
+
+def build_v2_document(
+    job,
+    uv,
+    model_name,
+    model,
+    cv_summary,
+    training_rmse,
+    z_coefficients,
+    generation_id,
+    z_source,
+    tray_offset_mm=None,
+    z_plane_rmse_mm=None,
+):
+    """生成 XY 模型与 Z 平面解耦的 schema v2 标定文档。"""
+    document = {
+        "schema_version": 2,
+        "generation_id": generation_id,
+        "calibration_type": "pixel_to_tcp_position",
+        "calibration_subject": job.subject,
+        "description": "高位像素到 TCP XY 模型与独立 TCP Z 平面标定结果",
+        "input": {
+            "coordinate": "high_detection_pixel_xy",
+            "columns": list(COL_PIXEL),
+            "axes": ["u", "v"],
+            "unit": "pixel",
+        },
+        "output": {
+            "coordinate": "tcp_position_xyz",
+            "columns": list(COL_TCP),
+            "axes": ["x", "y", "z"],
+            "unit": "mm",
+            "orientation_included": False,
+        },
+        "xy_model": {"name": model_name, "parameters": to_builtin(dict(model))},
+        "z_plane": {
+            "equation": "z = a*x + b*y + c",
+            "coefficients": to_builtin(np.asarray(z_coefficients, dtype=float)),
+            "source": z_source,
+        },
+        "metrics": {
+            "sample_count": int(len(uv)),
+            "xy_cross_validation": to_builtin(dict(cv_summary)),
+            "xy_full_training_rmse_mm": float(training_rmse),
+        },
+        "coverage": {
+            "sample_count": int(len(uv)),
+            "pixel_range": {
+                "u": [float(np.min(uv[:, 0])), float(np.max(uv[:, 0]))],
+                "v": [float(np.min(uv[:, 1])), float(np.max(uv[:, 1]))],
+            },
+            "pixel_convex_hull": pixel_convex_hull(uv).tolist(),
+            "extrapolation_policy": "diagnostic_only",
+        },
+        "usage_note": "正式运行仅使用离线 XY 模型和独立 Z 平面，不查询深度相机。",
+    }
+    if z_plane_rmse_mm is not None:
+        document["metrics"]["external_depth_z_plane_rmse_mm"] = float(z_plane_rmse_mm)
+    if tray_offset_mm is not None:
+        document["z_plane"]["derived_from"] = "block_observation_tcp_plane"
+        document["z_plane"]["tray_tcp_below_block_observation_mm"] = float(tray_offset_mm)
+    return document
+
+
 def analyze_job(job: CalibrationJob) -> bool:
     """分析一份方块或托盘 CSV，通过质量门禁后才写标定 YAML。"""
     configure_matplotlib()
@@ -686,11 +846,280 @@ def analyze_job(job: CalibrationJob) -> bool:
     return False
 
 
-def main() -> None:
-    """按顺序分析方块和托盘 CSV，任一失败时返回非零状态。"""
+def _read_v2_success_rows(job):
+    """读取一份新标定 CSV，并返回成功行和基础检查报告。"""
+    dataframe, encoding = read_csv_auto(job.input_csv)
+    required = [
+        COL_CATEGORY,
+        COL_EVENT,
+        *COL_PIXEL,
+        *COL_TCP,
+        COL_TARGET_Z,
+        COL_WORLD_Z,
+        COL_DEPTH_VALID_COUNT,
+        COL_DEPTH_MAD,
+        COL_SOURCE,
+    ]
+    missing = [column for column in required if column not in dataframe.columns]
+    if missing:
+        raise ValueError(f"{job.label} CSV 缺少列: {missing}")
+    dataframe = dataframe.loc[:, required].copy()
+    dataframe[COL_EVENT] = dataframe[COL_EVENT].fillna("").astype(str).str.strip()
+    dataframe[COL_CATEGORY] = dataframe[COL_CATEGORY].fillna("").astype(str).str.strip()
+    dataframe[COL_SOURCE] = dataframe[COL_SOURCE].fillna("").astype(str).str.strip()
+    invalid_events = sorted(set(dataframe[COL_EVENT]) - {SUCCESS_EVENT, FAILURE_EVENT})
+    if invalid_events:
+        raise ValueError(f"{job.label} CSV 存在非法事件值: {invalid_events}")
+    failures = dataframe[dataframe[COL_EVENT] == FAILURE_EVENT]
+    successes = dataframe[dataframe[COL_EVENT] == SUCCESS_EVENT].copy()
+    if len(failures):
+        raise ValueError(f"{job.label}存在 {len(failures)} 条伺服失败记录")
+    if len(successes) != job.expected_success_count:
+        raise ValueError(
+            f"{job.label}伺服成功数量为 {len(successes)}，期望 {job.expected_success_count}"
+        )
+    if (successes[COL_CATEGORY] == "").any():
+        raise ValueError(f"{job.label}成功记录存在空方块类别")
+    numeric_columns = [
+        *COL_PIXEL,
+        *COL_TCP,
+        COL_TARGET_Z,
+        COL_WORLD_Z,
+        COL_DEPTH_VALID_COUNT,
+        COL_DEPTH_MAD,
+    ]
+    for column in numeric_columns:
+        successes[column] = pd.to_numeric(successes[column], errors="coerce")
+    if not np.isfinite(successes[numeric_columns].to_numpy(dtype=float)).all():
+        raise ValueError(f"{job.label}成功记录存在空值或非有限数值")
+    pixel_convex_hull(successes[COL_PIXEL].to_numpy(dtype=float))
+    return successes, {
+        "标定对象": job.label,
+        "输入CSV": str(job.input_csv),
+        "CSV编码": encoding,
+        "伺服成功数量": int(len(successes)),
+        "伺服失败数量": 0,
+        "质量门禁通过": False,
+        "问题": [],
+    }
+
+
+def _fit_v2_xy_job(job, rows, report):
+    """完成一个主体的 XY 模型比较、选择和全量拟合。"""
+    uv = rows[COL_PIXEL].to_numpy(dtype=float)
+    tcp_xy = rows[COL_TCP_XY].to_numpy(dtype=float)
+    summaries = []
+    predictions = {}
+    failures = {}
+    for model_name in MODEL_NAMES:
+        try:
+            summary, prediction = cross_validate_xy_mapping(
+                model_name,
+                uv,
+                tcp_xy,
+                CV_FOLDS,
+                RANDOM_SEED,
+            )
+            summaries.append(summary)
+            predictions[model_name] = prediction
+        except Exception as exc:  # noqa: BLE001
+            failures[model_name] = str(exc)
+    if not summaries:
+        raise ValueError(f"{job.label}所有 XY 候选模型均无法完成交叉验证")
+    selection = choose_xy_model(summaries)
+    selected_name = selection["推荐最简模型"]
+    selected_summary = next(row for row in summaries if row["模型"] == selected_name)
+    selected_model = fit_xy_mapping(selected_name, uv, tcp_xy)
+    training_prediction = predict_xy_mapping(selected_name, selected_model, uv)
+    training_rmse = float(
+        np.sqrt(np.mean(np.sum((training_prediction - tcp_xy) ** 2, axis=1)))
+    )
+    report["XY映射模型交叉验证"] = summaries
+    report["XY映射模型失败原因"] = failures
+    report["XY模型选择"] = selection
+    report["XY全数据训练RMSE_mm"] = training_rmse
+
+    error_table = rows[[COL_CATEGORY, *COL_PIXEL, *COL_TCP_XY]].copy()
+    for model_name, prediction in predictions.items():
+        error_table[f"{model_name}_OOF二维误差_mm"] = np.linalg.norm(
+            prediction - tcp_xy,
+            axis=1,
+        )
+    error_table.to_csv(
+        job.output_dir / "逐点OOF误差.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    return uv, selected_name, selected_model, selected_summary, training_rmse
+
+
+def analyze_calibration_pair(block_job, tray_job) -> bool:
+    """成对生成 schema v2 方块/托盘标定，任一失败时两份结果均不保留。"""
     configure_matplotlib()
-    results = [analyze_job(job) for job in CALIBRATION_JOBS]
-    if not all(results):
+    jobs = (block_job, tray_job)
+    for job in jobs:
+        job.output_dir.mkdir(parents=True, exist_ok=True)
+        remove_stale_calibration(job.output_dir / job.calibration_filename)
+
+    reports = {
+        job.subject: {
+            "标定对象": job.label,
+            "输入CSV": str(job.input_csv),
+            "质量门禁通过": False,
+            "问题": [],
+        }
+        for job in jobs
+    }
+    try:
+        with (SRC_DIR / "image_process" / "config" / "perception.yaml").open(
+            "r", encoding="utf-8"
+        ) as file_handle:
+            perception = yaml.safe_load(file_handle) or {}
+        depth_config = perception.get("calibration_depth", {})
+        min_valid_frames = int(depth_config.get("min_valid_frames", 10))
+        block_max_mad_mm = float(depth_config.get("block_max_mad_mm", 1.0))
+        block_plane_max_rmse_mm = float(depth_config.get("block_plane_max_rmse_mm", 1.0))
+        tray_offset_mm = float(
+            depth_config.get("tray_tcp_below_block_observation_mm", 7.0)
+        )
+        observation_height_mm = float(
+            perception.get("pick_height", {}).get("block_observation_height_mm", 192.0)
+        )
+
+        block_rows, reports["block"] = _read_v2_success_rows(block_job)
+        tray_rows, reports["tray"] = _read_v2_success_rows(tray_job)
+        if not (block_rows[COL_SOURCE] == "stable_depth_xyz").all():
+            raise ValueError("方块 CSV 粗定位来源必须全部为 stable_depth_xyz")
+        if not (
+            tray_rows[COL_SOURCE] == "stable_depth_xy_block_plane_z"
+        ).all():
+            raise ValueError("托盘 CSV 粗定位来源必须全部为 stable_depth_xy_block_plane_z")
+        if (block_rows[COL_DEPTH_VALID_COUNT] < min_valid_frames).any():
+            raise ValueError("方块 CSV 存在有效深度帧数不足的记录")
+        if (tray_rows[COL_DEPTH_VALID_COUNT] < min_valid_frames).any():
+            raise ValueError("托盘 CSV 存在有效深度帧数不足的记录")
+        maximum_block_mad = float(block_rows[COL_DEPTH_MAD].max())
+        reports["block"]["最大深度MAD_mm"] = maximum_block_mad
+        if maximum_block_mad > block_max_mad_mm:
+            raise ValueError(
+                f"方块最大深度 MAD={maximum_block_mad:.6g} mm "
+                f"超过阈值 {block_max_mad_mm} mm"
+            )
+        block_depth_target_z = (
+            block_rows[COL_WORLD_Z].to_numpy(dtype=float) + observation_height_mm
+        )
+        if not np.allclose(
+            block_rows[COL_TARGET_Z].to_numpy(dtype=float),
+            block_depth_target_z,
+            rtol=0.0,
+            atol=1e-6,
+        ):
+            raise ValueError(
+                "方块标定目标 TCP Z 必须严格等于深度表面世界 Z 加 "
+                f"{observation_height_mm:.3f} mm"
+            )
+
+        block_xy = block_rows[COL_TCP_XY].to_numpy(dtype=float)
+        block_target_z = block_rows[COL_TARGET_Z].to_numpy(dtype=float)
+        block_z_coefficients, block_z_residuals, block_z_rmse = fit_vertical_z_plane(
+            block_xy,
+            block_target_z,
+        )
+        reports["block"]["外部深度Z平面"] = {
+            "系数_a_b_c": block_z_coefficients.tolist(),
+            "RMSE_mm": block_z_rmse,
+            "最大绝对残差_mm": float(np.max(np.abs(block_z_residuals))),
+            "门禁_mm": block_plane_max_rmse_mm,
+        }
+        if block_z_rmse > block_plane_max_rmse_mm:
+            raise ValueError(
+                f"方块外部深度 Z 平面 RMSE={block_z_rmse:.6g} mm "
+                f"超过阈值 {block_plane_max_rmse_mm} mm"
+            )
+        tray_z_coefficients = block_z_coefficients.copy()
+        tray_z_coefficients[2] -= tray_offset_mm
+        reports["tray"]["Z平面来源"] = {
+            "来源": "方块观察TCP平面",
+            "向下控制偏移_mm": tray_offset_mm,
+            "系数_a_b_c": tray_z_coefficients.tolist(),
+        }
+
+        fitted = {}
+        for job, rows in ((block_job, block_rows), (tray_job, tray_rows)):
+            fitted[job.subject] = _fit_v2_xy_job(job, rows, reports[job.subject])
+
+        generation_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        documents = {}
+        for job in jobs:
+            uv, name, model, summary, training_rmse = fitted[job.subject]
+            if job.subject == "block":
+                z_coefficients = block_z_coefficients
+                z_source = "external_depth_block_surface_plus_observation_height"
+                offset = None
+                plane_rmse = block_z_rmse
+            else:
+                z_coefficients = tray_z_coefficients
+                z_source = "derived_from_block_observation_tcp_plane"
+                offset = tray_offset_mm
+                plane_rmse = None
+            documents[job.subject] = build_v2_document(
+                job,
+                uv,
+                name,
+                model,
+                summary,
+                training_rmse,
+                z_coefficients,
+                generation_id,
+                z_source,
+                tray_offset_mm=offset,
+                z_plane_rmse_mm=plane_rmse,
+            )
+
+        staged_paths = {}
+        for job in jobs:
+            calibration_path = job.output_dir / job.calibration_filename
+            staged_path = calibration_path.with_suffix(calibration_path.suffix + ".tmp")
+            with staged_path.open("w", encoding="utf-8") as file_handle:
+                yaml.safe_dump(
+                    documents[job.subject],
+                    file_handle,
+                    allow_unicode=True,
+                    sort_keys=False,
+                )
+            staged_paths[job.subject] = staged_path
+
+        # 两份内容均成功序列化后才替换候选文件；任何异常都会在下方统一清理。
+        for job in jobs:
+            calibration_path = job.output_dir / job.calibration_filename
+            os.replace(staged_paths[job.subject], calibration_path)
+            reports[job.subject]["质量门禁通过"] = True
+            reports[job.subject]["生成标定YAML"] = str(calibration_path)
+            reports[job.subject]["生成批次"] = generation_id
+    except Exception as exc:  # noqa: BLE001
+        for job in jobs:
+            remove_stale_calibration(job.output_dir / job.calibration_filename)
+            remove_stale_calibration(
+                (job.output_dir / job.calibration_filename).with_suffix(
+                    Path(job.calibration_filename).suffix + ".tmp"
+                )
+            )
+            reports[job.subject]["质量门禁通过"] = False
+            reports[job.subject].pop("生成标定YAML", None)
+            reports[job.subject].pop("生成批次", None)
+            reports[job.subject].setdefault("问题", []).append(str(exc))
+
+    all_passed = all(reports[job.subject]["质量门禁通过"] for job in jobs)
+    for job in jobs:
+        write_json(job.output_dir / "标定检查报告.json", reports[job.subject])
+        state = "通过" if reports[job.subject]["质量门禁通过"] else "未通过"
+        print(f"[{job.label}] 成对标定{state}：{job.output_dir}")
+    return all_passed
+
+
+def main() -> None:
+    """成对分析方块和托盘 CSV，并生成同批次 schema v2 标定。"""
+    if not analyze_calibration_pair(CALIBRATION_JOBS[0], CALIBRATION_JOBS[1]):
         raise SystemExit(1)
 
 

@@ -29,6 +29,10 @@ class ObservedBlock:
     high_world_position: Sequence[float] = (0.0, 0.0, 0.0)
     high_world_position_valid: bool = False
     rough_localization_source: str = ""
+    depth_valid_frame_count: int = 0
+    depth_median_mm: float = 0.0
+    depth_mad_mm: float = 0.0
+    calibration_target_tcp_z_mm: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,10 @@ class PlacementTarget:
     high_world_position: Sequence[float] = (0.0, 0.0, 0.0)
     high_world_position_valid: bool = False
     rough_localization_source: str = ""
+    depth_valid_frame_count: int = 0
+    depth_median_mm: float = 0.0
+    depth_mad_mm: float = 0.0
+    calibration_target_tcp_z_mm: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -73,6 +81,14 @@ class TaskTarget:
     place_high_world_position: Sequence[float] = (0.0, 0.0, 0.0)
     place_high_world_position_valid: bool = False
     place_rough_localization_source: str = ""
+    pick_depth_valid_frame_count: int = 0
+    pick_depth_median_mm: float = 0.0
+    pick_depth_mad_mm: float = 0.0
+    pick_calibration_target_tcp_z_mm: float = 0.0
+    place_depth_valid_frame_count: int = 0
+    place_depth_median_mm: float = 0.0
+    place_depth_mad_mm: float = 0.0
+    place_calibration_target_tcp_z_mm: float = 0.0
 
 
 def load_task_layout(config_path: str) -> List[dict]:
@@ -210,6 +226,10 @@ def assign_blocks_to_targets(
                 pick_high_world_position=tuple(float(value) for value in block.high_world_position),
                 pick_high_world_position_valid=bool(block.high_world_position_valid),
                 pick_rough_localization_source=str(block.rough_localization_source),
+                pick_depth_valid_frame_count=int(block.depth_valid_frame_count),
+                pick_depth_median_mm=float(block.depth_median_mm),
+                pick_depth_mad_mm=float(block.depth_mad_mm),
+                pick_calibration_target_tcp_z_mm=float(block.calibration_target_tcp_z_mm),
                 place_high_detected_pixel_xy=tuple(
                     float(value) for value in target.high_detected_pixel_xy
                 ),
@@ -222,6 +242,10 @@ def assign_blocks_to_targets(
                 place_high_world_position=tuple(float(value) for value in target.high_world_position),
                 place_high_world_position_valid=bool(target.high_world_position_valid),
                 place_rough_localization_source=str(target.rough_localization_source),
+                place_depth_valid_frame_count=int(target.depth_valid_frame_count),
+                place_depth_median_mm=float(target.depth_median_mm),
+                place_depth_mad_mm=float(target.depth_mad_mm),
+                place_calibration_target_tcp_z_mm=float(target.calibration_target_tcp_z_mm),
             )
 
     expected_indices = sorted(target_by_index)

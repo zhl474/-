@@ -10,7 +10,7 @@
 # - 视觉伺服矩阵和相机到吸盘偏移不在本文件中，它们位于 visual_servo.yaml。
 
 # false：正式抓放，不输出标定 CSV；true：标定采集，禁用吸气和吹气。
-calibration_mode: false
+calibration_mode: true
 
 # 高位全场拍摄位姿。
 # 总控启动后会先运动到这里；图像节点沿用其中的 R/P/YAW 组成标定观察位。
@@ -44,7 +44,7 @@ servo:
   # true：执行方块和托盘低位视觉伺服；false：使用高位粗定位结果开环抓放。
   # 本开关在比赛节点启动时读取，修改后需要重启节点。
   # 标定采集依赖视觉伺服结果，因此 calibration_mode=true 时会强制按 true 执行。
-  enabled: true
+  enabled: false
 
   # 是否输出视觉伺服分阶段耗时。调试时开启，正式运行时关闭以避免日志 I/O 影响闭环频率。
   timing_debug: false
@@ -52,7 +52,7 @@ servo:
   # 视觉伺服成功阈值，单位 px。
   # 每轮取 max(abs(dx), abs(dy))；不超过该值才算一帧对准。
   # 调小会更精确但更难稳定，调大会更容易结束但残余偏差更大。
-  error_threshold_px: 3.0
+  error_threshold_px: 2.0
 
   # 单轮机械臂 XY 修正的最小长度，单位 mm。
   # 只有像素误差仍超出成功阈值时才生效，用于避免修正量小到机械臂不响应。
@@ -68,7 +68,7 @@ servo:
 
   # 需要连续多少帧都进入 error_threshold_px，才判定真正对准成功。
   # 增大可降低偶然抖动造成的误判，但会增加对准时间。
-  success_stable_frames: 1
+  success_stable_frames: 4
 
   # 最多允许连续多少帧没有识别到目标。
   # 达到该数值后停止视觉伺服，不再盲目移动机械臂。

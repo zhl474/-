@@ -1,6 +1,5 @@
 <launch>
   <arg name="debug_output_dir" default="/home/zhl/桌面"/>
-  <arg name="pick_height_mode" default="calibrated_height"/>
   <arg name="block_pixel_to_tcp_calibration_path"
        default="$(find image_process)/config/block_pixel_to_tcp_calibration.yaml"/>
   <arg name="tray_pixel_to_tcp_calibration_path"
@@ -9,7 +8,6 @@
   <node pkg="camera" type="camera_node.py" name="camera_node" output="screen"/>
 
   <node pkg="image_process" type="process.py" name="image_process_node" output="screen">
-    <param name="pick_height_mode" value="$(arg pick_height_mode)"/>
     <param name="block_pixel_to_tcp_calibration_path"
            value="$(arg block_pixel_to_tcp_calibration_path)"/>
     <param name="tray_pixel_to_tcp_calibration_path"

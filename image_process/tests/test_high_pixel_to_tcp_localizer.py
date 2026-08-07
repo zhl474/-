@@ -46,6 +46,41 @@ def _affine_payload(subject, base_xyz):
     }
 
 
+def _v2_affine_payload(subject, generation_id, z_c):
+    return {
+        "schema_version": 2,
+        "generation_id": generation_id,
+        "calibration_type": "pixel_to_tcp_position",
+        "calibration_subject": subject,
+        "input": {"coordinate": "high_detection_pixel_xy", "unit": "pixel"},
+        "output": {"coordinate": "tcp_position_xyz", "unit": "mm"},
+        "xy_model": {
+            "name": "affine",
+            "parameters": {
+                "kind": "polynomial",
+                "degree": 1,
+                "uv_mean": [0.0, 0.0],
+                "uv_scale": [1.0, 1.0],
+                "feature_names": ["1", "u", "v"],
+                "coef": [[-300.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            },
+        },
+        "z_plane": {
+            "equation": "z = a*x + b*y + c",
+            "coefficients": [0.01, 0.02, z_c],
+            "source": "external_depth",
+        },
+        "coverage": {
+            "pixel_convex_hull": [
+                [0.0, 0.0],
+                [100.0, 0.0],
+                [100.0, 100.0],
+                [0.0, 100.0],
+            ],
+        },
+    }
+
+
 def _write_calibrations(tmp_path):
     block_path = tmp_path / "方块标定.yaml"
     tray_path = tmp_path / "托盘标定.yaml"
@@ -196,6 +231,105 @@ def test_localizer_xyz_safety_boundaries_are_inclusive(tmp_path, boundary_xyz):
     assert localizer.locate_block([0.0, 0.0])[:3] == boundary_xyz
 
 
+def test_open_loop_safety_offset_checks_executed_tcp_but_returns_raw_prediction(tmp_path):
+    block_path = tmp_path / "开环方块标定.yaml"
+    tray_path = tmp_path / "开环托盘标定.yaml"
+    block_path.write_text(
+        yaml.safe_dump(_affine_payload("block", [-140.0, 20.0, 200.0]), sort_keys=False),
+        encoding="utf-8",
+    )
+    tray_path.write_text(
+        yaml.safe_dump(_affine_payload("tray", [-140.0, 20.0, 200.0]), sort_keys=False),
+        encoding="utf-8",
+    )
+
+    closed_loop = HighPixelToTcpLocalizer(
+        block_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+    )
+    with pytest.raises(ValueError, match="预测 TCP XYZ.*超出安全范围"):
+        closed_loop.locate_block([0.0, 0.0])
+
+    open_loop = HighPixelToTcpLocalizer(
+        block_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+        safety_xy_offset=[-94.1, -13.8],
+    )
+
+    # 校验使用偏移后的 [-234.1, 6.2]，返回值仍是标定模型的原始预测。
+    assert open_loop.locate_block([0.0, 0.0])[:3] == pytest.approx(
+        [-140.0, 20.0, 200.0]
+    )
+    assert open_loop.locate_tray([0.0, 0.0])[:3] == pytest.approx(
+        [-140.0, 20.0, 200.0]
+    )
+
+
+def test_open_loop_safety_offset_reports_raw_offset_and_executed_tcp(tmp_path):
+    block_path = tmp_path / "偏移越界方块标定.yaml"
+    tray_path = tmp_path / "安全托盘标定.yaml"
+    block_path.write_text(
+        yaml.safe_dump(_affine_payload("block", [-440.0, -250.0, 200.0]), sort_keys=False),
+        encoding="utf-8",
+    )
+    tray_path.write_text(
+        yaml.safe_dump(_affine_payload("tray", [-300.0, 0.0, 200.0]), sort_keys=False),
+        encoding="utf-8",
+    )
+    localizer = HighPixelToTcpLocalizer(
+        block_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+        safety_xy_offset=[-94.1, -13.8],
+    )
+
+    with pytest.raises(ValueError) as error:
+        localizer.locate_block([0.0, 0.0])
+
+    message = str(error.value)
+    assert "预测 TCP XYZ [-440.0, -250.0, 200.0]" in message
+    assert "安全校验 XY 偏移 [-94.1, -13.8]" in message
+    assert "待执行 TCP XYZ [-534.1, -263.8, 200.0]" in message
+    assert "超出安全范围" in message
+
+
+def test_safety_xy_offset_never_changes_z_validation(tmp_path):
+    block_path = tmp_path / "低位方块标定.yaml"
+    tray_path = tmp_path / "安全托盘标定.yaml"
+    block_path.write_text(
+        yaml.safe_dump(_affine_payload("block", [-300.0, 0.0, 160.0]), sort_keys=False),
+        encoding="utf-8",
+    )
+    tray_path.write_text(
+        yaml.safe_dump(_affine_payload("tray", [-300.0, 0.0, 200.0]), sort_keys=False),
+        encoding="utf-8",
+    )
+    localizer = HighPixelToTcpLocalizer(
+        block_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+        safety_xy_offset=[-94.1, -13.8],
+    )
+
+    with pytest.raises(ValueError, match="待执行 TCP XYZ.*160.0.*超出安全范围"):
+        localizer.locate_block([0.0, 0.0])
+
+
+@pytest.mark.parametrize("offset", [[1.0], [1.0, 2.0, 3.0], [float("nan"), 0.0]])
+def test_constructor_rejects_invalid_safety_xy_offset(tmp_path, offset):
+    block_path, tray_path = _write_calibrations(tmp_path)
+
+    with pytest.raises(ValueError, match="safety_xy_offset 必须包含 2 个有限数值"):
+        HighPixelToTcpLocalizer(
+            block_path,
+            tray_path,
+            shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+            safety_xy_offset=offset,
+        )
+
+
 def test_tray_strict_planarity_false_metadata_does_not_block_runtime(tmp_path):
     block_payload = _affine_payload("block", [-300.0, 0.0, 200.0])
     tray_payload = _affine_payload("tray", [-250.0, 50.0, 210.0])
@@ -247,7 +381,7 @@ def test_reported_block_pixel_outside_sample_hull_is_accepted_when_tcp_is_safe()
     pose = localizer.locate_block([1063.0, 571.0])
 
     assert pose == pytest.approx(
-        [-151.053132, 219.159510, 201.435111, 180.0, 0.0, -90.0],
+        [-150.4206184720751, 219.46061429534058, 201.42959037238307, 180.0, 0.0, -90.0],
         abs=1e-6,
     )
 
@@ -259,4 +393,59 @@ def test_constructor_rejects_swapped_subject_calibrations(tmp_path):
             tray_path,
             block_path,
             shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+        )
+
+
+def test_v2_pair_keeps_same_slopes_and_exact_seven_mm_height_difference(tmp_path):
+    block_path = tmp_path / "v2方块.yaml"
+    tray_path = tmp_path / "v2托盘.yaml"
+    block_path.write_text(
+        yaml.safe_dump(_v2_affine_payload("block", "batch-1", 203.0), sort_keys=False),
+        encoding="utf-8",
+    )
+    tray_path.write_text(
+        yaml.safe_dump(_v2_affine_payload("tray", "batch-1", 196.0), sort_keys=False),
+        encoding="utf-8",
+    )
+    localizer = HighPixelToTcpLocalizer(
+        block_path,
+        tray_path,
+        shooting_pose=[-250.0, 0.0, 380.0, 180.0, 0.0, 90.0],
+    )
+
+    block = localizer.locate_block([10.0, 20.0])
+    tray = localizer.locate_tray([10.0, 20.0])
+
+    assert block[:2] == tray[:2] == [-290.0, 20.0]
+    assert block[2] - tray[2] == pytest.approx(7.0)
+
+
+def test_localizer_rejects_v1_v2_mix_and_v2_batch_mismatch(tmp_path):
+    v1_block = tmp_path / "v1方块.yaml"
+    v2_block = tmp_path / "v2方块.yaml"
+    tray = tmp_path / "v2托盘.yaml"
+    v1_block.write_text(
+        yaml.safe_dump(_affine_payload("block", [-300.0, 0.0, 200.0]), sort_keys=False),
+        encoding="utf-8",
+    )
+    v2_block.write_text(
+        yaml.safe_dump(_v2_affine_payload("block", "batch-a", 203.0), sort_keys=False),
+        encoding="utf-8",
+    )
+    tray.write_text(
+        yaml.safe_dump(_v2_affine_payload("tray", "batch-b", 196.0), sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="schema 版本不一致"):
+        HighPixelToTcpLocalizer(
+            v1_block,
+            tray,
+            shooting_pose=[-250.0, 0.0, 380.0, 180.0, 0.0, 90.0],
+        )
+    with pytest.raises(ValueError, match="批次不一致"):
+        HighPixelToTcpLocalizer(
+            v2_block,
+            tray,
+            shooting_pose=[-250.0, 0.0, 380.0, 180.0, 0.0, 90.0],
         )

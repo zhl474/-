@@ -8,7 +8,10 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
 )
 
-add_service_files(FILES GetSurfaceHeight.srv)
+add_service_files(FILES
+  GetSurfaceHeight.srv
+  GetStableWorldPoints.srv
+)
 generate_messages()
 
 catkin_package(CATKIN_DEPENDS cv_bridge message_runtime rospy sensor_msgs)

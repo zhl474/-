@@ -10,7 +10,8 @@ import numpy as np
 import yaml
 
 
-CALIBRATION_SCHEMA_VERSION = 1
+CALIBRATION_SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
 CALIBRATION_TYPE = "pixel_to_tcp_position"
 CALIBRATION_SUBJECTS = frozenset({"block", "tray"})
 _DENOMINATOR_EPS = 1e-12
@@ -82,6 +83,8 @@ class PixelToTcpCalibration:
     parameters: Mapping[str, Any]
     pixel_convex_hull: np.ndarray
     metadata: Mapping[str, Any]
+    schema_version: int = 1
+    z_plane_coefficients: Optional[np.ndarray] = None
 
     def is_pixel_within_coverage(self, pixel_xy: Sequence[float], tolerance_px: float = 1e-6) -> bool:
         """判断输入像素是否处于采集样本形成的凸包内。"""
@@ -105,6 +108,14 @@ class PixelToTcpCalibration:
         else:  # load 函数已校验，这里保留防御性分支。
             raise ValueError(f"不支持的标定模型：{self.model_name}")
 
+        if self.schema_version == 2:
+            if prediction.shape != (2,) or self.z_plane_coefficients is None:
+                raise ValueError("schema v2 标定缺少二维 XY 预测或 Z 平面")
+            a, b, c = self.z_plane_coefficients
+            prediction = np.array(
+                [prediction[0], prediction[1], a * prediction[0] + b * prediction[1] + c],
+                dtype=float,
+            )
         if not np.all(np.isfinite(prediction)):
             raise ValueError("标定预测结果包含非有限数值")
         return prediction
@@ -116,9 +127,10 @@ class PixelToTcpCalibration:
         if np.any(scale <= _DENOMINATOR_EPS):
             raise ValueError("model.parameters.uv_scale 必须大于零")
         feature_count = len(_polynomial_feature_names(degree))
+        output_size = 2 if self.schema_version == 2 else 3
         coefficient = _finite_array(
             self.parameters["coef"],
-            (feature_count, 3),
+            (feature_count, output_size),
             "model.parameters.coef",
         )
         normalized = (pixel - mean) / scale
@@ -126,6 +138,12 @@ class PixelToTcpCalibration:
 
     def _predict_homography(self, pixel: np.ndarray) -> np.ndarray:
         matrix = _finite_array(self.parameters["H"], (3, 3), "model.parameters.H")
+        homogeneous = matrix @ np.array([pixel[0], pixel[1], 1.0], dtype=float)
+        if abs(homogeneous[2]) <= _DENOMINATOR_EPS:
+            raise ValueError("单应标定的齐次分母接近零，无法预测 TCP 位置")
+        plane_xy = homogeneous[:2] / homogeneous[2]
+        if self.schema_version == 2:
+            return plane_xy
         centroid = _finite_array(
             self.parameters["plane_centroid"],
             (3,),
@@ -136,10 +154,6 @@ class PixelToTcpCalibration:
             (2, 3),
             "model.parameters.plane_basis",
         )
-        homogeneous = matrix @ np.array([pixel[0], pixel[1], 1.0], dtype=float)
-        if abs(homogeneous[2]) <= _DENOMINATOR_EPS:
-            raise ValueError("单应标定的齐次分母接近零，无法预测 TCP 位置")
-        plane_xy = homogeneous[:2] / homogeneous[2]
         return centroid + plane_xy @ basis
 
 
@@ -173,6 +187,35 @@ def _validate_model(name: Any, parameters: Mapping[str, Any]) -> str:
         "model.parameters.coef",
     )
     return str(name)
+
+
+def _validate_xy_model(name: Any, parameters: Mapping[str, Any]) -> str:
+    """校验 schema v2 的像素到 TCP XY 模型。"""
+    if not isinstance(name, str) or name not in {"affine", "homography", "poly2", "poly3"}:
+        raise ValueError(f"xy_model.name 不支持：{name}")
+    if name == "homography":
+        _finite_array(parameters.get("H"), (3, 3), "xy_model.parameters.H")
+        return name
+    expected_degree = {"affine": 1, "poly2": 2, "poly3": 3}[name]
+    try:
+        degree = int(parameters.get("degree"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("xy_model.parameters.degree 必须是整数") from exc
+    if degree != expected_degree:
+        raise ValueError(f"{name} 的 degree 必须为 {expected_degree}")
+    _finite_array(parameters.get("uv_mean"), (2,), "xy_model.parameters.uv_mean")
+    scale = _finite_array(parameters.get("uv_scale"), (2,), "xy_model.parameters.uv_scale")
+    if np.any(scale <= _DENOMINATOR_EPS):
+        raise ValueError("xy_model.parameters.uv_scale 必须大于零")
+    feature_names = parameters.get("feature_names")
+    if feature_names != _polynomial_feature_names(degree):
+        raise ValueError("xy_model.parameters.feature_names 与多项式次数不匹配")
+    _finite_array(
+        parameters.get("coef"),
+        (len(feature_names), 2),
+        "xy_model.parameters.coef",
+    )
+    return name
 
 
 def _validate_calibration_subject(
@@ -219,8 +262,11 @@ def load_pixel_to_tcp_calibration(
         raise ValueError(f"TCP 标定文件不是合法 YAML：{calibration_path}") from exc
 
     document = _require_mapping(data, "标定文件根节点")
-    if document.get("schema_version") != CALIBRATION_SCHEMA_VERSION:
-        raise ValueError(f"仅支持 schema_version={CALIBRATION_SCHEMA_VERSION} 的 TCP 标定文件")
+    schema_version = document.get("schema_version")
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        raise ValueError(
+            f"仅支持 schema_version={sorted(SUPPORTED_SCHEMA_VERSIONS)} 的 TCP 标定文件"
+        )
     if document.get("calibration_type") != CALIBRATION_TYPE:
         raise ValueError(f"calibration_type 必须为 {CALIBRATION_TYPE}")
     _validate_calibration_subject(document, expected_subject)
@@ -232,9 +278,29 @@ def load_pixel_to_tcp_calibration(
     if output_info.get("coordinate") != "tcp_position_xyz" or output_info.get("unit") != "mm":
         raise ValueError("output 必须描述 tcp_position_xyz，单位必须为 mm")
 
-    model = _require_mapping(document.get("model"), "model")
-    parameters = _require_mapping(model.get("parameters"), "model.parameters")
-    model_name = _validate_model(model.get("name"), parameters)
+    z_plane_coefficients = None
+    if schema_version == 1:
+        model = _require_mapping(document.get("model"), "model")
+        parameters = _require_mapping(model.get("parameters"), "model.parameters")
+        model_name = _validate_model(model.get("name"), parameters)
+    else:
+        generation_id = document.get("generation_id")
+        if not isinstance(generation_id, str) or not generation_id.strip():
+            raise ValueError("schema v2 标定必须包含非空 generation_id")
+        model = _require_mapping(document.get("xy_model"), "xy_model")
+        parameters = _require_mapping(model.get("parameters"), "xy_model.parameters")
+        model_name = _validate_xy_model(model.get("name"), parameters)
+        z_plane = _require_mapping(document.get("z_plane"), "z_plane")
+        if z_plane.get("equation") != "z = a*x + b*y + c":
+            raise ValueError("z_plane.equation 必须为 z = a*x + b*y + c")
+        source = z_plane.get("source")
+        if not isinstance(source, str) or not source:
+            raise ValueError("z_plane.source 必须是非空字符串")
+        z_plane_coefficients = _finite_array(
+            z_plane.get("coefficients"),
+            (3,),
+            "z_plane.coefficients",
+        )
 
     coverage = _require_mapping(document.get("coverage"), "coverage")
     hull = _finite_array(coverage.get("pixel_convex_hull"), (-1, 2), "coverage.pixel_convex_hull")
@@ -250,4 +316,6 @@ def load_pixel_to_tcp_calibration(
         parameters=dict(parameters),
         pixel_convex_hull=hull,
         metadata=dict(document),
+        schema_version=int(schema_version),
+        z_plane_coefficients=z_plane_coefficients,
     )

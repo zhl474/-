@@ -10,16 +10,47 @@ calibration:
   # 正式运行部署副本；也可由对应 ROS 私有参数覆盖。
   block_pixel_to_tcp: image_process/config/block_pixel_to_tcp_calibration.yaml
   tray_pixel_to_tcp: image_process/config/tray_pixel_to_tcp_calibration.yaml
+  hand_eye_matrix: camera/config/T_wrist2camera.npy
+
+# 仅在 execution.yaml 的 calibration_mode=true 时使用。
+# 每个目标像素在每帧先取 3×3 邻域有效深度的中位数，再对多帧结果计算中位数和 MAD。
+# 任一方块深度门禁或方块平面门禁失败时，本轮标定准备直接失败，不读取旧标定兜底。
+calibration_depth:
+  # 收到批量查询请求后需要重新采集的深度帧数。请求前缓存不参与计算；
+  # 所有方块和托盘点共用请求后采集的这 15 帧。
+  frame_count: 15
+
+  # 单个目标点至少需要多少帧能在其 3×3 邻域取得有效深度。
+  # 例如设为 10，15 帧中只有 9 帧有效时，该目标无效并终止本轮标定准备。
+  min_valid_frames: 10
+
+  # 等待请求后新深度帧的最长时间，单位秒。收满 frame_count 帧后立即计算；
+  # 超时仍未收满时明确报出实际帧数，不使用请求前旧帧，也不永久等待。
+  capture_timeout_sec: 2.0
+
+  # 方块跨帧深度 MAD 上限，单位 mm。MAD 是各帧深度与多帧中位数之差的绝对值中位数，
+  # 用于衡量深度抖动，对少量离群值比标准差更稳健；方块 MAD 大于 1.0 mm 时拒绝标定。
+  # 托盘 MAD 只写入 CSV 供检查，不使用这个阈值，因为托盘深度 Z 不参与高度计算。
+  block_max_mad_mm: 1.0
+
+  # 用全部方块深度点生成观察 TCP 坐标后，拟合 z=a*x+b*y+c 平面的 RMSE 上限，单位 mm。
+  # 至少需要 3 个 XY 不共线的方块点；拟合 RMSE 大于 1.0 mm 时认为方块高度不一致或深度异常，
+  # 禁止继续生成托盘粗定位位姿和执行后续低位运动。
+  block_plane_max_rmse_mm: 1.0
+
+  # 托盘释放 TCP 平面低于方块低位观察 TCP 平面的控制高度，不是物理表面高度差。
+  # 对任意相同机器人 XY：Z_tray(X,Y)=Z_block_observation(X,Y)-该值。
+  # 托盘深度只提供粗定位 X/Y，其深度 Z 无论如何波动都不会改变这里计算出的托盘 TCP Z。
+  tray_tcp_below_block_observation_mm: 7.0
 
 high_tcp_localization:
-  # 高位标定预测出的观察 TCP 必须落在实测安全 XY 范围内。
-  safe_x_range_mm: [-444.224, -148.17]
+  # 当前模式下实际准备运动到的 TCP 必须落在实测安全 XY 范围内：
+  # 闭环检查高位标定预测的相机观察 TCP，开环检查预测 TCP 加相机到吸盘偏移后的目标。
+  safe_x_range_mm: [-520.224, -148.17]
   safe_y_range_mm: [-263.279, 315.925]
 
 pick_height:
-  # calibrated_height：由观察 TCP Z 减固定观察高度推导方块表面 Z。
-  # depth_height：调用 /camera/surface_height 获取方块表面绝对 Z。
-  mode: calibrated_height
+  # 正式模式由观察 TCP Z 减该值得到表面 Z；标定模式由表面深度加该值得到观察 TCP Z。
   block_observation_height_mm: 192.0
 
 fallback:
@@ -47,7 +78,7 @@ board_servo:
 visual_servo_debug:
   # false 时不构建、不编码也不输出低位方块和托盘视觉伺服调试图像。
   # true 时仅录制两路低位视觉伺服调试视频，不保存单帧 JPG。
-  enabled: false
+  enabled: true
   # 调试视频输出目录；目录不可写时仅记录警告，不影响视觉伺服。
   output_dir: /home/zhl/桌面
   # 方块和托盘调试视频使用相同帧率。

@@ -2,6 +2,7 @@ import importlib.util
 import os
 import sys
 import threading
+import time
 import types
 
 import numpy as np
@@ -77,6 +78,8 @@ def _load_camera(monkeypatch):
     camera.srv = types.ModuleType("camera.srv")
     camera.srv.GetSurfaceHeight = object
     camera.srv.GetSurfaceHeightResponse = _Response
+    camera.srv.GetStableWorldPoints = object
+    camera.srv.GetStableWorldPointsResponse = _Response
     monkeypatch.setitem(sys.modules, "camera", camera)
     monkeypatch.setitem(sys.modules, "camera.srv", camera.srv)
 
@@ -93,9 +96,11 @@ def _make_node(module, depth_image=None, depth_stamp=100.0):
     """构造只包含表面高度查询所需状态的轻量节点。"""
     node = object.__new__(module.CameraNode)
     node.depth_lock = threading.Lock()
+    node.depth_condition = threading.Condition(node.depth_lock)
     node.latest_depth_image = depth_image
     node.latest_depth_monotonic = depth_stamp
     node.depth_max_age_sec = 0.5
+    node.depth_collectors = []
     node.arm = None
     node.arm_init_lock = threading.Lock()
     node.hand_eye_matrix_path = "/tmp/手眼矩阵.npy"
@@ -106,6 +111,23 @@ def _make_node(module, depth_image=None, depth_stamp=100.0):
     return node
 
 
+def _start_stable_request(node, request):
+    """在线程中发起阻塞请求，并等到采集器完成登记。"""
+    responses = []
+    thread = threading.Thread(
+        target=lambda: responses.append(node.get_stable_world_points(request))
+    )
+    thread.start()
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        with node.depth_condition:
+            if node.depth_collectors:
+                return thread, responses
+        threading.Event().wait(0.001)
+    thread.join(timeout=1.0)
+    raise AssertionError("批量深度请求未及时登记采集器")
+
+
 def test_service_definition_replaces_old_pixel_to_world_service():
     package_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     service_path = os.path.join(package_dir, "srv", "GetSurfaceHeight.srv")
@@ -114,6 +136,19 @@ def test_service_definition_replaces_old_pixel_to_world_service():
     text = open(service_path, "r", encoding="utf-8").read()
     for field in ("int32 x", "int32 y", "float64 surface_z_mm", "bool success"):
         assert field in text
+    stable_text = open(
+        os.path.join(package_dir, "srv", "GetStableWorldPoints.srv"),
+        "r",
+        encoding="utf-8",
+    ).read()
+    for field in (
+        "int32[] x",
+        "int32[] y",
+        "float64 capture_timeout_sec",
+        "float64[] world_xyz",
+        "float64[] depth_mad_mm",
+    ):
+        assert field in stable_text
 
 
 def test_node_startup_does_not_initialize_arm_or_load_hand_eye(monkeypatch):
@@ -131,6 +166,103 @@ def test_node_startup_does_not_initialize_arm_or_load_hand_eye(monkeypatch):
     assert node.arm is None
     assert arm_calls == []
     assert node.depth_max_age_sec == 0.5
+    assert node.depth_collectors == []
+    assert not hasattr(node, "depth_batch_max_span_sec")
+    assert not hasattr(node, "depth_buffer_size")
+
+
+def test_stable_world_points_use_temporal_median_mad_and_one_camera_pose(monkeypatch):
+    module = _load_camera(monkeypatch)
+    node = _make_node(module)
+    pose_calls = []
+    node.arm = types.SimpleNamespace(
+        get_camera_pose=lambda: pose_calls.append(True) or (True, [0, 0, 0, 0, 0, 0])
+    )
+    node.cap = types.SimpleNamespace(
+        depth_pixel2cam_point3d=lambda x, y, depth_value: [x, y, depth_value]
+    )
+    request = types.SimpleNamespace(
+        x=[1, 2],
+        y=[1, 2],
+        frame_count=15,
+        min_valid_frames=10,
+        capture_timeout_sec=1.0,
+    )
+    # 请求前发布的旧帧不会进入这次批量结果。
+    node._cache_depth_frame(np.full((3, 3), 999.0))
+    thread, responses = _start_stable_request(node, request)
+    with node.depth_condition:
+        registered_monotonic = node.depth_collectors[0]["registered_monotonic"]
+    # 即使请求前取得的帧稍后才进入缓存，也不能被本次采集器接收。
+    node._cache_depth_frame(
+        np.full((3, 3), 888.0),
+        captured_monotonic=registered_monotonic - 0.001,
+    )
+    for depth in range(100, 115):
+        node._cache_depth_frame(np.full((3, 3), depth))
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    response = responses[0]
+    assert response.success is True
+    assert response.point_valid == [True, True]
+    assert response.valid_frame_counts == [15, 15]
+    assert response.depth_median_mm == [107.0, 107.0]
+    assert response.depth_mad_mm == [4.0, 4.0]
+    assert response.world_xyz == [1.0, 1.0, 107.0, 2.0, 2.0, 107.0]
+    assert len(pose_calls) == 1
+
+
+def test_stable_world_points_times_out_with_explicit_new_frame_count(monkeypatch):
+    module = _load_camera(monkeypatch)
+    node = _make_node(module)
+    request = types.SimpleNamespace(
+        x=[1],
+        y=[1],
+        frame_count=15,
+        min_valid_frames=10,
+        capture_timeout_sec=0.05,
+    )
+    thread, responses = _start_stable_request(node, request)
+    for _index in range(4):
+        node._cache_depth_frame(np.ones((3, 3)))
+    thread.join(timeout=0.5)
+
+    assert not thread.is_alive()
+    response = responses[0]
+    assert response.success is False
+    assert "新深度帧不足：实际 4/15" in response.message
+    assert "过期" not in response.message
+    assert "时间跨度" not in response.message
+
+
+def test_stable_world_points_marks_point_invalid_below_minimum_valid_frames(monkeypatch):
+    module = _load_camera(monkeypatch)
+    node = _make_node(module)
+    node.arm = types.SimpleNamespace(
+        get_camera_pose=lambda: (True, [0, 0, 0, 0, 0, 0])
+    )
+
+    request = types.SimpleNamespace(
+        x=[1],
+        y=[1],
+        frame_count=15,
+        min_valid_frames=10,
+        capture_timeout_sec=1.0,
+    )
+    thread, responses = _start_stable_request(node, request)
+    for index in range(15):
+        depth = 500.0 if index < 9 else 0.0
+        node._cache_depth_frame(np.full((3, 3), depth))
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    response = responses[0]
+    assert response.success is True
+    assert response.point_valid == [False]
+    assert response.valid_frame_counts == [9]
+    assert response.depth_median_mm == [500.0]
+    assert response.world_xyz == [0.0, 0.0, 0.0]
 
 
 def test_missing_depth_returns_explicit_failure(monkeypatch):
@@ -271,8 +403,10 @@ def test_rgb_is_published_when_same_capture_has_no_depth(monkeypatch):
     color_image = np.full((2, 2, 3), 7, dtype=np.uint8)
     node.cap = types.SimpleNamespace(read=lambda: (color_image, None))
     node.depth_lock = threading.Lock()
+    node.depth_condition = threading.Condition(node.depth_lock)
     node.latest_depth_image = None
     node.latest_depth_monotonic = None
+    node.depth_collectors = []
     node.bridge = _Bridge()
     node.image_pub = _Publisher()
     shutdown_values = iter([False, True])
@@ -291,8 +425,10 @@ def test_new_rgb_without_depth_invalidates_previous_depth_cache(monkeypatch):
     color_image = np.full((2, 2, 3), 7, dtype=np.uint8)
     node.cap = types.SimpleNamespace(read=lambda: (color_image, None))
     node.depth_lock = threading.Lock()
+    node.depth_condition = threading.Condition(node.depth_lock)
     node.latest_depth_image = np.full((2, 2), 100.0, dtype=float)
     node.latest_depth_monotonic = 100.0
+    node.depth_collectors = []
     node.depth_max_age_sec = 0.5
     node.bridge = _Bridge()
     node.image_pub = _Publisher()
@@ -321,8 +457,10 @@ def test_depth_cache_conversion_failure_invalidates_previous_cache(monkeypatch):
     color_image = np.full((2, 2, 3), 7, dtype=np.uint8)
     node.cap = types.SimpleNamespace(read=lambda: (color_image, _InvalidDepth()))
     node.depth_lock = threading.Lock()
+    node.depth_condition = threading.Condition(node.depth_lock)
     node.latest_depth_image = np.full((2, 2), 100.0, dtype=float)
     node.latest_depth_monotonic = 100.0
+    node.depth_collectors = []
     node.bridge = _Bridge()
     node.image_pub = _Publisher()
     shutdown_values = iter([False, True])

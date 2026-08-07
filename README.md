@@ -6,7 +6,7 @@
 
 - `competition/competition_lib/`：任务状态机、硬件服务客户端、执行配置和通用视觉伺服闭环。
 - `image_process/image_process_lib/`：高低位检测、像素到 TCP 标定定位、任务规划和图像 ROS 服务。
-- `camera/`：彩色图像发布与可选的方块表面高度服务。
+- `camera/`：彩色/深度图采集，以及标定模式使用的批量稳定世界 XYZ 服务。
 - `control/`：机械臂、末端舵机和电子吸盘控制服务。
 - `tools/`：视觉标定、偏心补偿和硬件单项测试，不会由正式 launch 启动。
 
@@ -16,7 +16,7 @@
 - `/perception/get_task_target`：返回一个完整抓放任务。
 - `/perception/block_offset`：返回低位方块像素偏差。
 - `/perception/board_offset`：返回低位托盘目标像素偏差。
-- `/camera/surface_height`：在深度高度模式下返回方块表面的基坐标系绝对 Z。
+- `/camera/stable_world_points`：用同一批深度帧和同一次相机位姿返回多个表面点的基坐标 XYZ，仅供标定模式使用。
 - `/control/move_arm`、`/control/rotate_tool`、`/control/set_suction`：硬件控制。
 
 ## 配置
@@ -28,8 +28,9 @@
 - `image_process/config/task_layout.yaml`：基础任务唯一摆放表。
 
 `execution.yaml` 根节点的 `calibration_mode` 是抓放/标定唯一模式开关。
-`false` 为正式抓放，不读写标定 CSV；`true` 为标定采集，执行相同运动和视觉
-伺服，但全程关闭吸气/吹气，并覆盖记录方块和托盘的精简标定 CSV。
+`false` 为正式抓放，只加载部署的成对标定 YAML，不创建也不等待深度坐标客户端；
+`true` 为标定采集，深度相机提供当前现场完整 XYZ 粗定位，低位视觉伺服只修正 XY，
+全程关闭吸气/吹气，并覆盖记录方块和托盘标定 CSV。
 
 `execution.yaml` 的 `servo.enabled` 控制正式运行是否启用方块和托盘低位视觉伺服。
 `true` 保持“粗观察位、视觉对准、偏置、抓放”的闭环流程；`false` 直接对方块或
@@ -37,11 +38,16 @@
 下探、吸取、抬回上方”，托盘摆放则保留托盘标定 Z 直接释放。配置在节点启动时读取，
 修改后需要重启；标定采集模式会警告并强制开启视觉伺服。
 
-高位粗定位固定使用对象各自的像素到 TCP 标定。标定样本凸包只用于分析采样覆盖，
-不作为正式抓取范围；运行时由图像输入有效性、预测 TCP 安全范围和最终抓取高度把关。默认
-`calibrated_height` 由方块观察 TCP Z 减去 `192 mm` 推导表面高度；需要深度时可通过
-launch 参数 `pick_height_mode:=depth_height` 切换。颜色分割回退只属于方块上表面识别，
-不参与高位 TCP 定位。
+正式模式的高位粗定位固定使用方块、托盘各自的 schema v1 或成对 schema v2 标定。
+schema v2 将像素到 TCP XY 模型与 TCP Z 平面拆开；方块和托盘必须属于同一生成批次，
+且托盘 Z 平面始终比方块观察 TCP 平面低 `7.0 mm`。标定样本凸包只用于分析采样覆盖，
+不作为正式抓取范围。
+
+标定模式不读取旧像素标定。方块深度点是上表面世界 XYZ，方块观察 TCP Z 为表面
+Z 加 `192 mm`，最终抓取 TCP Z 为表面 Z 加 `162 mm`；托盘只使用深度世界 X/Y，
+深度 Z 完全不参与控制高度。稳定深度默认缓存 15 帧、至少 10 帧有效，方块 MAD 和
+方块观察平面 RMSE 均不得超过 `1.0 mm`，失败时禁止开始低位运动且不回退旧标定。
+颜色分割回退只属于方块上表面识别，不参与高位 TCP 定位。
 
 ## 运行与测试
 
@@ -67,7 +73,8 @@ roslaunch competition competition.launch
 /home/zhl/fr3env/fr3env/bin/python tools/vision/pixel_to_tcp_calibration_analysis.py
 ```
 
-产物位于 `pixel_to_tcp_calibration_results/`。只有数据数量、完整性、TCP 平面和映射拟合
-检查通过时才生成标定 YAML；确认报告后再手动复制到 `image_process/config/`。
+候选产物位于 `tools/vision/像素-tcp标定结果与数据分析/`。只有两份 CSV 的数据数量、
+深度门禁、方块 Z 平面和独立 XY 映射全部通过时，才生成同批次的两份 schema v2 YAML；
+确认报告并低速验证托盘中心和四角后，再同时手动复制到 `image_process/config/`。
 
 硬件回归顺序固定为：仅启动节点、高位识别不运动、单块低速抓放、完整基础任务、完整进阶任务。视觉伺服失败后禁止继续下探；持块摆放失败时保持吸盘状态并停止自动运动。

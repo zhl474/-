@@ -40,6 +40,42 @@ def _homography_payload(subject="block"):
     return payload
 
 
+def _v2_affine_payload(subject="block", generation_id="batch-1", z_c=100.0):
+    """构造像素到 XY 仿射模型和独立 Z 平面。"""
+    return {
+        "schema_version": 2,
+        "generation_id": generation_id,
+        "calibration_type": "pixel_to_tcp_position",
+        "calibration_subject": subject,
+        "input": {"coordinate": "high_detection_pixel_xy", "unit": "pixel"},
+        "output": {"coordinate": "tcp_position_xyz", "unit": "mm"},
+        "xy_model": {
+            "name": "affine",
+            "parameters": {
+                "kind": "polynomial",
+                "degree": 1,
+                "uv_mean": [0.0, 0.0],
+                "uv_scale": [1.0, 1.0],
+                "feature_names": ["1", "u", "v"],
+                "coef": [[10.0, 20.0], [1.0, 0.0], [0.0, 1.0]],
+            },
+        },
+        "z_plane": {
+            "equation": "z = a*x + b*y + c",
+            "coefficients": [0.1, 0.2, z_c],
+            "source": "external_depth",
+        },
+        "coverage": {
+            "pixel_convex_hull": [
+                [0.0, 0.0],
+                [10.0, 0.0],
+                [10.0, 10.0],
+                [0.0, 10.0],
+            ],
+        },
+    }
+
+
 def _write_yaml(path: Path, payload: dict) -> Path:
     path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
     return path
@@ -131,6 +167,37 @@ def test_homography_calibration_uses_hull_only_for_coverage_diagnostics(tmp_path
         calibration.predict([11.0, 5.0]),
         [21.0, 25.0, 30.0],
     )
+
+
+def test_schema_v2_predicts_xy_first_and_z_from_independent_plane(tmp_path):
+    calibration = load_pixel_to_tcp_calibration(
+        _write_yaml(tmp_path / "v2方块.yaml", _v2_affine_payload()),
+        expected_subject="block",
+    )
+
+    prediction = calibration.predict([2.0, 3.0])
+
+    assert calibration.schema_version == 2
+    assert prediction[:2] == pytest.approx([12.0, 23.0])
+    assert prediction[2] == pytest.approx(0.1 * 12.0 + 0.2 * 23.0 + 100.0)
+
+
+def test_schema_v2_rejects_missing_generation_and_invalid_z_plane(tmp_path):
+    missing_generation = _v2_affine_payload()
+    del missing_generation["generation_id"]
+    with pytest.raises(ValueError, match="generation_id"):
+        load_pixel_to_tcp_calibration(
+            _write_yaml(tmp_path / "无批次.yaml", missing_generation),
+            expected_subject="block",
+        )
+
+    invalid_plane = _v2_affine_payload()
+    invalid_plane["z_plane"]["coefficients"] = [0.1, 0.2]
+    with pytest.raises(ValueError, match="z_plane.coefficients"):
+        load_pixel_to_tcp_calibration(
+            _write_yaml(tmp_path / "坏平面.yaml", invalid_plane),
+            expected_subject="block",
+        )
 
 
 def test_loader_rejects_subject_mismatch_and_missing_subject(tmp_path):

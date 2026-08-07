@@ -67,12 +67,19 @@ class HighPixelToTcpLocalizer:
         shooting_pose: Sequence[float],
         tcp_min_xyz: Sequence[float] = DEFAULT_TCP_MIN_XYZ,
         tcp_max_xyz: Sequence[Optional[float]] = DEFAULT_TCP_MAX_XYZ,
+        safety_xy_offset: Sequence[float] = (0.0, 0.0),
     ) -> None:
         shooting = _finite_vector(shooting_pose, 6, "高位拍摄位姿")
         self._shooting_rpy = shooting[3:6].copy()
         self._tcp_min_xyz, self._tcp_max_xyz = _validate_safety_bounds(
             tcp_min_xyz,
             tcp_max_xyz,
+        )
+        # 该偏移只用于检查实际待执行 TCP，不改变标定模型输出和后续任务位姿。
+        self._safety_xy_offset = _finite_vector(
+            safety_xy_offset,
+            2,
+            "safety_xy_offset",
         )
         self._calibrations = {
             "block": self._load_subject_calibration(
@@ -84,6 +91,15 @@ class HighPixelToTcpLocalizer:
                 "tray",
             ),
         }
+        block = self._calibrations["block"]
+        tray = self._calibrations["tray"]
+        if block.schema_version != tray.schema_version:
+            raise ValueError("方块与托盘标定 schema 版本不一致，禁止混用")
+        if block.schema_version == 2:
+            block_generation = block.metadata.get("generation_id")
+            tray_generation = tray.metadata.get("generation_id")
+            if block_generation != tray_generation:
+                raise ValueError("方块与托盘 schema v2 标定批次不一致")
 
     @staticmethod
     def _load_subject_calibration(
@@ -119,15 +135,25 @@ class HighPixelToTcpLocalizer:
                 f"{label}（{subject}）高位像素 {pixel_xy!r} 的 TCP 标定预测失败：{exc}"
             ) from exc
 
+        safety_tcp_xyz = tcp_xyz.copy()
+        safety_tcp_xyz[:2] += self._safety_xy_offset
         if (
-            not np.all(np.isfinite(tcp_xyz))
-            or np.any(tcp_xyz < self._tcp_min_xyz)
-            or np.any(tcp_xyz > self._tcp_max_xyz)
+            not np.all(np.isfinite(safety_tcp_xyz))
+            or np.any(safety_tcp_xyz < self._tcp_min_xyz)
+            or np.any(safety_tcp_xyz > self._tcp_max_xyz)
         ):
             maximum_text = [
                 float(value) if np.isfinite(value) else None
                 for value in self._tcp_max_xyz
             ]
+            if np.any(self._safety_xy_offset != 0.0):
+                raise ValueError(
+                    f"{label}（{subject}）高位像素 {pixel_xy!r} 预测 TCP XYZ "
+                    f"{tcp_xyz.tolist()} 加安全校验 XY 偏移 "
+                    f"{self._safety_xy_offset.tolist()} 后的待执行 TCP XYZ "
+                    f"{safety_tcp_xyz.tolist()} 超出安全范围："
+                    f"最小值 {self._tcp_min_xyz.tolist()}，最大值 {maximum_text}"
+                )
             raise ValueError(
                 f"{label}（{subject}）高位像素 {pixel_xy!r} 预测 TCP XYZ "
                 f"{tcp_xyz.tolist()} 超出安全范围：最小值 {self._tcp_min_xyz.tolist()}，"

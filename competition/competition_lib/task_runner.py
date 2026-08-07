@@ -177,7 +177,7 @@ class TaskRunner:
         except Exception:
             return empty
 
-    def _record_servo_result(self, target, side, success):
+    def _record_servo_result(self, target, side, success, failure_message=""):
         """标定模式仅写入一条最终成功或失败记录。"""
         if not self.config.calibration_mode or not self.servo_csv_logger.is_open:
             return False
@@ -185,11 +185,49 @@ class TaskRunner:
         detected_x, detected_y = self._finite_values(
             getattr(target, f"{prefix}_high_detected_pixel_xy", None), 2
         )
+        depth_x, depth_y = self._finite_values(
+            getattr(target, f"{prefix}_high_depth_sample_pixel_xy", None), 2
+        )
+        world_valid = bool(
+            getattr(target, f"{prefix}_high_world_position_valid", False)
+        )
+        world_x, world_y, world_z = (
+            self._finite_values(
+                getattr(target, f"{prefix}_high_world_position", None), 3
+            )
+            if world_valid
+            else ["", "", ""]
+        )
+        rough_pose = self._finite_values(
+            getattr(target, f"{prefix}_observation_pose", None), 6
+        )
         row = {
             "方块类别": str(getattr(target, "category", "") or ""),
             "事件": "伺服成功" if success else "伺服失败",
             "高位检测像素X": detected_x,
             "高位检测像素Y": detected_y,
+            "深度采样像素X": depth_x,
+            "深度采样像素Y": depth_y,
+            "高位世界坐标X": world_x,
+            "高位世界坐标Y": world_y,
+            "高位世界坐标Z": world_z,
+            "深度有效帧数": getattr(
+                target, f"{prefix}_depth_valid_frame_count", ""
+            ),
+            "深度中位数毫米": getattr(target, f"{prefix}_depth_median_mm", ""),
+            "深度MAD毫米": getattr(target, f"{prefix}_depth_mad_mm", ""),
+            "粗定位TCP位置X": rough_pose[0],
+            "粗定位TCP位置Y": rough_pose[1],
+            "粗定位TCP位置Z": rough_pose[2],
+            "标定目标TCP位置Z": getattr(
+                target,
+                f"{prefix}_calibration_target_tcp_z_mm",
+                "",
+            ),
+            "粗定位来源": str(
+                getattr(target, f"{prefix}_rough_localization_source", "") or ""
+            ),
+            "失败信息": "" if success else str(failure_message or "视觉伺服失败"),
         }
         row.update(self._read_actual_pose_for_csv())
         return self.servo_csv_logger.write("block" if side == "pick" else "board", row)
@@ -245,11 +283,11 @@ class TaskRunner:
                     rough_pose,
                     "方块视觉伺服",
                 )
-            except Exception:
-                self._record_servo_result(target, "pick", False)
+            except Exception as exc:
+                self._record_servo_result(target, "pick", False, str(exc))
                 raise
             if not success:
-                self._record_servo_result(target, "pick", False)
+                self._record_servo_result(target, "pick", False, message)
                 raise RuntimeError(f"方块视觉伺服失败: {message}")
             self._record_servo_result(target, "pick", True)
 
@@ -273,6 +311,7 @@ class TaskRunner:
         pick_pose[2] = pick_z_mm
         pick_pose = self._validate_motion_pose(pick_pose, "最终抓取位")
         self.clients.move_arm(pick_pose, self.config.pick_speed)
+        input("吸取方块后请确认吸盘已吸住方块，按回车继续...")
         if not self.config.calibration_mode:
             self.clients.set_suction(RobotClients.SUCK)
             self.holding_block = True
@@ -304,11 +343,11 @@ class TaskRunner:
                     rough_pose,
                     "托盘视觉伺服",
                 )
-            except Exception:
-                self._record_servo_result(target, "place", False)
+            except Exception as exc:
+                self._record_servo_result(target, "place", False, str(exc))
                 raise
             if not success:
-                self._record_servo_result(target, "place", False)
+                self._record_servo_result(target, "place", False, message)
                 raise RuntimeError(f"托盘视觉伺服失败: {message}")
             self._record_servo_result(target, "place", True)
 
@@ -321,7 +360,7 @@ class TaskRunner:
             self.clients.move_arm(
                 place_pose,
                 self.config.arm_speed,
-                wait_until_stable=False,
+                wait_until_stable=True,
             )
 
         self._set_state(TaskState.PLACING)

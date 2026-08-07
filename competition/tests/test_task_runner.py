@@ -537,6 +537,7 @@ def test_calibration_failure_writes_one_failure_row_and_closes_csv(monkeypatch, 
     block_rows = _read_csv_rows(tmp_path / "方块视觉伺服.csv")
     board_rows = _read_csv_rows(tmp_path / "托盘视觉伺服.csv")
     assert [row["事件"] for row in block_rows] == ["伺服失败"]
+    assert block_rows[0]["失败信息"] == "未识别"
     assert board_rows == []
     assert clients.suction_states == [module.RobotClients.OFF]
     assert clients.actual_pose_calls == 1

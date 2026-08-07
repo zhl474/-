@@ -2,11 +2,17 @@
 
 import json
 
+import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 from image_process_lib.pixel_to_tcp_calibration import load_pixel_to_tcp_calibration
-from tools.vision.pixel_to_tcp_calibration_analysis import CalibrationJob, analyze_job
+from tools.vision.pixel_to_tcp_calibration_analysis import (
+    CalibrationJob,
+    analyze_calibration_pair,
+    analyze_job,
+)
 
 
 def _calibration_rows(count=34, *, failure_index=None, nonplanar=False, collinear_pixels=False):
@@ -49,6 +55,46 @@ def _make_job(tmp_path, subject, rows, expected_count=34):
         output_dir=output_dir,
         calibration_filename=filename,
     )
+
+
+def _v2_rows(subject, count=34, *, block_mad=0.2):
+    """构造带稳定深度诊断的新标定 CSV。"""
+    rows = []
+    for index in range(count):
+        row_index, column_index = divmod(index, 7)
+        pixel_x = 100.0 + column_index * 31.0
+        pixel_y = 80.0 + row_index * 37.0
+        tcp_x = 0.45 * pixel_x - 0.12 * pixel_y - 300.0
+        tcp_y = -0.08 * pixel_x + 0.52 * pixel_y - 35.0
+        block_target_z = 0.01 * tcp_x + 0.02 * tcp_y + 203.0
+        if subject == "block":
+            target_z = block_target_z
+            world_z = target_z - 192.0
+            actual_z = target_z + (index % 2) * 0.3
+            source = "stable_depth_xyz"
+            depth_mad = block_mad
+        else:
+            # 托盘深度 Z 和实测反馈 Z 都故意大幅变化，生成器不得用于托盘 Z 平面。
+            target_z = block_target_z - 7.0
+            world_z = 500.0 + (index % 5) * 25.0
+            actual_z = 800.0 + index * 3.0
+            source = "stable_depth_xy_block_plane_z"
+            depth_mad = 20.0
+        rows.append({
+            "方块类别": f"测试类别{index % 7}",
+            "事件": "伺服成功",
+            "高位检测像素X": pixel_x,
+            "高位检测像素Y": pixel_y,
+            "高位世界坐标Z": world_z,
+            "深度有效帧数": 15,
+            "深度MAD毫米": depth_mad,
+            "粗定位来源": source,
+            "标定目标TCP位置Z": target_z,
+            "实测TCP位置X": tcp_x,
+            "实测TCP位置Y": tcp_y,
+            "实测TCP位置Z": actual_z,
+        })
+    return rows
 
 
 @pytest.mark.parametrize("subject", ["block", "tray"])
@@ -102,3 +148,46 @@ def test_collinear_pixel_coverage_refuses_yaml_but_writes_report(tmp_path):
     report = json.loads((job.output_dir / "标定检查报告.json").read_text(encoding="utf-8"))
     assert any("共线" in problem for problem in report["问题"])
     assert not (job.output_dir / job.calibration_filename).exists()
+
+
+def test_pair_analysis_generates_same_batch_v2_and_derived_tray_plane(tmp_path):
+    block_job = _make_job(tmp_path, "block", _v2_rows("block"))
+    tray_job = _make_job(tmp_path, "tray", _v2_rows("tray"))
+
+    assert analyze_calibration_pair(block_job, tray_job) is True
+
+    block_path = block_job.output_dir / block_job.calibration_filename
+    tray_path = tray_job.output_dir / tray_job.calibration_filename
+    block_document = yaml.safe_load(block_path.read_text(encoding="utf-8"))
+    tray_document = yaml.safe_load(tray_path.read_text(encoding="utf-8"))
+    block_calibration = load_pixel_to_tcp_calibration(block_path, expected_subject="block")
+    tray_calibration = load_pixel_to_tcp_calibration(tray_path, expected_subject="tray")
+
+    assert block_document["schema_version"] == tray_document["schema_version"] == 2
+    assert block_document["generation_id"] == tray_document["generation_id"]
+    block_coefficients = np.asarray(block_document["z_plane"]["coefficients"])
+    tray_coefficients = np.asarray(tray_document["z_plane"]["coefficients"])
+    assert tray_coefficients[:2] == pytest.approx(block_coefficients[:2])
+    assert block_coefficients[2] - tray_coefficients[2] == pytest.approx(7.0)
+    pixel = [180.0, 150.0]
+    assert block_calibration.predict(pixel)[2] - tray_calibration.predict(pixel)[2] == pytest.approx(7.0)
+
+
+def test_pair_analysis_removes_both_candidates_when_block_depth_gate_fails(tmp_path):
+    block_job = _make_job(
+        tmp_path,
+        "block",
+        _v2_rows("block", block_mad=1.01),
+    )
+    tray_job = _make_job(tmp_path, "tray", _v2_rows("tray"))
+    block_path = block_job.output_dir / block_job.calibration_filename
+    tray_path = tray_job.output_dir / tray_job.calibration_filename
+    block_path.parent.mkdir(parents=True, exist_ok=True)
+    tray_path.parent.mkdir(parents=True, exist_ok=True)
+    block_path.write_text("旧候选", encoding="utf-8")
+    tray_path.write_text("旧候选", encoding="utf-8")
+
+    assert analyze_calibration_pair(block_job, tray_job) is False
+
+    assert not block_path.exists()
+    assert not tray_path.exists()

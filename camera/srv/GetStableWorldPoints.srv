@@ -1,0 +1,13 @@
+int32[] x
+int32[] y
+int32 frame_count
+int32 min_valid_frames
+float64 capture_timeout_sec
+---
+bool success
+bool[] point_valid
+float64[] world_xyz
+int32[] valid_frame_counts
+float64[] depth_median_mm
+float64[] depth_mad_mm
+string message
