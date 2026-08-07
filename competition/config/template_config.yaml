@@ -2,7 +2,7 @@ template_sizes:
   active_profile: high
   profiles:
     high:
-      block_px: 37
+      block_px: 38
       connector_px: 5
     low:
       block_px: 83
@@ -30,6 +30,7 @@ color_segmentation:
       rgb: [44, 58, 87]
 
 #真实长度测量 注：计算的时候不要拿line的短边*4-长边，大数相减求小数求小数会引起很大误差，稍微读错一点，可能算出来的间隙就差很多
+#测出line的长边然后按比例计算短边
 # line:   17.8  78.2   364.7 80
 # buleL:  58.3  37.8
 # yellowL:58.1  38.0   271.6 175
