@@ -4,7 +4,8 @@ import csv
 from pathlib import Path
 
 
-DEFAULT_SERVO_CSV_OUTPUT_DIR = Path("/home/zhl/桌面/logs")
+# 标定采集和主标定分析脚本共用同一目录，避免分析到旧的手动复制数据。
+DEFAULT_SERVO_CSV_OUTPUT_DIR = Path("/home/zhl/桌面/标定数据")
 
 CSV_FIELDNAMES = (
     "方块类别",

@@ -66,14 +66,14 @@ def match_template(image: torch.Tensor, template: torch.Tensor, kernel_size, ang
     # groups=1 表示普通卷积
     kernel_h, kernel_w = _normalize_kernel_hw(kernel_size)
     pad = (kernel_h // 2, kernel_w // 2)
-    # feature_map = F.conv2d(image, template, padding=pad, stride=1)
-    feature_map_small = F.conv2d(image, template, padding=pad, stride=2)
+    feature_map = F.conv2d(image, template, padding=pad, stride=1)
+    # feature_map_small = F.conv2d(image, template, padding=pad, stride=2)
     # 上采样回原尺寸
-    feature_map = F.interpolate(
-        feature_map_small,
-        size=image.shape[-2:],   # (H, W)
-        mode="nearest"
-    )
+    # feature_map = F.interpolate(
+    #     feature_map_small,
+    #     size=image.shape[-2:],   # (H, W)
+    #     mode="nearest"
+    # )
 
     feature_map = feature_map.squeeze(0)  # (N, H, W)
     N, H, W = feature_map.shape

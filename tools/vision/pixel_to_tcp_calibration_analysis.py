@@ -32,8 +32,8 @@ import yaml
 SRC_DIR = Path(__file__).resolve().parents[2]
 RESULT_ROOT = SRC_DIR / "tools" / "vision" / "像素-tcp标定结果与数据分析"
 
-BLOCK_INPUT_CSV = Path("/home/zhl/桌面/logs/方块视觉伺服.csv")
-TRAY_INPUT_CSV = Path("/home/zhl/桌面/logs/托盘视觉伺服.csv")
+BLOCK_INPUT_CSV = Path("/home/zhl/桌面/标定数据/方块视觉伺服.csv")
+TRAY_INPUT_CSV = Path("/home/zhl/桌面/标定数据/托盘视觉伺服.csv")
 BLOCK_EXPECTED_SUCCESS_COUNT = 34
 TRAY_EXPECTED_SUCCESS_COUNT = 34
 
