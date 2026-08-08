@@ -1,0 +1,99 @@
+schema_version: 1
+calibration_type: pixel_to_tcp_position
+description: 高位检测像素坐标到伺服成功实测 TCP 位置的离线标定结果
+input:
+  coordinate: high_detection_pixel_xy
+  columns:
+  - 高位检测像素X
+  - 高位检测像素Y
+  axes:
+  - u
+  - v
+  unit: pixel
+output:
+  coordinate: tcp_position_xyz
+  columns:
+  - 实测TCP位置X
+  - 实测TCP位置Y
+  - 实测TCP位置Z
+  axes:
+  - x
+  - y
+  - z
+  unit: mm
+  orientation_included: false
+model:
+  name: homography
+  parameters:
+    kind: homography
+    H:
+    - - 0.012492097356154051
+      - -0.48361196132260503
+      - 134.024332472953
+    - - -0.4828932587769681
+      - -0.01634083752464652
+      - 338.82589192500126
+    - - 1.2378116363805018e-05
+      - 3.410743729229715e-06
+      - 1.0
+    plane_centroid:
+    - -283.0699700748219
+    - 45.1525360205594
+    - 192.47954693962544
+    plane_basis:
+    - - -0.9992815892893152
+      - 0.03789861866319329
+      - -3.2927481828586664e-06
+    - - -0.03789783305681517
+      - -0.999261426954116
+      - -0.006352546829507861
+    plane_normal:
+    - -0.0002440430660794
+    - -0.006347858303804478
+    - 0.9999798223654
+metrics:
+  sample_count: 34
+  cross_validation:
+    folds: 5
+    three_dimensional_rmse_mm: 0.30828359970629865
+    three_dimensional_mae_mm: 0.2700311526742305
+    three_dimensional_p95_mm: 0.5459261806834236
+    three_dimensional_max_error_mm: 0.5800569198523892
+    axis_rmse_mm:
+    - 0.19309912956565767
+    - 0.2379565691802927
+    - 0.03358831929113589
+  full_training_three_dimensional_rmse_mm: 0.2800611759151717
+coverage:
+  sample_count: 34
+  pixel_range:
+    u:
+    - 500.67279052734375
+    - 879.7373046875
+    v:
+    - 15.814519882202148
+    - 560.2708740234375
+  pixel_convex_hull:
+  - - 879.7373046875
+    - 412.32421875
+  - - 859.713623046875
+    - 517.4478149414062
+  - - 776.4373168945312
+    - 560.2708740234375
+  - - 629.112548828125
+    - 540.4699096679688
+  - - 504.02215576171875
+    - 520.2514038085938
+  - - 500.67279052734375
+    - 187.39852905273438
+  - - 520.4574584960938
+    - 83.18826293945312
+  - - 603.0859985351562
+    - 60.913780212402344
+  - - 831.9337768554688
+    - 15.814519882202148
+  - - 854.450439453125
+    - 98.3384017944336
+  extrapolation_policy: diagnostic_only
+usage_note: 仅适用于高位相机的高位检测像素。输出仅含 TCP XYZ；调用方须自行提供或沿用 TCP 姿态 R/P/YAW。
+calibration_subject: tray

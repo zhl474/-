@@ -1,6 +1,8 @@
-schema_version: 1
+schema_version: 2
+generation_id: 20260808T011848.893013Z
 calibration_type: pixel_to_tcp_position
-description: 高位检测像素坐标到伺服成功实测 TCP 位置的离线标定结果
+calibration_subject: block
+description: 高位像素到 TCP XY 模型与独立 TCP Z 平面标定结果
 input:
   coordinate: high_detection_pixel_xy
   columns:
@@ -22,74 +24,87 @@ output:
   - z
   unit: mm
   orientation_included: false
-model:
-  name: homography
+xy_model:
+  name: poly2
   parameters:
-    kind: homography
-    H:
-    - - 0.4804207643955237
-      - -0.03538625871627598
-      - -305.02027394182767
-    - - -0.03830243133977154
-      - -0.47937730772275544
-      - 171.29753437625567
-    - - 1.571960813159691e-05
-      - 1.5320645503721914e-06
-      - 1.0
-    plane_centroid:
-    - -278.3157734590418
-    - 28.035021389231957
-    - 199.37799969841447
-    plane_basis:
-    - - -0.06828408733090896
-      - 0.9976156909873717
-      - 0.010010819805322695
-    - - -0.9976654872539178
-      - -0.06827129865691808
-      - -0.0016141010195142404
-    plane_normal:
-    - -0.0009268008351763432
-    - -0.010097666833865853
-    - 0.999948587760753
+    kind: polynomial
+    degree: 2
+    uv_mean:
+    - 624.9411764705883
+    - 304.97058823529414
+    uv_scale:
+    - 416.2499207685118
+    - 165.48084753122936
+    coef:
+    - - -277.55477638914886
+      - 13.68596212872576
+    - - 1.8862518338624064
+      - 195.62694053681545
+    - - 77.42134541493037
+      - -0.4206684593595285
+    - - -0.1707209854183449
+      - -0.7370005123681551
+    - - 0.21984570112218518
+      - -0.34959539147124374
+    - - -0.1855016554082125
+      - -0.06764156448363678
+    feature_names:
+    - '1'
+    - u
+    - v
+    - u^2
+    - u*v
+    - v^2
+z_plane:
+  equation: z = a*x + b*y + c
+  coefficients:
+  - -0.00048262482716080585
+  - -0.0043990845817099
+  - 204.69205480493608
+  source: external_depth_block_surface_plus_observation_height
 metrics:
   sample_count: 34
-  cross_validation:
-    folds: 5
-    three_dimensional_rmse_mm: 1.0120475894206906
-    three_dimensional_mae_mm: 0.8858994644935658
-    three_dimensional_p95_mm: 1.7547608553147103
-    three_dimensional_max_error_mm: 2.006485361481938
-    axis_rmse_mm:
-    - 0.5501205660422644
-    - 0.8493053583214607
-    - 0.016973343690162904
-  full_training_three_dimensional_rmse_mm: 0.8874340676565767
+  xy_cross_validation:
+    模型: poly2
+    样本数: 34
+    折数: 5
+    CV二维RMSE: 0.8445284929002126
+    CV二维MAE: 0.7706616949743317
+    CV二维P95: 1.3517631876252727
+    CV二维最大误差: 1.626285247108628
+    CV_X_RMSE: 0.5129089520567132
+    CV_Y_RMSE: 0.6709342607293121
+  xy_full_training_rmse_mm: 0.7457236318110331
+  external_depth_z_plane_rmse_mm: 0.45425293403344946
 coverage:
   sample_count: 34
   pixel_range:
     u:
-    - 112.0
-    - 1199.0
+    - 73.0
+    - 1185.0
     v:
-    - 34.0
-    - 579.0
+    - 46.0
+    - 568.0
   pixel_convex_hull:
-  - - 1199.0
-    - 174.0
-  - - 1184.0
-    - 529.0
-  - - 192.0
-    - 579.0
-  - - 112.0
-    - 471.0
-  - - 184.0
-    - 152.0
-  - - 293.0
-    - 51.0
-  - - 978.0
-    - 34.0
-  - - 1191.0
-    - 40.0
+  - - 1185.0
+    - 46.0
+  - - 1156.0
+    - 344.0
+  - - 1117.0
+    - 480.0
+  - - 1036.0
+    - 557.0
+  - - 229.0
+    - 568.0
+  - - 121.0
+    - 550.0
+  - - 73.0
+    - 457.0
+  - - 77.0
+    - 134.0
+  - - 173.0
+    - 72.0
+  - - 1091.0
+    - 48.0
   extrapolation_policy: diagnostic_only
-usage_note: 仅适用于高位相机的高位检测像素。输出仅含 TCP XYZ；调用方须自行提供或沿用 TCP 姿态 R/P/YAW。
-calibration_subject: block
+usage_note: 正式运行仅使用离线 XY 模型和独立 Z 平面，不查询深度相机。

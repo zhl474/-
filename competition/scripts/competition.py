@@ -3,12 +3,20 @@
 
 import rospy
 
+from competition_lib.servo_csv_logger import DEFAULT_SERVO_CSV_OUTPUT_DIR
 from competition_lib.task_runner import TaskRunner
 
 
 def main():
     rospy.init_node("competition")
-    TaskRunner().run_interactive()
+    output_dir = rospy.get_param(
+        "~servo_csv_output_dir", str(DEFAULT_SERVO_CSV_OUTPUT_DIR)
+    )
+    session_id = rospy.get_param("~experiment_session_id", "")
+    TaskRunner(
+        servo_csv_output_dir=output_dir,
+        experiment_session_id=session_id,
+    ).run_interactive()
 
 
 if __name__ == "__main__":

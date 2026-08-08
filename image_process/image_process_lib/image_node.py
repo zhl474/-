@@ -2,6 +2,7 @@
 """图像快照、任务规划和视觉伺服检测的 ROS 服务组合节点。"""
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -116,6 +117,31 @@ class ImageProcessor:
         perception_config_path = rospy.get_param("~perception_config", PERCEPTION_CONFIG_PATH)
         with open(perception_config_path, "r", encoding="utf-8") as config_file:
             perception_config = yaml.safe_load(config_file) or {}
+        with open(EXECUTION_CONFIG_PATH, "r", encoding="utf-8") as config_file:
+            execution_config = yaml.safe_load(config_file) or {}
+        calibration_mode_value = execution_config.get("calibration_mode", False)
+        if not isinstance(calibration_mode_value, bool):
+            raise ValueError("calibration_mode 必须是 YAML 布尔值 true 或 false")
+        self.calibration_mode = calibration_mode_value
+        experiment_session_id = str(
+            rospy.get_param("~experiment_session_id", "") or ""
+        ).strip()
+        if experiment_session_id and not re.fullmatch(
+            r"[A-Za-z0-9_.-]+", experiment_session_id
+        ):
+            raise ValueError("experiment_session_id 包含非法路径字符")
+        experiment_archive_root = str(
+            rospy.get_param(
+                "~experiment_archive_root",
+                "/home/zhl/桌面/标定数据/实验日志",
+            )
+        ).strip()
+        self.experiment_archive_dir = None
+        if self.calibration_mode and experiment_session_id:
+            self.experiment_archive_dir = os.path.join(
+                experiment_archive_root, experiment_session_id
+            )
+            os.makedirs(self.experiment_archive_dir, exist_ok=True)
         model_config = perception_config.get("models", {})
         calibration_config = perception_config.get("calibration", {})
 
@@ -217,7 +243,10 @@ class ImageProcessor:
         if not isinstance(visual_servo_debug_config, dict):
             raise ValueError("perception.yaml 的 visual_servo_debug 必须是字典")
         debug_enabled = visual_servo_debug_config.get("enabled", False)
-        debug_output_dir = visual_servo_debug_config.get("output_dir", DEFAULT_DEBUG_DIR)
+        debug_output_dir = rospy.get_param(
+            "~visual_servo_debug_output_dir",
+            visual_servo_debug_config.get("output_dir", DEFAULT_DEBUG_DIR),
+        )
         if not isinstance(debug_enabled, bool):
             raise ValueError("visual_servo_debug.enabled 必须是布尔值")
         if not isinstance(debug_output_dir, str):
@@ -237,15 +266,28 @@ class ImageProcessor:
         self.visual_servo_debug_recorder = None
         self.visual_board_debug_recorder = None
         if self.visual_servo_debug_enabled:
+            video_output_dir = self.experiment_archive_dir or self.visual_servo_debug_output_dir
+            block_video_name = "方块视觉伺服调试.avi"
+            board_video_name = "托盘视觉伺服调试.avi"
             self.visual_servo_debug_recorder = DebugVideoRecorder(
-                os.path.join(self.visual_servo_debug_output_dir, "方块视觉伺服调试.avi"),
+                os.path.join(video_output_dir, block_video_name),
                 fps=self.visual_servo_debug_video_fps,
                 enabled=True,
+                latest_alias_path=(
+                    os.path.join(self.visual_servo_debug_output_dir, block_video_name)
+                    if self.experiment_archive_dir
+                    else None
+                ),
             )
             self.visual_board_debug_recorder = DebugVideoRecorder(
-                os.path.join(self.visual_servo_debug_output_dir, "托盘视觉伺服调试.avi"),
+                os.path.join(video_output_dir, board_video_name),
                 fps=self.visual_servo_debug_video_fps,
                 enabled=True,
+                latest_alias_path=(
+                    os.path.join(self.visual_servo_debug_output_dir, board_video_name)
+                    if self.experiment_archive_dir
+                    else None
+                ),
             )
         self.visual_board_grid_debug_path = rospy.get_param(
             "~visual_board_grid_debug_path",
@@ -283,12 +325,6 @@ class ImageProcessor:
         fallback_config = perception_config.get("fallback", {})
         block_detection_module.ALLOW_COLOR_FALLBACK = bool(fallback_config.get("color_segmentation", True))
 
-        with open(EXECUTION_CONFIG_PATH, "r", encoding="utf-8") as config_file:
-            execution_config = yaml.safe_load(config_file) or {}
-        calibration_mode_value = execution_config.get("calibration_mode", False)
-        if not isinstance(calibration_mode_value, bool):
-            raise ValueError("calibration_mode 必须是 YAML 布尔值 true 或 false")
-        self.calibration_mode = calibration_mode_value
         servo_config = execution_config.get("servo", {})
         if not isinstance(servo_config, dict):
             raise ValueError("servo 必须是字典")
@@ -493,6 +529,16 @@ class ImageProcessor:
         if not self.visual_servo_debug_enabled or self.visual_board_debug_recorder is None:
             return False
         return self.visual_board_debug_recorder.write(debug_panel)
+
+    def save_experiment_debug_image(self, latest_path, image):
+        """保存最新调试图，并在标定会话目录保留同名归档。"""
+        latest_saved = save_image_to_path(latest_path, image)
+        archive_dir = getattr(self, "experiment_archive_dir", None)
+        if archive_dir:
+            archive_path = os.path.join(archive_dir, os.path.basename(latest_path))
+            if os.path.abspath(archive_path) != os.path.abspath(latest_path):
+                save_image_to_path(archive_path, image)
+        return latest_saved
 
     def log_visual_servo_detection_timing(
         self,
@@ -762,7 +808,7 @@ class ImageProcessor:
         debug_image = result.get("debug_image")
         if debug_image is None:
             debug_image = image
-        save_image_to_path(self.visual_board_grid_debug_path, debug_image)
+        self.save_experiment_debug_image(self.visual_board_grid_debug_path, debug_image)
         if not result["found"]:
             raise RuntimeError(result["message"])
         self.board_grid_points = result["grid_points"]
@@ -850,12 +896,12 @@ class ImageProcessor:
                 template_geometry=geometry,
                 save_mask_overlay=self.save_top_surface_mask_vis,
             )
-        save_image_to_path(self.high_template_match_debug_path, debug_image)
+        self.save_experiment_debug_image(self.high_template_match_debug_path, debug_image)
         if self.save_top_surface_mask_vis:
             mask_image = blocks[-1].get("mask_overlay")
             if mask_image is None:
                 mask_image = debug_image
-            save_image_to_path(self.top_surface_mask_vis_path, mask_image)
+            self.save_experiment_debug_image(self.top_surface_mask_vis_path, mask_image)
         recognized = []
         counts = {category: 0 for category in BLOCK_CATEGORY_NAMES}
         for block in blocks:

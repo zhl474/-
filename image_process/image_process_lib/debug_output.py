@@ -26,15 +26,37 @@ def save_image_to_path(image_path, image):
 
 
 class DebugVideoRecorder:
-    def __init__(self, video_path, fps=10.0, enabled=True):
+    def __init__(
+        self,
+        video_path,
+        fps=10.0,
+        enabled=True,
+        latest_alias_path=None,
+    ):
         self.requested_video_path = video_path
         self.video_path = video_path
+        self.latest_alias_path = latest_alias_path
         self.fps = max(0.1, float(fps))
         self.enabled = bool(enabled)
         self.writer = None
         self.frame_size = None
         self.codec_name = None
         self.open_failed = False
+
+    def _update_latest_alias(self):
+        """把固定调试路径指向本批次视频，不复制大文件。"""
+        alias_path = self.latest_alias_path
+        if not alias_path or os.path.abspath(alias_path) == os.path.abspath(self.video_path):
+            return
+        try:
+            alias_dir = os.path.dirname(alias_path)
+            if alias_dir:
+                os.makedirs(alias_dir, exist_ok=True)
+            if os.path.lexists(alias_path):
+                os.unlink(alias_path)
+            os.symlink(os.path.abspath(self.video_path), alias_path)
+        except Exception as exc:
+            rospy.logwarn("更新最新调试视频链接失败 %s: %s", alias_path, exc)
 
     def _writer_candidates(self):
         if not self.requested_video_path:
@@ -68,6 +90,7 @@ class DebugVideoRecorder:
                     self.video_path = video_path
                     self.frame_size = frame_size
                     self.codec_name = codec_name
+                    self._update_latest_alias()
                     return True
                 writer.release()
             except Exception as exc:

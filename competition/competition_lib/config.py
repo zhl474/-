@@ -30,6 +30,7 @@ class ExecutionConfig:
     max_step_mm: float
     max_iter: int
     success_stable_frames: int
+    post_success_sample_frames: int
     max_missed_frames: int
     settle_sec: float
     initial_motor_angle_deg: float
@@ -50,6 +51,13 @@ def _strict_bool(value, name: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{name} 必须是 YAML 布尔值 true 或 false")
     return value
+
+
+def _nonnegative_int(value, name: str) -> int:
+    """严格读取非负整数，禁止把小数帧数静默截断。"""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} 必须是大于等于 0 的整数")
+    return int(value)
 
 
 def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> ExecutionConfig:
@@ -77,6 +85,10 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         max_step_mm=float(servo["max_step_mm"]),
         max_iter=int(servo["max_iter"]),
         success_stable_frames=int(servo["success_stable_frames"]),
+        post_success_sample_frames=_nonnegative_int(
+            servo.get("post_success_sample_frames", 0),
+            "servo.post_success_sample_frames",
+        ),
         max_missed_frames=int(servo["max_missed_frames"]),
         settle_sec=float(servo["settle_sec"]),
         initial_motor_angle_deg=float(motor["initial_angle_deg"]),
@@ -88,7 +100,8 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         config.arm_speed, config.pick_speed, config.servo_speed, config.pick_surface_offset_mm, config.lift_z,
         config.minimum_tcp_z_mm,
         config.error_threshold_px, config.min_step_mm, config.max_step_mm, config.max_iter,
-        config.success_stable_frames, config.max_missed_frames, config.motor_velocity_deg_per_sec,
+        config.success_stable_frames, config.post_success_sample_frames,
+        config.max_missed_frames, config.motor_velocity_deg_per_sec,
     ]
     if not np.isfinite(config.minimum_tcp_z_mm) or config.minimum_tcp_z_mm <= 0:
         raise ValueError("minimum_tcp_z_mm 必须是大于 0 的有限数值")

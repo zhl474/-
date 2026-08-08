@@ -9,6 +9,16 @@ import pytest
 from competition_lib.config import load_execution_config, load_visual_servo_config
 
 
+def _execution_config(**changes):
+    """测试不依赖现场正在使用的标定/正式模式开关。"""
+    base = replace(
+        load_execution_config(),
+        calibration_mode=False,
+        visual_servo_enabled=True,
+    )
+    return replace(base, **changes)
+
+
 def _load_task_runner(monkeypatch):
     rospy = types.ModuleType("rospy")
     rospy.loginfo = lambda *_args, **_kwargs: None
@@ -25,6 +35,7 @@ def _load_task_runner(monkeypatch):
 
     clients_module.RobotClients = RobotClients
     monkeypatch.setitem(sys.modules, "competition_lib.ros_clients", clients_module)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "")
     sys.modules.pop("competition_lib.task_runner", None)
     return importlib.import_module("competition_lib.task_runner")
 
@@ -105,7 +116,7 @@ def test_formal_pick_alignment_failure_never_writes_csv_or_reads_actual_pose(
     clients = _FakeClients()
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=load_execution_config(),
+        execution_config=_execution_config(),
         visual_config=load_visual_servo_config(),
         servo_csv_output_dir=tmp_path,
     )
@@ -127,11 +138,11 @@ def test_闭环模式调用方块和托盘低位检测(monkeypatch):
     clients = _FakeClients()
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=load_execution_config(),
+        execution_config=_execution_config(),
         visual_config=load_visual_servo_config(),
     )
 
-    def align_once(offset_func, start_pose, _label):
+    def align_once(offset_func, start_pose, _label, **_kwargs):
         offset_func()
         return True, list(start_pose), None, "成功"
 
@@ -149,7 +160,7 @@ def test_闭环模式调用方块和托盘低位检测(monkeypatch):
 def test_pick_uses_surface_height_and_configured_offset(monkeypatch):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
-    execution_config = replace(load_execution_config(), pick_surface_offset_mm=-2.5)
+    execution_config = _execution_config(pick_surface_offset_mm=-2.5)
     runner = module.TaskRunner(
         clients=clients,
         execution_config=execution_config,
@@ -165,10 +176,7 @@ def test_pick_uses_surface_height_and_configured_offset(monkeypatch):
 def test_开环抓取先到上方再下探抬回且不调用对准(monkeypatch):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
-    execution_config = replace(
-        load_execution_config(),
-        visual_servo_enabled=False,
-    )
+    execution_config = _execution_config(visual_servo_enabled=False)
     runner = module.TaskRunner(
         clients=clients,
         execution_config=execution_config,
@@ -202,10 +210,7 @@ def test_开环抓取在运动前拒绝无效粗定位位姿(monkeypatch):
     clients = _FakeClients()
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=replace(
-            load_execution_config(),
-            visual_servo_enabled=False,
-        ),
+        execution_config=_execution_config(visual_servo_enabled=False),
         visual_config=load_visual_servo_config(),
     )
     target = clients.get_task_target(0)
@@ -221,7 +226,7 @@ def test_开环抓取在运动前拒绝无效粗定位位姿(monkeypatch):
 def test_place_keeps_dynamic_observation_height_and_directly_releases(monkeypatch):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
-    execution_config = load_execution_config()
+    execution_config = _execution_config()
     runner = module.TaskRunner(
         clients=clients,
         execution_config=execution_config,
@@ -244,10 +249,7 @@ def test_place_keeps_dynamic_observation_height_and_directly_releases(monkeypatc
 def test_开环摆放应用xy偏置并保留托盘高度(monkeypatch):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
-    execution_config = replace(
-        load_execution_config(),
-        visual_servo_enabled=False,
-    )
+    execution_config = _execution_config(visual_servo_enabled=False)
     runner = module.TaskRunner(
         clients=clients,
         execution_config=execution_config,
@@ -276,7 +278,7 @@ def test_pick_rejects_missing_surface_height_before_moving(monkeypatch):
     target.pick_surface_z_valid = False
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=load_execution_config(),
+        execution_config=_execution_config(),
         visual_config=load_visual_servo_config(),
     )
 
@@ -305,7 +307,7 @@ def test_pick_rejects_invalid_pose_or_height_before_moving(
     setattr(target, field, value)
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=load_execution_config(),
+        execution_config=_execution_config(),
         visual_config=load_visual_servo_config(),
     )
 
@@ -323,7 +325,7 @@ def test_place_rejects_low_observation_height_before_moving(monkeypatch):
     target.place_observation_pose[2] = 160.0
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=load_execution_config(),
+        execution_config=_execution_config(),
         visual_config=load_visual_servo_config(),
     )
 
@@ -339,7 +341,7 @@ def test_place_rejects_low_aligned_release_height_before_final_move(monkeypatch)
     clients = _FakeClients()
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=load_execution_config(),
+        execution_config=_execution_config(),
         visual_config=load_visual_servo_config(),
     )
     runner._align = lambda *_args, **_kwargs: (
@@ -361,7 +363,7 @@ def test_prepare_waits_for_shooting_pose_to_stabilize(monkeypatch):
     clients = _FakeClients()
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=load_execution_config(),
+        execution_config=_execution_config(),
         visual_config=load_visual_servo_config(),
     )
 
@@ -377,7 +379,7 @@ def test_calibration_mode_writes_one_final_row_per_target(monkeypatch, tmp_path,
     clients = _FakeClients()
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=replace(load_execution_config(), calibration_mode=True),
+        execution_config=_execution_config(calibration_mode=True),
         visual_config=load_visual_servo_config(),
         servo_csv_output_dir=tmp_path,
     )
@@ -405,6 +407,70 @@ def test_calibration_mode_writes_one_final_row_per_target(monkeypatch, tmp_path,
     assert clients.suction_states == [module.RobotClients.OFF]
 
 
+def test_calibration_mode_writes_static_rounds_and_zero_error_tcp(monkeypatch, tmp_path):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=_execution_config(
+            calibration_mode=True,
+            post_success_sample_frames=20,
+        ),
+        visual_config=load_visual_servo_config(),
+        servo_csv_output_dir=tmp_path,
+        experiment_session_id="static_test",
+    )
+    response = types.SimpleNamespace(
+        found=True,
+        px=321.0,
+        py=242.0,
+        dx_px=1.0,
+        dy_px=2.0,
+        detected_angle_deg=3.0,
+        score=0.9,
+    )
+
+    def align_with_static_events(_func, pose, _label, event_callback=None):
+        event_callback({
+            "事件": "稳定帧",
+            "伺服轮次": 1,
+            "连续稳定帧序号": 1,
+            "像素误差X": 1.0,
+            "像素误差Y": 2.0,
+            "末端命令X": pose[0],
+            "末端命令Y": pose[1],
+            "末端命令Z": pose[2],
+        })
+        for index in range(20):
+            event_callback({
+                "事件": "成功后静止帧",
+                "伺服轮次": 1,
+                "静止采样序号": index + 1,
+                "像素误差X": 1.0,
+                "像素误差Y": 2.0,
+                "末端命令X": pose[0],
+                "末端命令Y": pose[1],
+                "末端命令Z": pose[2],
+            })
+        return True, [1, 2, 200, -180, 0, 90], response, "成功"
+
+    runner._align = align_with_static_events
+    runner.execute_all(1)
+
+    block_rows = _read_csv_rows(tmp_path / "方块视觉伺服.csv")
+    round_rows = _read_csv_rows(
+        tmp_path / "实验日志" / "static_test" / "方块视觉伺服逐轮.csv"
+    )
+    assert len(round_rows) == 21
+    assert sum(row["事件"] == "成功后静止帧" for row in round_rows) == 20
+    assert block_rows[0]["静止采样有效帧数"] == "20"
+    assert block_rows[0]["静止采样完整"] == "True"
+    # 当前矩阵 [dx,dy] -> [0.2*dy, 0.2*dx]。
+    assert float(block_rows[0]["零误差等效TCP位置X"]) == pytest.approx(1.4)
+    assert float(block_rows[0]["零误差等效TCP位置Y"]) == pytest.approx(2.2)
+    assert block_rows[0]["实测相机位置X"] == "4.0"
+
+
 def test_标定模式警告并强制开启视觉伺服(
     monkeypatch,
     tmp_path,
@@ -420,7 +486,7 @@ def test_标定模式警告并强制开启视觉伺服(
     runner = module.TaskRunner(
         clients=clients,
         execution_config=replace(
-            load_execution_config(),
+            _execution_config(),
             calibration_mode=True,
             visual_servo_enabled=False,
         ),
@@ -428,7 +494,7 @@ def test_标定模式警告并强制开启视觉伺服(
         servo_csv_output_dir=tmp_path,
     )
     align_labels = []
-    runner._align = lambda _func, pose, label: align_labels.append(label) or (
+    runner._align = lambda _func, pose, label, **_kwargs: align_labels.append(label) or (
         True,
         list(pose),
         None,
@@ -451,7 +517,7 @@ def test_formal_mode_uses_suction_without_csv_or_actual_pose(monkeypatch, tmp_pa
     clients = _FakeClients()
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=load_execution_config(),
+        execution_config=_execution_config(),
         visual_config=load_visual_servo_config(),
         servo_csv_output_dir=tmp_path,
     )
@@ -483,7 +549,7 @@ def test_calibration_and_formal_modes_keep_same_motion_sequence(monkeypatch, tmp
         runner = module.TaskRunner(
             clients=clients,
             execution_config=replace(
-                load_execution_config(),
+                _execution_config(),
                 calibration_mode=calibration_mode,
             ),
             visual_config=load_visual_servo_config(),
@@ -510,7 +576,7 @@ def test_servo_finish_pose_read_failure_returns_blank_xyz(monkeypatch):
     clients.get_actual_pose = lambda: (_ for _ in ()).throw(RuntimeError("控制器离线"))
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=load_execution_config(),
+        execution_config=_execution_config(),
         visual_config=load_visual_servo_config(),
     )
     result = runner._read_actual_pose_for_csv()
@@ -525,7 +591,7 @@ def test_calibration_failure_writes_one_failure_row_and_closes_csv(monkeypatch, 
     clients = _FakeClients()
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=replace(load_execution_config(), calibration_mode=True),
+        execution_config=_execution_config(calibration_mode=True),
         visual_config=load_visual_servo_config(),
         servo_csv_output_dir=tmp_path,
     )
@@ -555,7 +621,7 @@ def test_calibration_mode_refuses_motion_when_suction_off_fails(monkeypatch, tmp
     clients.set_suction = fail_to_turn_off
     runner = module.TaskRunner(
         clients=clients,
-        execution_config=replace(load_execution_config(), calibration_mode=True),
+        execution_config=_execution_config(calibration_mode=True),
         visual_config=load_visual_servo_config(),
         servo_csv_output_dir=tmp_path,
     )
@@ -574,7 +640,7 @@ def test_interactive_prepare_retries_after_failed_high_localization(monkeypatch)
     module = _load_task_runner(monkeypatch)
     runner = module.TaskRunner(
         clients=_FakeClients(),
-        execution_config=load_execution_config(),
+        execution_config=_execution_config(),
         visual_config=load_visual_servo_config(),
     )
     responses = iter([
@@ -603,7 +669,7 @@ def test_completed_state_logs_total_execution_time(monkeypatch):
     monkeypatch.setattr(module.time, "monotonic", lambda: 125.25)
     runner = module.TaskRunner(
         clients=_FakeClients(),
-        execution_config=load_execution_config(),
+        execution_config=_execution_config(),
         visual_config=load_visual_servo_config(),
     )
     runner.execution_start_time = 120.0

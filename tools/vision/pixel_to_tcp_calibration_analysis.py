@@ -42,6 +42,9 @@ PLANARITY_RATIO_TOL = 0.01
 CV_FOLDS = 5
 RANDOM_SEED = 42
 SIMPLE_MODEL_SLACK = 0.05
+CV_REPEAT_SEED_COUNT = 200
+STATIC_SAMPLE_COMPLETE_RATIO = 0.8
+PIXEL_COVERAGE_GAP_WARNING_RATIO = 0.25
 
 # 这两项默认不设人为工程阈值；需要时可改成毫米数值。
 MAX_SELECTED_CV_RMSE_MM: Optional[float] = None
@@ -58,6 +61,19 @@ COL_WORLD_Z = "高位世界坐标Z"
 COL_DEPTH_VALID_COUNT = "深度有效帧数"
 COL_DEPTH_MAD = "深度MAD毫米"
 COL_SOURCE = "粗定位来源"
+COL_SESSION_ID = "实验批次ID"
+COL_TASK_INDEX = "任务序号"
+COL_TARGET_TYPE = "目标类型"
+COL_HIGH_ANGLE = "高位检测角度deg"
+COL_COMMAND_XY = ["最终命令TCP位置X", "最终命令TCP位置Y"]
+COL_ZERO_XY = ["零误差等效TCP位置X", "零误差等效TCP位置Y"]
+COL_ACTUAL_MINUS_COMMAND = ["实测减命令TCP位置X", "实测减命令TCP位置Y"]
+COL_FINAL_PIXEL_ERROR = ["最终像素误差X", "最终像素误差Y"]
+COL_STATIC_MEAN = ["静止像素误差均值X", "静止像素误差均值Y"]
+COL_STATIC_STD = ["静止像素误差标准差X", "静止像素误差标准差Y"]
+COL_STATIC_VALID = "静止采样有效帧数"
+COL_STATIC_REQUESTED = "静止采样请求帧数"
+COL_STATIC_COMPLETE = "静止采样完整"
 REQUIRED_COLUMNS = [COL_CATEGORY, COL_EVENT, *COL_PIXEL, *COL_TCP]
 SUCCESS_EVENT = "伺服成功"
 FAILURE_EVENT = "伺服失败"
@@ -863,7 +879,8 @@ def _read_v2_success_rows(job):
     missing = [column for column in required if column not in dataframe.columns]
     if missing:
         raise ValueError(f"{job.label} CSV 缺少列: {missing}")
-    dataframe = dataframe.loc[:, required].copy()
+    # 保留 schema v3 的实验诊断列；核心门禁仍只依赖 required 中的旧字段。
+    dataframe = dataframe.copy()
     dataframe[COL_EVENT] = dataframe[COL_EVENT].fillna("").astype(str).str.strip()
     dataframe[COL_CATEGORY] = dataframe[COL_CATEGORY].fillna("").astype(str).str.strip()
     dataframe[COL_SOURCE] = dataframe[COL_SOURCE].fillna("").astype(str).str.strip()
@@ -951,6 +968,366 @@ def _fit_v2_xy_job(job, rows, report):
         encoding="utf-8-sig",
     )
     return uv, selected_name, selected_model, selected_summary, training_rmse
+
+
+def _numeric_matrix(rows, columns):
+    """读取一组可选实验列；任一空值时返回 None。"""
+    if any(column not in rows.columns for column in columns):
+        return None
+    numeric = rows.loc[:, columns].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    return numeric if np.isfinite(numeric).all() else None
+
+
+def _axis_gap_report(values):
+    """报告单轴最大无样本区间，用于识别两簇随机 K 折盲区。"""
+    ordered = np.unique(np.asarray(values, dtype=float))
+    if len(ordered) < 2:
+        return {"最小值": float(ordered[0]), "最大值": float(ordered[0]), "最大间隔": 0.0, "间隔占跨度比例": 0.0}
+    gaps = np.diff(ordered)
+    gap_index = int(np.argmax(gaps))
+    span = float(ordered[-1] - ordered[0])
+    ratio = float(gaps[gap_index] / span) if span > 0.0 else 0.0
+    return {
+        "最小值": float(ordered[0]),
+        "最大值": float(ordered[-1]),
+        "最大间隔": float(gaps[gap_index]),
+        "最大间隔起点": float(ordered[gap_index]),
+        "最大间隔终点": float(ordered[gap_index + 1]),
+        "间隔占跨度比例": ratio,
+        "超过警告阈值": ratio > PIXEL_COVERAGE_GAP_WARNING_RATIO,
+    }
+
+
+def _evaluate_xy_labels(uv, labels):
+    summaries = []
+    predictions = {}
+    failures = {}
+    for model_name in MODEL_NAMES:
+        try:
+            summary, prediction = cross_validate_xy_mapping(
+                model_name, uv, labels, CV_FOLDS, RANDOM_SEED
+            )
+            summaries.append(summary)
+            predictions[model_name] = prediction
+        except Exception as exc:  # noqa: BLE001
+            failures[model_name] = str(exc)
+    return {
+        "模型统计": summaries,
+        "模型选择": choose_xy_model(summaries) if summaries else None,
+        "失败原因": failures,
+    }, predictions
+
+
+def _repeat_seed_stability(uv, labels):
+    """重复随机折分，只用于判断选择稳定性，不替代部署用固定 seed。"""
+    scores = {name: [] for name in MODEL_NAMES}
+    selected_counts = {name: 0 for name in MODEL_NAMES}
+    failed_seeds = []
+    for seed in range(CV_REPEAT_SEED_COUNT):
+        summaries = []
+        try:
+            for model_name in MODEL_NAMES:
+                summary, _prediction = cross_validate_xy_mapping(
+                    model_name, uv, labels, CV_FOLDS, seed
+                )
+                summaries.append(summary)
+                scores[model_name].append(float(summary["CV二维RMSE"]))
+            selected_counts[choose_xy_model(summaries)["推荐最简模型"]] += 1
+        except Exception:  # noqa: BLE001
+            failed_seeds.append(seed)
+    statistics = []
+    for model_name in MODEL_NAMES:
+        values = np.asarray(scores[model_name], dtype=float)
+        statistics.append(
+            {
+                "模型": model_name,
+                "有效随机种子数": int(len(values)),
+                "RMSE均值_mm": float(np.mean(values)) if len(values) else None,
+                "RMSE标准差_mm": float(np.std(values)) if len(values) else None,
+                "推荐次数": int(selected_counts[model_name]),
+            }
+        )
+    return {"重复次数": CV_REPEAT_SEED_COUNT, "模型统计": statistics, "失败种子": failed_seeds}
+
+
+def _plot_vector_panel(axis, uv, vectors, title, unit, amplification):
+    magnitude = np.linalg.norm(vectors, axis=1)
+    plot = axis.scatter(uv[:, 0], uv[:, 1], c=magnitude, cmap="viridis", s=26)
+    axis.quiver(
+        uv[:, 0],
+        uv[:, 1],
+        vectors[:, 0] * amplification,
+        vectors[:, 1] * amplification,
+        angles="xy",
+        scale_units="xy",
+        scale=1.0,
+        color="tab:red",
+        width=0.003,
+    )
+    axis.invert_yaxis()
+    axis.set_xlabel("高位像素 u")
+    axis.set_ylabel("高位像素 v")
+    axis.set_title(f"{title}\n箭头放大 {amplification:g} 倍")
+    plt.colorbar(plot, ax=axis, label=f"幅值（{unit}）")
+
+
+def _plot_experiment_vectors(job, uv, actual_labels, actual_predictions, rows):
+    """绘制四类空间矢量，缺失的实验字段以说明文字代替。"""
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    homography_prediction = actual_predictions.get("homography")
+    if homography_prediction is not None:
+        _plot_vector_panel(
+            axes[0, 0], uv, homography_prediction - actual_labels,
+            "单应 OOF 残差", "mm", 45.0,
+        )
+    else:
+        axes[0, 0].text(0.5, 0.5, "无单应 OOF 预测", ha="center", va="center")
+
+    optional_vectors = (
+        (COL_FINAL_PIXEL_ERROR, "最终低位像素残差", "px", 12.0),
+        (COL_ACTUAL_MINUS_COMMAND, "实测减命令 TCP", "mm", 45.0),
+        (COL_STATIC_MEAN, "终止残差均值", "px", 12.0),
+    )
+    for axis, (columns, title, unit, amplification) in zip(axes.flat[1:], optional_vectors):
+        vectors = _numeric_matrix(rows, columns)
+        if vectors is None:
+            axis.text(0.5, 0.5, f"缺少{title}字段", ha="center", va="center")
+            axis.set_axis_off()
+            continue
+        _plot_vector_panel(axis, uv, vectors, title, unit, amplification)
+    fig.suptitle(f"{job.label}实验空间矢量诊断")
+    fig.tight_layout()
+    fig.savefig(job.output_dir / "实验空间矢量诊断.png", dpi=180)
+    plt.close(fig)
+
+
+def _plot_label_comparison(job, label_reports):
+    rows = []
+    for label_name, report in label_reports.items():
+        for model in report.get("模型统计", []):
+            rows.append(
+                {"标签": label_name, "模型": model["模型"], "CV二维RMSE": model["CV二维RMSE"]}
+            )
+    if not rows:
+        return
+    table = pd.DataFrame(rows)
+    pivot = table.pivot(index="模型", columns="标签", values="CV二维RMSE").reindex(MODEL_NAMES)
+    axis = pivot.plot(kind="bar", figsize=(10, 6))
+    axis.set_ylabel("5折交叉验证二维 RMSE（毫米）")
+    axis.set_xlabel("映射模型")
+    axis.set_title(f"{job.label}不同 TCP 标签的模型对比")
+    axis.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(job.output_dir / "不同标签模型对比.png", dpi=180)
+    plt.close()
+
+
+def _plot_seed_stability(job, stability):
+    table = pd.DataFrame(stability["模型统计"])
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    axes[0].bar(table["模型"], table["推荐次数"])
+    axes[0].set_title("200组随机折分的推荐次数")
+    axes[0].set_ylabel("次数")
+    axes[1].bar(table["模型"], table["RMSE均值_mm"], yerr=table["RMSE标准差_mm"])
+    axes[1].set_title("随机折分 RMSE 均值与标准差")
+    axes[1].set_ylabel("毫米")
+    for axis in axes:
+        axis.grid(axis="y", alpha=0.3)
+    fig.suptitle(f"{job.label}模型选择稳定性")
+    fig.tight_layout()
+    fig.savefig(job.output_dir / "CV随机种子稳定性.png", dpi=180)
+    plt.close(fig)
+
+
+def _plot_terminal_jitter(job, rows):
+    means = _numeric_matrix(rows, COL_STATIC_MEAN)
+    standard_deviations = _numeric_matrix(rows, COL_STATIC_STD)
+    if means is None or standard_deviations is None:
+        return
+    indices = np.arange(1, len(rows) + 1)
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
+    for axis_index, axis_name in enumerate(("X", "Y")):
+        axes[axis_index].errorbar(
+            indices,
+            means[:, axis_index],
+            yerr=standard_deviations[:, axis_index],
+            fmt="o",
+            capsize=2,
+        )
+        axes[axis_index].axhline(0.0, color="black", linewidth=1)
+        axes[axis_index].set_ylabel(f"像素误差 {axis_name}（px）")
+        axes[axis_index].grid(alpha=0.3)
+    axes[-1].set_xlabel("成功目标序号")
+    fig.suptitle(f"{job.label}成功后静止检测均值与标准差")
+    fig.tight_layout()
+    fig.savefig(job.output_dir / "终止残差与抖动.png", dpi=180)
+    plt.close(fig)
+
+
+def _analyze_experiment_log(job, rows, report):
+    """分析 schema v3 实验字段；任何诊断失败都不得改变标定门禁。"""
+    required = [
+        COL_SESSION_ID,
+        COL_TASK_INDEX,
+        *COL_COMMAND_XY,
+        *COL_FINAL_PIXEL_ERROR,
+        *COL_STATIC_MEAN,
+        *COL_STATIC_STD,
+        COL_STATIC_VALID,
+        COL_STATIC_REQUESTED,
+        COL_STATIC_COMPLETE,
+    ]
+    missing = [column for column in required if column not in rows.columns]
+    if missing:
+        report["实验日志诊断"] = {"可用": False, "原因": f"缺少实验诊断列: {missing}"}
+        return
+    try:
+        uv = rows[COL_PIXEL].to_numpy(dtype=float)
+        actual_labels = rows[COL_TCP_XY].to_numpy(dtype=float)
+        session_ids = rows[COL_SESSION_ID].fillna("").astype(str).str.strip().unique().tolist()
+        if len(session_ids) != 1 or not session_ids[0]:
+            raise ValueError(f"实验批次 ID 不唯一或为空: {session_ids}")
+        numeric_columns = [
+            COL_TASK_INDEX,
+            *COL_COMMAND_XY,
+            *COL_FINAL_PIXEL_ERROR,
+            *COL_STATIC_MEAN,
+            *COL_STATIC_STD,
+            COL_STATIC_VALID,
+            COL_STATIC_REQUESTED,
+        ]
+        numeric = rows.loc[:, numeric_columns].apply(pd.to_numeric, errors="coerce")
+        diagnostic_rows = rows.copy()
+        diagnostic_rows.loc[:, numeric_columns] = numeric
+
+        complete_text = diagnostic_rows[COL_STATIC_COMPLETE].astype(str).str.lower()
+        static_complete = complete_text.isin({"true", "1", "是"})
+        requested_samples = numeric[COL_STATIC_REQUESTED]
+        expected_complete = np.ceil(STATIC_SAMPLE_COMPLETE_RATIO * requested_samples)
+        expected_complete_flags = (
+            (requested_samples > 0) & (numeric[COL_STATIC_VALID] >= expected_complete)
+        )
+        completeness_consistent = bool(
+            np.array_equal(
+                static_complete.to_numpy(),
+                expected_complete_flags.to_numpy(),
+            )
+        )
+
+        archive_dir = (
+            job.input_csv.parent
+            if job.input_csv.parent.name == session_ids[0]
+            else job.input_csv.parent / "实验日志" / session_ids[0]
+        )
+        round_filename = (
+            "方块视觉伺服逐轮.csv" if job.subject == "block" else "托盘视觉伺服逐轮.csv"
+        )
+        round_path = archive_dir / round_filename
+        round_report = {"路径": str(round_path), "存在": round_path.is_file()}
+        if round_path.is_file():
+            round_table, round_encoding = read_csv_auto(round_path)
+            round_report.update(
+                {
+                    "编码": round_encoding,
+                    "总行数": int(len(round_table)),
+                    "事件数量": round_table.get("事件", pd.Series(dtype=str)).value_counts().to_dict(),
+                }
+            )
+
+        label_reports = {}
+        actual_report, actual_predictions = _evaluate_xy_labels(uv, actual_labels)
+        label_reports["实测TCP"] = actual_report
+        command_labels = _numeric_matrix(diagnostic_rows, COL_COMMAND_XY)
+        if command_labels is not None:
+            label_reports["最终命令TCP"], _unused = _evaluate_xy_labels(uv, command_labels)
+        zero_labels = _numeric_matrix(diagnostic_rows, COL_ZERO_XY)
+        if bool(static_complete.all()) and zero_labels is not None:
+            label_reports["零误差等效TCP"], _unused = _evaluate_xy_labels(uv, zero_labels)
+
+        homography_prediction = actual_predictions.get("homography")
+        category_report = {}
+        if homography_prediction is not None:
+            distances = np.linalg.norm(homography_prediction - actual_labels, axis=1)
+            categories = diagnostic_rows[COL_CATEGORY].astype(str)
+            for category in sorted(categories.unique()):
+                values = distances[categories == category]
+                category_report[category] = {
+                    "数量": int(len(values)),
+                    "单应OOF_RMS_mm": float(np.sqrt(np.mean(values**2))),
+                }
+            is_l = categories.isin({"L_yellow", "L_blue"}).to_numpy()
+            category_report["L与非L汇总"] = {
+                "L_RMS_mm": float(np.sqrt(np.mean(distances[is_l] ** 2))) if is_l.any() else None,
+                "非L_RMS_mm": float(np.sqrt(np.mean(distances[~is_l] ** 2))) if (~is_l).any() else None,
+            }
+            if COL_HIGH_ANGLE in diagnostic_rows.columns:
+                angles = pd.to_numeric(
+                    diagnostic_rows[COL_HIGH_ANGLE], errors="coerce"
+                ).to_numpy(dtype=float)
+                finite_angles = np.isfinite(angles)
+                angle_groups = {}
+                if finite_angles.any():
+                    rounded = np.round(angles[finite_angles] / 15.0) * 15.0
+                    finite_distances = distances[finite_angles]
+                    for angle in sorted(np.unique(rounded)):
+                        values = finite_distances[rounded == angle]
+                        angle_groups[f"{angle:g}deg"] = {
+                            "数量": int(len(values)),
+                            "单应OOF_RMS_mm": float(np.sqrt(np.mean(values**2))),
+                        }
+                category_report["按15度角度分组"] = angle_groups
+
+        stability = _repeat_seed_stability(uv, actual_labels)
+        coverage = {
+            "u轴": _axis_gap_report(uv[:, 0]),
+            "v轴": _axis_gap_report(uv[:, 1]),
+            "警告阈值比例": PIXEL_COVERAGE_GAP_WARNING_RATIO,
+        }
+        warnings = []
+        for axis_name in ("u轴", "v轴"):
+            if coverage[axis_name]["超过警告阈值"]:
+                warnings.append(f"{axis_name}存在超过总跨度25%的无样本区间")
+        if not bool(static_complete.all()):
+            warnings.append("存在静止采样不足80%的目标，未比较零误差等效TCP模型")
+        if not completeness_consistent:
+            warnings.append("静止采样完整标记与有效帧数不一致")
+
+        diagnostic_columns = [
+            COL_CATEGORY,
+            COL_TASK_INDEX,
+            *COL_PIXEL,
+            *COL_TCP_XY,
+            *COL_COMMAND_XY,
+            *COL_ZERO_XY,
+            *COL_FINAL_PIXEL_ERROR,
+            *COL_STATIC_MEAN,
+            *COL_STATIC_STD,
+            COL_STATIC_VALID,
+            COL_STATIC_REQUESTED,
+            COL_STATIC_COMPLETE,
+        ]
+        available_columns = [column for column in diagnostic_columns if column in diagnostic_rows]
+        diagnostic_rows.loc[:, available_columns].to_csv(
+            job.output_dir / "逐目标终止诊断.csv", index=False, encoding="utf-8-sig"
+        )
+        _plot_experiment_vectors(job, uv, actual_labels, actual_predictions, diagnostic_rows)
+        _plot_label_comparison(job, label_reports)
+        _plot_seed_stability(job, stability)
+        _plot_terminal_jitter(job, diagnostic_rows)
+        report["实验日志诊断"] = {
+            "可用": True,
+            "实验批次ID": session_ids[0],
+            "逐轮日志": round_report,
+            "静止采样完整目标数": int(static_complete.sum()),
+            "静止采样目标总数": int(len(static_complete)),
+            "像素覆盖": coverage,
+            "不同标签模型比较": label_reports,
+            "随机折分稳定性": stability,
+            "类别与L形统计": category_report,
+            "警告": warnings,
+        }
+    except Exception as exc:  # noqa: BLE001
+        report["实验日志诊断"] = {"可用": False, "原因": str(exc)}
 
 
 def analyze_calibration_pair(block_job, tray_job) -> bool:
@@ -1047,6 +1424,7 @@ def analyze_calibration_pair(block_job, tray_job) -> bool:
         fitted = {}
         for job, rows in ((block_job, block_rows), (tray_job, tray_rows)):
             fitted[job.subject] = _fit_v2_xy_job(job, rows, reports[job.subject])
+            _analyze_experiment_log(job, rows, reports[job.subject])
 
         generation_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         documents = {}

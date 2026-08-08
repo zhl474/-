@@ -46,6 +46,10 @@ def _response_fields(response):
         "像素误差X": error_x,
         "像素误差Y": error_y,
         "最大像素误差": maximum_error,
+        "低位检测角度deg": _finite_float(
+            getattr(response, "detected_angle_deg", None)
+        ),
+        "低位匹配得分": _finite_float(getattr(response, "score", None)),
     }
 
 
@@ -62,6 +66,9 @@ def _emit_event(
     arm_motion_ms="",
     settle_ms="",
     total_ms="",
+    stable_frame_index="",
+    static_sample_index="",
+    message_override="",
 ):
     """向任务层发送单轮结构化事件，视觉闭环本身不直接输出 print。"""
     if event_callback is None:
@@ -70,8 +77,10 @@ def _emit_event(
     row = {
         "事件": event_name,
         "伺服轮次": int(iteration) + 1,
+        "连续稳定帧序号": stable_frame_index,
+        "静止采样序号": static_sample_index,
         "识别成功": bool(getattr(response, "found", False)),
-        "消息": str(getattr(response, "message", "") or ""),
+        "消息": str(message_override or getattr(response, "message", "") or ""),
         "XY修正X毫米": correction[0],
         "XY修正Y毫米": correction[1],
         "图像服务耗时毫秒": detection_ms,
@@ -132,6 +141,7 @@ def run_offset_visual_servo_alignment(
     timing_debug: bool = False,
     log_label: str = "视觉伺服",
     event_callback: Optional[Callable[[dict], None]] = None,
+    post_success_sample_frames: int = 0,
 ):
     pose = list(float(value) for value in start_pose)
     stable_count = 0
@@ -195,6 +205,7 @@ def run_offset_visual_servo_alignment(
                 detection_ms=(detection_finished_at - round_started_at) * 1000.0,
                 settle_ms=(round_finished_at - detection_finished_at) * 1000.0,
                 total_ms=(round_finished_at - round_started_at) * 1000.0,
+                stable_frame_index=stable_count,
             )
             if timing_debug:
                 print(
@@ -204,6 +215,42 @@ def run_offset_visual_servo_alignment(
                     f"本轮总={(round_finished_at - round_started_at) * 1000:.1f}ms"
                 )
             if stable_count >= success_stable_frames:
+                # 成功后的附加帧仅用于估计检测噪声，绝不再发送运动命令，
+                # 也不因诊断帧丢失或服务异常撤销已经成立的对准结果。
+                for sample_index in range(max(0, int(post_success_sample_frames))):
+                    sample_started_at = time.perf_counter()
+                    try:
+                        sample_response = get_offset_func()
+                        sample_finished_at = time.perf_counter()
+                        sample_event = (
+                            "成功后静止帧"
+                            if bool(getattr(sample_response, "found", False))
+                            else "成功后静止丢失"
+                        )
+                        _emit_event(
+                            event_callback,
+                            sample_event,
+                            iteration,
+                            sample_response,
+                            pose,
+                            detection_ms=(sample_finished_at - sample_started_at) * 1000.0,
+                            total_ms=(sample_finished_at - sample_started_at) * 1000.0,
+                            static_sample_index=sample_index + 1,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        sample_finished_at = time.perf_counter()
+                        _emit_event(
+                            event_callback,
+                            "成功后静止异常",
+                            iteration,
+                            None,
+                            pose,
+                            detection_ms=(sample_finished_at - sample_started_at) * 1000.0,
+                            total_ms=(sample_finished_at - sample_started_at) * 1000.0,
+                            static_sample_index=sample_index + 1,
+                            message_override=str(exc),
+                        )
+                        print(f"[{log_label}] 成功后静止采样 {sample_index + 1} 异常: {exc}")
                 return True, pose, last_response, "视觉伺服对准成功"
             continue
 

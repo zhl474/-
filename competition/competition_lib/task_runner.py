@@ -1,9 +1,14 @@
 """粗定位与视觉伺服抓放任务状态机。"""
 
 from enum import Enum
+from dataclasses import asdict
+from datetime import datetime
 import math
+from pathlib import Path
+import subprocess
 import time
 
+import numpy as np
 import rospy
 
 from .config import load_execution_config, load_visual_servo_config
@@ -61,11 +66,15 @@ class TaskRunner:
         visual_config=None,
         servo_csv_output_dir=DEFAULT_SERVO_CSV_OUTPUT_DIR,
         servo_csv_logger=None,
+        experiment_session_id=None,
     ):
         self.clients = clients or RobotClients()
         self.config = execution_config or load_execution_config()
         self.visual_config = visual_config or load_visual_servo_config()
-        self.servo_csv_logger = servo_csv_logger or ServoCsvLogger(servo_csv_output_dir)
+        self.servo_csv_logger = servo_csv_logger or ServoCsvLogger(
+            servo_csv_output_dir,
+            session_id=experiment_session_id,
+        )
         self.angle_planner = ServoAnglePlanner(self.config, self.clients.rotate_tool)
         self.state = TaskState.IDLE
         self.holding_block = False
@@ -91,7 +100,7 @@ class TaskRunner:
         elif state is TaskState.FAILED:
             rospy.logerr("任务状态: %s", state.value)
 
-    def _align(self, offset_func, start_pose, log_label):
+    def _align(self, offset_func, start_pose, log_label, event_callback=None):
         start_pose = self._validate_motion_pose(start_pose, f"{log_label}起始位")
 
         def move_checked(pose, *args, **kwargs):
@@ -114,6 +123,12 @@ class TaskRunner:
             settle_sec=self.config.settle_sec,
             timing_debug=self.config.timing_debug,
             log_label=log_label,
+            event_callback=event_callback,
+            post_success_sample_frames=(
+                self.config.post_success_sample_frames
+                if self.config.calibration_mode
+                else 0
+            ),
         )
 
     def _validate_motion_pose(self, pose, label):
@@ -152,12 +167,26 @@ class TaskRunner:
             return [""] * length
         return result
 
+    @staticmethod
+    def _now_iso():
+        """生成带本地时区的实验时间，方便和跨节点录像对齐。"""
+        return datetime.now().astimezone().isoformat(timespec="milliseconds")
+
     def _read_actual_pose_for_csv(self):
-        """读取实测 TCP XYZ；读取失败时留空且不影响原失败原因。"""
+        """读取实测 TCP 和相机六维位姿；失败时留空且不影响主流程。"""
         empty = {
             "实测TCP位置X": "",
             "实测TCP位置Y": "",
             "实测TCP位置Z": "",
+            "实测TCP姿态R": "",
+            "实测TCP姿态P": "",
+            "实测TCP姿态YAW": "",
+            "实测相机位置X": "",
+            "实测相机位置Y": "",
+            "实测相机位置Z": "",
+            "实测相机姿态R": "",
+            "实测相机姿态P": "",
+            "实测相机姿态YAW": "",
         }
         get_actual_pose = getattr(self.clients, "get_actual_pose", None)
         if not callable(get_actual_pose):
@@ -166,18 +195,155 @@ class TaskRunner:
             response = get_actual_pose()
             if not getattr(response, "success", False):
                 return empty
-            tcp_x, tcp_y, tcp_z, _tcp_r, _tcp_p, _tcp_yaw = self._finite_values(
+            tcp_pose = self._finite_values(
                 response.tcp_pose, 6
             )
-            return {
-                "实测TCP位置X": tcp_x,
-                "实测TCP位置Y": tcp_y,
-                "实测TCP位置Z": tcp_z,
-            }
+            camera_pose = self._finite_values(response.camera_pose, 6)
+            if "" in tcp_pose or "" in camera_pose:
+                return empty
+            names = (
+                "实测TCP位置X",
+                "实测TCP位置Y",
+                "实测TCP位置Z",
+                "实测TCP姿态R",
+                "实测TCP姿态P",
+                "实测TCP姿态YAW",
+                "实测相机位置X",
+                "实测相机位置Y",
+                "实测相机位置Z",
+                "实测相机姿态R",
+                "实测相机姿态P",
+                "实测相机姿态YAW",
+            )
+            return dict(zip(names, [*tcp_pose, *camera_pose]))
         except Exception:
             return empty
 
-    def _record_servo_result(self, target, side, success, failure_message=""):
+    @staticmethod
+    def _round_pose_fields(actual_pose):
+        """把最终位姿字段改名为逐轮位姿字段。"""
+        mapping = {
+            "实测TCP位置X": "本轮实测TCP位置X",
+            "实测TCP位置Y": "本轮实测TCP位置Y",
+            "实测TCP位置Z": "本轮实测TCP位置Z",
+            "实测TCP姿态R": "本轮实测TCP姿态R",
+            "实测TCP姿态P": "本轮实测TCP姿态P",
+            "实测TCP姿态YAW": "本轮实测TCP姿态YAW",
+            "实测相机位置X": "本轮实测相机位置X",
+            "实测相机位置Y": "本轮实测相机位置Y",
+            "实测相机位置Z": "本轮实测相机位置Z",
+            "实测相机姿态R": "本轮实测相机姿态R",
+            "实测相机姿态P": "本轮实测相机姿态P",
+            "实测相机姿态YAW": "本轮实测相机姿态YAW",
+        }
+        return {target: actual_pose.get(source, "") for source, target in mapping.items()}
+
+    def _build_trial_context(self, target, side, task_index):
+        """生成汇总和逐轮日志共用的稳定关联字段。"""
+        prefix = "pick" if side == "pick" else "place"
+        detected_x, detected_y = self._finite_values(
+            getattr(target, f"{prefix}_high_detected_pixel_xy", None), 2
+        )
+        image_center_x, image_center_y = self._finite_values(
+            getattr(target, f"{prefix}_high_image_center_xy", None), 2
+        )
+        return {
+            "实验批次ID": self.servo_csv_logger.session_id,
+            "任务序号": "" if task_index is None else int(task_index),
+            "目标类型": "方块" if side == "pick" else "托盘",
+            "方块类别": str(getattr(target, "category", "") or ""),
+            "托盘行": getattr(target, "row", "") if side == "place" else "",
+            "托盘列": getattr(target, "col", "") if side == "place" else "",
+            "高位检测像素X": detected_x,
+            "高位检测像素Y": detected_y,
+            "高位图像中心X": image_center_x,
+            "高位图像中心Y": image_center_y,
+            "高位检测角度deg": getattr(target, "detected_angle_deg", ""),
+            "目标旋转增量deg": getattr(target, "rotation_delta_deg", ""),
+            "试次开始时间": self._now_iso(),
+        }
+
+    def _make_round_callback(self, target_key, context, events):
+        """把控制层事件补齐实验上下文，并在每次运动后读取实际位姿。"""
+        def callback(event):
+            row = dict(context)
+            row.update(event)
+            row["全试次记录序号"] = len(events) + 1
+            if row.get("事件") == "执行修正":
+                row.update(self._round_pose_fields(self._read_actual_pose_for_csv()))
+            self.servo_csv_logger.write_round(target_key, row)
+            events.append(row)
+
+        return callback
+
+    @staticmethod
+    def _response_value(response, name):
+        try:
+            value = float(getattr(response, name))
+        except (AttributeError, TypeError, ValueError):
+            return ""
+        return value if math.isfinite(value) else ""
+
+    def _event_statistics(self, events, success):
+        """从逐轮事件计算终止残差和闭环过程统计。"""
+        control_events = [
+            row
+            for row in events
+            if row.get("事件") in {"目标丢失", "执行修正", "稳定帧"}
+        ]
+        static_rows = [row for row in events if row.get("事件") == "成功后静止帧"]
+        static_errors = []
+        for row in static_rows:
+            try:
+                dx = float(row["像素误差X"])
+                dy = float(row["像素误差Y"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if math.isfinite(dx) and math.isfinite(dy):
+                static_errors.append((dx, dy))
+        requested = self.config.post_success_sample_frames if success else 0
+        required = int(math.ceil(0.8 * requested)) if requested else 0
+        statistics = {
+            "伺服总轮数": len({row.get("伺服轮次") for row in control_events}),
+            "执行修正次数": sum(row.get("事件") == "执行修正" for row in events),
+            "目标丢失次数": sum(row.get("事件") == "目标丢失" for row in events),
+            "稳定帧数": sum(row.get("事件") == "稳定帧" for row in events),
+            "静止采样请求帧数": requested,
+            "静止采样有效帧数": len(static_errors),
+            "静止采样完整": bool(requested and len(static_errors) >= required),
+            "静止像素误差均值X": "",
+            "静止像素误差均值Y": "",
+            "静止像素误差标准差X": "",
+            "静止像素误差标准差Y": "",
+            "静止像素误差P95": "",
+        }
+        if static_errors:
+            array = np.asarray(static_errors, dtype=float)
+            norms = np.linalg.norm(array, axis=1)
+            statistics.update(
+                {
+                    "静止像素误差均值X": float(np.mean(array[:, 0])),
+                    "静止像素误差均值Y": float(np.mean(array[:, 1])),
+                    "静止像素误差标准差X": float(np.std(array[:, 0])),
+                    "静止像素误差标准差Y": float(np.std(array[:, 1])),
+                    "静止像素误差P95": float(np.percentile(norms, 95)),
+                }
+            )
+        return statistics
+
+    def _record_servo_result(
+        self,
+        target,
+        side,
+        success,
+        failure_message="",
+        *,
+        task_index=None,
+        context=None,
+        events=None,
+        final_command_pose=None,
+        last_response=None,
+    ):
         """标定模式仅写入一条最终成功或失败记录。"""
         if not self.config.calibration_mode or not self.servo_csv_logger.is_open:
             return False
@@ -201,6 +367,11 @@ class TaskRunner:
         rough_pose = self._finite_values(
             getattr(target, f"{prefix}_observation_pose", None), 6
         )
+        context = dict(context or self._build_trial_context(target, side, task_index))
+        events = list(events or [])
+        command_pose = self._finite_values(final_command_pose, 6)
+        actual_pose = self._read_actual_pose_for_csv()
+        statistics = self._event_statistics(events, success)
         row = {
             "方块类别": str(getattr(target, "category", "") or ""),
             "事件": "伺服成功" if success else "伺服失败",
@@ -228,8 +399,57 @@ class TaskRunner:
                 getattr(target, f"{prefix}_rough_localization_source", "") or ""
             ),
             "失败信息": "" if success else str(failure_message or "视觉伺服失败"),
+            **context,
+            "伺服开始时间": context.get("试次开始时间", ""),
+            "伺服结束时间": self._now_iso(),
+            **statistics,
+            "最终低位目标像素X": self._response_value(last_response, "px"),
+            "最终低位目标像素Y": self._response_value(last_response, "py"),
+            "最终像素误差X": self._response_value(last_response, "dx_px"),
+            "最终像素误差Y": self._response_value(last_response, "dy_px"),
+            "最终低位检测角度deg": self._response_value(
+                last_response, "detected_angle_deg"
+            ),
+            "最终低位匹配得分": self._response_value(last_response, "score"),
+            "最终命令TCP位置X": command_pose[0],
+            "最终命令TCP位置Y": command_pose[1],
+            "最终命令TCP位置Z": command_pose[2],
+            "最终命令TCP姿态R": command_pose[3],
+            "最终命令TCP姿态P": command_pose[4],
+            "最终命令TCP姿态YAW": command_pose[5],
         }
-        row.update(self._read_actual_pose_for_csv())
+        final_px = row["最终低位目标像素X"]
+        final_py = row["最终低位目标像素Y"]
+        final_dx = row["最终像素误差X"]
+        final_dy = row["最终像素误差Y"]
+        row["最终低位图像中心X"] = (
+            final_px - final_dx if "" not in (final_px, final_dx) else ""
+        )
+        row["最终低位图像中心Y"] = (
+            final_py - final_dy if "" not in (final_py, final_dy) else ""
+        )
+        row.update(actual_pose)
+        actual_xyz = [actual_pose.get(name, "") for name in (
+            "实测TCP位置X", "实测TCP位置Y", "实测TCP位置Z"
+        )]
+        for axis, actual, command in zip("XYZ", actual_xyz, command_pose[:3]):
+            row[f"实测减命令TCP位置{axis}"] = (
+                actual - command if "" not in (actual, command) else ""
+            )
+        mean_error = [
+            statistics["静止像素误差均值X"],
+            statistics["静止像素误差均值Y"],
+        ]
+        if "" not in mean_error and "" not in actual_xyz[:2]:
+            matrix = np.asarray(self.visual_config["pixel_to_robot_matrix"], dtype=float)
+            zero_xy = np.asarray(actual_xyz[:2], dtype=float) + matrix @ np.asarray(
+                mean_error, dtype=float
+            )
+            row["零误差等效TCP位置X"] = float(zero_xy[0])
+            row["零误差等效TCP位置Y"] = float(zero_xy[1])
+        else:
+            row["零误差等效TCP位置X"] = ""
+            row["零误差等效TCP位置Y"] = ""
         return self.servo_csv_logger.write("block" if side == "pick" else "board", row)
 
     def _pick(self, target, task_index=None):
@@ -274,6 +494,11 @@ class TaskRunner:
                 time.sleep(motor_wait)
 
             self._set_state(TaskState.PICK_ALIGN)
+            trial_context = self._build_trial_context(target, "pick", task_index)
+            trial_events = []
+            round_callback = self._make_round_callback(
+                "block", trial_context, trial_events
+            ) if self.config.calibration_mode else None
             try:
                 success, camera_pose, last_response, message = self._align(
                     lambda: self.clients.detect_block_offset(
@@ -282,14 +507,42 @@ class TaskRunner:
                     ),
                     rough_pose,
                     "方块视觉伺服",
+                    event_callback=round_callback,
                 )
             except Exception as exc:
-                self._record_servo_result(target, "pick", False, str(exc))
+                self._record_servo_result(
+                    target,
+                    "pick",
+                    False,
+                    str(exc),
+                    task_index=task_index,
+                    context=trial_context,
+                    events=trial_events,
+                )
                 raise
             if not success:
-                self._record_servo_result(target, "pick", False, message)
+                self._record_servo_result(
+                    target,
+                    "pick",
+                    False,
+                    message,
+                    task_index=task_index,
+                    context=trial_context,
+                    events=trial_events,
+                    final_command_pose=camera_pose,
+                    last_response=last_response,
+                )
                 raise RuntimeError(f"方块视觉伺服失败: {message}")
-            self._record_servo_result(target, "pick", True)
+            self._record_servo_result(
+                target,
+                "pick",
+                True,
+                task_index=task_index,
+                context=trial_context,
+                events=trial_events,
+                final_command_pose=camera_pose,
+                last_response=last_response,
+            )
 
             sucker_pose = apply_camera_to_sucker_offset(camera_pose, self.visual_config)
             sucker_pose[2] = self.config.lift_z
@@ -301,7 +554,7 @@ class TaskRunner:
             self.clients.move_arm(
                 sucker_pose,
                 self.config.arm_speed,
-                wait_until_stable=False,
+                wait_until_stable=True,
             )
             if motor_wait > 0:
                 time.sleep(motor_wait)
@@ -311,7 +564,7 @@ class TaskRunner:
         pick_pose[2] = pick_z_mm
         pick_pose = self._validate_motion_pose(pick_pose, "最终抓取位")
         self.clients.move_arm(pick_pose, self.config.pick_speed)
-        input("吸取方块后请确认吸盘已吸住方块，按回车继续...")
+        # input("吸取方块后请确认吸盘已吸住方块，按回车继续...")
         if not self.config.calibration_mode:
             self.clients.set_suction(RobotClients.SUCK)
             self.holding_block = True
@@ -337,19 +590,52 @@ class TaskRunner:
             self.clients.move_arm(rough_pose, self.config.arm_speed, wait_until_stable=True)
 
             self._set_state(TaskState.PLACE_ALIGN)
+            trial_context = self._build_trial_context(target, "place", task_index)
+            trial_events = []
+            round_callback = self._make_round_callback(
+                "board", trial_context, trial_events
+            ) if self.config.calibration_mode else None
             try:
                 success, camera_pose, last_response, message = self._align(
                     lambda: self.clients.detect_board_offset(target.row, target.col),
                     rough_pose,
                     "托盘视觉伺服",
+                    event_callback=round_callback,
                 )
             except Exception as exc:
-                self._record_servo_result(target, "place", False, str(exc))
+                self._record_servo_result(
+                    target,
+                    "place",
+                    False,
+                    str(exc),
+                    task_index=task_index,
+                    context=trial_context,
+                    events=trial_events,
+                )
                 raise
             if not success:
-                self._record_servo_result(target, "place", False, message)
+                self._record_servo_result(
+                    target,
+                    "place",
+                    False,
+                    message,
+                    task_index=task_index,
+                    context=trial_context,
+                    events=trial_events,
+                    final_command_pose=camera_pose,
+                    last_response=last_response,
+                )
                 raise RuntimeError(f"托盘视觉伺服失败: {message}")
-            self._record_servo_result(target, "place", True)
+            self._record_servo_result(
+                target,
+                "place",
+                True,
+                task_index=task_index,
+                context=trial_context,
+                events=trial_events,
+                final_command_pose=camera_pose,
+                last_response=last_response,
+            )
 
             place_pose = apply_camera_to_sucker_offset(camera_pose, self.visual_config)
             # 托盘标定给出的观察 Z 同时就是吹气释放 Z，此处只应用吸盘 XY 偏移。
@@ -374,13 +660,69 @@ class TaskRunner:
         self.clients.move_arm(shooting_pose, self.config.arm_speed, wait_until_stable=True)
         return self.clients.prepare_task(advanced=advanced, place_order=place_order)
 
+    @staticmethod
+    def _git_metadata():
+        """尽力记录源码版本；Git 不可用时不得阻断标定。"""
+        source_root = Path(__file__).resolve().parents[2]
+        try:
+            revision = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(source_root),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            status = subprocess.run(
+                ["git", "status", "--short"],
+                cwd=str(source_root),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            return {
+                "Git提交": revision.stdout.strip() if revision.returncode == 0 else "",
+                "Git工作区有修改": bool(status.stdout.strip()) if status.returncode == 0 else None,
+                "Git工作区状态": status.stdout.splitlines() if status.returncode == 0 else [],
+            }
+        except Exception:  # noqa: BLE001
+            return {"Git提交": "", "Git工作区有修改": None, "Git工作区状态": []}
+
+    def _experiment_metadata(self):
+        archive_dir = self.servo_csv_logger.archive_dir
+        metadata = {
+            "执行配置": asdict(self.config),
+            "视觉伺服配置": self.visual_config,
+            "静止采样完整阈值": int(
+                math.ceil(0.8 * self.config.post_success_sample_frames)
+            ),
+            "调试归档文件": {
+                "方块低位视频": str(archive_dir / "方块视觉伺服调试.avi"),
+                "托盘低位视频": str(archive_dir / "托盘视觉伺服调试.avi"),
+                "方块上表面掩码": str(archive_dir / "方块上表面掩码.jpg"),
+                "高位方块模板匹配": str(archive_dir / "高位方块模板匹配结果.jpg"),
+                "托盘格点粗定位": str(archive_dir / "托盘格点粗定位.jpg"),
+            },
+        }
+        metadata.update(self._git_metadata())
+        return metadata
+
     def execute_all(self, task_count):
+        experiment_status = "未开始"
         try:
             if self.config.calibration_mode:
-                paths = self.servo_csv_logger.open()
+                paths = self.servo_csv_logger.open(
+                    metadata=self._experiment_metadata()
+                )
                 print(
                     f"标定 CSV 已覆盖创建：方块={paths['block']}，"
-                    f"托盘={paths['board']}"
+                    f"托盘={paths['board']}\n"
+                    f"实验批次归档：{paths['archive_dir']}"
+                )
+                experiment_status = "进行中"
+                self.servo_csv_logger.update_metadata(
+                    {"实验状态": experiment_status, "计划任务数量": int(task_count)}
                 )
                 # 标定采集必须先确认气泵和电磁阀已关闭，失败则不允许开始运动。
                 self.clients.set_suction(RobotClients.OFF)
@@ -391,8 +733,10 @@ class TaskRunner:
                 self._place(target, task_index=index + 1)
             if not self.config.calibration_mode:
                 self.clients.set_suction(RobotClients.OFF)
+            experiment_status = "完成"
             self._set_state(TaskState.COMPLETED)
         except Exception:
+            experiment_status = "失败"
             self._set_state(TaskState.FAILED)
             if self.holding_block:
                 rospy.logerr("任务失败时仍持有方块，保持吸盘状态并停止自动运动")
@@ -400,6 +744,8 @@ class TaskRunner:
                 print("\033[91m任务失败，当前标定 CSV 已保存。\033[0m")
             raise
         finally:
+            if self.config.calibration_mode and self.servo_csv_logger.archive_dir.exists():
+                self.servo_csv_logger.update_metadata({"实验状态": experiment_status})
             self.servo_csv_logger.close()
 
     def run_interactive(self):

@@ -97,6 +97,35 @@ def _v2_rows(subject, count=34, *, block_mad=0.2):
     return rows
 
 
+def _add_experiment_fields(rows, session_id="diagnostic_session"):
+    enriched = []
+    for index, source in enumerate(rows, start=1):
+        row = dict(source)
+        row.update({
+            "实验批次ID": session_id,
+            "任务序号": index,
+            "目标类型": "方块" if "stable_depth_xyz" == row["粗定位来源"] else "托盘",
+            "高位检测角度deg": float((index % 6) * 15),
+            "最终命令TCP位置X": row["实测TCP位置X"] - 0.05,
+            "最终命令TCP位置Y": row["实测TCP位置Y"] + 0.03,
+            "实测减命令TCP位置X": 0.05,
+            "实测减命令TCP位置Y": -0.03,
+            "最终像素误差X": 0.2,
+            "最终像素误差Y": -0.1,
+            "静止像素误差均值X": 1.0,
+            "静止像素误差均值Y": 2.0,
+            "静止像素误差标准差X": 0.1,
+            "静止像素误差标准差Y": 0.2,
+            "静止采样有效帧数": 20,
+            "静止采样请求帧数": 20,
+            "静止采样完整": True,
+            "零误差等效TCP位置X": row["实测TCP位置X"] + 0.4,
+            "零误差等效TCP位置Y": row["实测TCP位置Y"] + 0.2,
+        })
+        enriched.append(row)
+    return enriched
+
+
 @pytest.mark.parametrize("subject", ["block", "tray"])
 def test_simple_analysis_outputs_loadable_affine_calibration(tmp_path, subject):
     job = _make_job(tmp_path, subject, _calibration_rows())
@@ -171,6 +200,46 @@ def test_pair_analysis_generates_same_batch_v2_and_derived_tray_plane(tmp_path):
     assert block_coefficients[2] - tray_coefficients[2] == pytest.approx(7.0)
     pixel = [180.0, 150.0]
     assert block_calibration.predict(pixel)[2] - tray_calibration.predict(pixel)[2] == pytest.approx(7.0)
+    report = json.loads(
+        (block_job.output_dir / "标定检查报告.json").read_text(encoding="utf-8")
+    )
+    assert report["实验日志诊断"]["可用"] is False
+
+
+def test_pair_analysis_outputs_experiment_diagnostics_for_schema_v3(tmp_path):
+    session_id = "diagnostic_session"
+    block_job = _make_job(
+        tmp_path, "block", _add_experiment_fields(_v2_rows("block"), session_id)
+    )
+    tray_job = _make_job(
+        tmp_path, "tray", _add_experiment_fields(_v2_rows("tray"), session_id)
+    )
+    archive_dir = tmp_path / "实验日志" / session_id
+    archive_dir.mkdir(parents=True)
+    pd.DataFrame(
+        [{"事件": "成功后静止帧", "任务序号": index} for index in range(1, 35)]
+    ).to_csv(archive_dir / "方块视觉伺服逐轮.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(
+        [{"事件": "成功后静止帧", "任务序号": index} for index in range(1, 35)]
+    ).to_csv(archive_dir / "托盘视觉伺服逐轮.csv", index=False, encoding="utf-8-sig")
+
+    assert analyze_calibration_pair(block_job, tray_job) is True
+
+    report = json.loads(
+        (block_job.output_dir / "标定检查报告.json").read_text(encoding="utf-8")
+    )
+    diagnostic = report["实验日志诊断"]
+    assert diagnostic["可用"] is True
+    assert diagnostic["静止采样完整目标数"] == 34
+    assert set(diagnostic["不同标签模型比较"]) == {
+        "实测TCP",
+        "最终命令TCP",
+        "零误差等效TCP",
+    }
+    assert diagnostic["逐轮日志"]["总行数"] == 34
+    assert (block_job.output_dir / "逐目标终止诊断.csv").is_file()
+    assert (block_job.output_dir / "实验空间矢量诊断.png").is_file()
+    assert (block_job.output_dir / "CV随机种子稳定性.png").is_file()
 
 
 def test_pair_analysis_removes_both_candidates_when_block_depth_gate_fails(tmp_path):
