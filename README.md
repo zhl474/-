@@ -27,10 +27,11 @@
 - `image_process/config/*_pixel_to_tcp_calibration.yaml`：方块和托盘各自的正式部署标定。
 - `image_process/config/task_layout.yaml`：基础任务唯一摆放表。
 
-`execution.yaml` 根节点的 `calibration_mode` 是抓放/标定唯一模式开关。
-`false` 为正式抓放，只加载部署的成对标定 YAML，不创建也不等待深度坐标客户端；
-`true` 为标定采集，深度相机提供当前现场完整 XYZ 粗定位，低位视觉伺服只修正 XY，
-全程关闭吸气/吹气，并覆盖记录方块和托盘标定 CSV。
+`execution.yaml` 根节点的 `calibration_mode` 开关已移除，标定/正式模式由 launch 文件的
+`calibration_mode` 参数决定：`roslaunch competition competition.launch` 传 `false`（正式抓放），
+`roslaunch competition calibration.launch` 传 `true`（标定采集）。正式抓放只加载部署的
+成对标定 YAML，不创建也不等待深度坐标客户端；标定采集时深度相机提供当前现场完整 XYZ
+粗定位，低位视觉伺服只修正 XY，全程关闭吸气/吹气，并覆盖记录方块和托盘标定 CSV。
 
 `execution.yaml` 的 `servo.enabled` 控制正式运行是否启用方块和托盘低位视觉伺服。
 `true` 保持“粗观察位、视觉对准、偏置、抓放”的闭环流程；`false` 直接对方块或
@@ -56,7 +57,13 @@ Z 加 `192 mm`，最终抓取 TCP Z 为表面 Z 加 `162 mm`；托盘只使用�
 ```bash
 PYTHONPATH=image_process:competition:. /home/zhl/fr3env/fr3env/bin/python -m pytest -q
 roslaunch competition competition.launch
+roslaunch competition calibration.launch
 ```
+
+标定采集会识别画面内全部方块并逐个拾取；若同时识别到托盘，还会从 14×10 格点及其
+半格位置随机抽取 34 个目标（整数点 9、左右中点 9、上下中点 8、四点中心 8）逐一抵达。
+没有托盘时只采集方块，任意数量、任意类别组合均可成功；有托盘时至少需要 3 个不共线
+方块提供观察 Z 平面。
 
 高位拍摄会等待机械臂停稳，并只使用任务请求之后发布的新图像。标定文件缺失、主体错配、
 预测非有限或 TCP 超出安全范围都会让本轮高位准备失败，由交互流程重新识别。

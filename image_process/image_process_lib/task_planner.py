@@ -4,6 +4,7 @@
 """
 
 from dataclasses import dataclass
+import random
 from typing import Dict, Iterable, List, Sequence
 
 import numpy as np
@@ -11,6 +12,65 @@ import yaml
 from scipy.optimize import linear_sum_assignment
 
 from image_process_lib.block_category import normalize_category_name
+
+
+# 与 board_scene_detector 的 BOARD_ROW_COUNT / BOARD_COL_COUNT 保持一致，
+# 低位托盘检测只支持整数或 .5 的行列坐标。
+CALIBRATION_TRAY_ROW_COUNT = 14
+CALIBRATION_TRAY_COL_COUNT = 10
+
+# 标定托盘目标总数及四种模式的抽取数量：整数点、左右中点、上下中点、四点中心。
+CALIBRATION_TRAY_POINT_COUNT = 34
+CALIBRATION_TRAY_MODE_COUNTS = {
+    "dot": 9,
+    "horizontal_mid": 9,
+    "vertical_mid": 8,
+    "cell_center": 8,
+}
+if sum(CALIBRATION_TRAY_MODE_COUNTS.values()) != CALIBRATION_TRAY_POINT_COUNT:
+    raise ValueError("标定托盘各模式抽取数量之和必须等于目标总数")
+
+
+def select_calibration_tray_points(seed=None):
+    """无重复随机挑选 34 个托盘标定点，覆盖整数与 .5 四种目标模式。
+
+    模式名与低位托盘检测的 dot/horizontal_mid/vertical_mid/cell_center 对应。
+    各模式的坐标池互斥，因此总体天然无重复；返回顺序是随机打乱的。
+    """
+    row_count = CALIBRATION_TRAY_ROW_COUNT
+    col_count = CALIBRATION_TRAY_COL_COUNT
+    pools = {
+        "dot": [
+            (float(row), float(col))
+            for row in range(1, row_count + 1)
+            for col in range(1, col_count + 1)
+        ],
+        "horizontal_mid": [
+            (float(row), float(col) + 0.5)
+            for row in range(1, row_count + 1)
+            for col in range(1, col_count)
+        ],
+        "vertical_mid": [
+            (float(row) + 0.5, float(col))
+            for row in range(1, row_count)
+            for col in range(1, col_count + 1)
+        ],
+        "cell_center": [
+            (float(row) + 0.5, float(col) + 0.5)
+            for row in range(1, row_count)
+            for col in range(1, col_count)
+        ],
+    }
+    rng = random.Random(seed)
+    selected = []
+    for mode, count in CALIBRATION_TRAY_MODE_COUNTS.items():
+        candidates = rng.sample(pools[mode], count)
+        selected.extend(
+            {"row": float(row), "col": float(col), "mode": mode}
+            for row, col in candidates
+        )
+    rng.shuffle(selected)
+    return selected
 
 
 @dataclass(frozen=True)
@@ -68,6 +128,8 @@ class TaskTarget:
     rotation_delta_deg: float
     pick_surface_z_mm: float
     pick_surface_z_valid: bool
+    # 目标种类：正式任务为 pick_place，标定方块为 block，标定托盘为 tray。
+    target_type: str = "pick_place"
     # 抓取侧与摆放侧分别保留，避免任务分配后丢失高位标定诊断数据。
     pick_high_detected_pixel_xy: Sequence[float] = (0.0, 0.0)
     pick_high_depth_sample_pixel_xy: Sequence[float] = (0.0, 0.0)

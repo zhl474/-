@@ -3,21 +3,13 @@
   <arg name="servo_csv_output_dir" default="/home/zhl/桌面/标定数据"/>
   <arg name="experiment_archive_root" default="$(arg servo_csv_output_dir)/实验日志"/>
   <arg name="experiment_session_id" default="$(anon visual_servo_experiment)"/>
-  <arg name="block_pixel_to_tcp_calibration_path"
-       default="$(find image_process)/config/block_pixel_to_tcp_calibration.yaml"/>
-  <arg name="tray_pixel_to_tcp_calibration_path"
-       default="$(find image_process)/config/tray_pixel_to_tcp_calibration.yaml"/>
 
   <node pkg="camera" type="camera_node.py" name="camera_node" output="screen"/>
 
   <node pkg="image_process" type="process.py" name="image_process_node" output="screen">
-    <param name="calibration_mode" value="false"/>
+    <param name="calibration_mode" value="true"/>
     <param name="experiment_session_id" value="$(arg experiment_session_id)"/>
     <param name="experiment_archive_root" value="$(arg experiment_archive_root)"/>
-    <param name="block_pixel_to_tcp_calibration_path"
-           value="$(arg block_pixel_to_tcp_calibration_path)"/>
-    <param name="tray_pixel_to_tcp_calibration_path"
-           value="$(arg tray_pixel_to_tcp_calibration_path)"/>
     <param name="save_top_surface_mask_vis" value="true"/>
     <param name="top_surface_mask_vis_path" value="$(arg debug_output_dir)/方块上表面掩码.jpg"/>
     <param name="high_template_match_debug_path" value="$(arg debug_output_dir)/高位方块模板匹配结果.jpg"/>
@@ -31,7 +23,7 @@
     <param name="minimum_z" value="165.0"/>
   </node>
 
-  <node pkg="competition" type="competition.py" name="competition_node" output="screen">
+  <node pkg="competition" type="calibration.py" name="calibration_node" output="screen">
     <param name="experiment_session_id" value="$(arg experiment_session_id)"/>
     <param name="servo_csv_output_dir" value="$(arg servo_csv_output_dir)"/>
   </node>

@@ -1,7 +1,7 @@
 """粗定位与视觉伺服抓放任务状态机。"""
 
 from enum import Enum
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 import math
 from pathlib import Path
@@ -727,6 +727,14 @@ class TaskRunner:
                 self.clients.set_suction(RobotClients.OFF)
             for index in range(int(task_count)):
                 target = self.clients.get_task_target(index)
+                target_type = str(
+                    getattr(target, "target_type", "pick_place") or "pick_place"
+                )
+                if target_type != "pick_place":
+                    raise RuntimeError(
+                        "正式运行只接受 pick_place 目标，收到目标类型 "
+                        f"{target_type!r}；标定采集请改用 calibration.py 启动"
+                    )
                 rospy.loginfo("执行第 %d/%d 个任务，类别=%s", index + 1, task_count, target.category)
                 self._pick(target, task_index=index + 1)
                 self._place(target, task_index=index + 1)
@@ -769,3 +777,96 @@ class TaskRunner:
         input(f"按回车开始{action_name}全部方块...")
         self.execution_start_time = time.monotonic()
         self.execute_all(response.task_count)
+
+
+class CalibrationTaskRunner(TaskRunner):
+    """独立标定采集执行器：block 目标只拾取，tray 目标只抵达，全程关闭吸吹气。"""
+
+    def __init__(
+        self,
+        clients=None,
+        execution_config=None,
+        visual_config=None,
+        servo_csv_output_dir=DEFAULT_SERVO_CSV_OUTPUT_DIR,
+        servo_csv_logger=None,
+        experiment_session_id=None,
+    ):
+        base_config = execution_config or load_execution_config()
+        forced_config = replace(base_config, calibration_mode=True)
+        super().__init__(
+            clients=clients,
+            execution_config=forced_config,
+            visual_config=visual_config,
+            servo_csv_output_dir=servo_csv_output_dir,
+            servo_csv_logger=servo_csv_logger,
+            experiment_session_id=experiment_session_id,
+        )
+        print("\033[96m当前模式：独立标定采集（方块=拾取，托盘=抵达，不吸不吹）\033[0m")
+
+    def execute_all(self, task_count, block_count=0, tray_count=0):
+        experiment_status = "未开始"
+        try:
+            paths = self.servo_csv_logger.open(metadata=self._experiment_metadata())
+            print(
+                f"标定 CSV 已覆盖创建：方块={paths['block']}，"
+                f"托盘={paths['board']}\n"
+                f"实验批次归档：{paths['archive_dir']}"
+            )
+            experiment_status = "进行中"
+            self.servo_csv_logger.update_metadata(
+                {
+                    "实验状态": experiment_status,
+                    "计划任务数量": int(task_count),
+                    "计划方块数量": int(block_count),
+                    "计划托盘数量": int(tray_count),
+                }
+            )
+            # 标定采集必须先确认气泵和电磁阀已关闭，失败则不允许开始运动。
+            self.clients.set_suction(RobotClients.OFF)
+            block_index = 0
+            tray_index = 0
+            for index in range(int(task_count)):
+                target = self.clients.get_task_target(index)
+                target_type = str(getattr(target, "target_type", "") or "")
+                if target_type == "block":
+                    block_index += 1
+                    rospy.loginfo("标定方块 %d/%d", block_index, block_count)
+                    self._pick(target, task_index=block_index)
+                elif target_type == "tray":
+                    tray_index += 1
+                    rospy.loginfo("标定托盘点 %d/%d", tray_index, tray_count)
+                    self._place(target, task_index=tray_index)
+                else:
+                    raise RuntimeError(
+                        f"未知目标类型 {target_type!r}，已停止标定"
+                    )
+            experiment_status = "完成"
+            self._set_state(TaskState.COMPLETED)
+        except Exception:
+            experiment_status = "失败"
+            self._set_state(TaskState.FAILED)
+            print("\033[91m标定失败，当前标定 CSV 已保存。\033[0m")
+            raise
+        finally:
+            if self.servo_csv_logger.archive_dir.exists():
+                self.servo_csv_logger.update_metadata({"实验状态": experiment_status})
+            self.servo_csv_logger.close()
+
+    def run_interactive(self):
+        while True:
+            response = self.prepare()
+            if not response.success:
+                print(f"\033[91m标定准备失败: {response.message}\033[0m")
+                input("请调整方块、托盘或光照后按回车重新识别...")
+                continue
+
+            print(response.message)
+            if input("\033[93m识别结果满意请输入 1；其他输入将重新识别: \033[0m").strip() == "1":
+                break
+        input("按回车开始标定采集...")
+        self.execution_start_time = time.monotonic()
+        self.execute_all(
+            response.task_count,
+            block_count=getattr(response, "block_count", 0),
+            tray_count=getattr(response, "tray_count", 0),
+        )

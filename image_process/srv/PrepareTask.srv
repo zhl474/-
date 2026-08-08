@@ -3,4 +3,6 @@ int32[] place_order
 ---
 bool success
 int32 task_count
+int32 block_count
+int32 tray_count
 string message

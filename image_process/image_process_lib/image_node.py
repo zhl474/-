@@ -51,8 +51,10 @@ from image_process_lib.high_mask_edit_session import (
 from image_process_lib.task_planner import (
     ObservedBlock,
     PlacementTarget,
+    TaskTarget,
     assign_blocks_to_targets,
     load_task_layout,
+    select_calibration_tray_points,
 )
 
 from image_process.srv import (
@@ -121,9 +123,11 @@ class ImageProcessor:
             perception_config = yaml.safe_load(config_file) or {}
         with open(EXECUTION_CONFIG_PATH, "r", encoding="utf-8") as config_file:
             execution_config = yaml.safe_load(config_file) or {}
-        calibration_mode_value = execution_config.get("calibration_mode", False)
+        # 标定/正式模式由 launch 文件的 ~calibration_mode 参数决定，
+        # 不再读取 execution.yaml 的 calibration_mode 开关。
+        calibration_mode_value = rospy.get_param("~calibration_mode", False)
         if not isinstance(calibration_mode_value, bool):
-            raise ValueError("calibration_mode 必须是 YAML 布尔值 true 或 false")
+            raise ValueError("calibration_mode 必须是布尔值 true 或 false")
         self.calibration_mode = calibration_mode_value
         experiment_session_id = str(
             rospy.get_param("~experiment_session_id", "") or ""
@@ -1074,18 +1078,10 @@ class ImageProcessor:
             specs.append((item, (float(target_point[0]), float(target_point[1]))))
         return specs
 
-    def _build_calibration_targets(self, blocks, layout, image_shape):
-        """标定模式用深度 XYZ 生成方块和托盘粗位姿及完整诊断。"""
-        placement_specs = self._placement_specs(layout)
-        pixels = [(block["px"], block["py"]) for block in blocks]
-        pixels.extend(point for _item, point in placement_specs)
-        samples = self._query_stable_world_points(pixels)
-        block_samples = samples[:len(blocks)]
-        tray_samples = samples[len(blocks):]
-
+    def _build_calibration_block_observed(self, blocks, samples, image_shape):
+        """把方块深度样本转成标定 ObservedBlock，并校验 MAD、位姿和抓取高度。"""
         observed_blocks = []
-        block_observation_points = []
-        for block, sample in zip(blocks, block_samples):
+        for block, sample in zip(blocks, samples):
             high_pixel = (float(block["px"]), float(block["py"]))
             block_label = f"方块 {block['category']}（block）高位像素 {high_pixel!r}"
             if sample["depth_mad_mm"] > self.block_depth_max_mad_mm:
@@ -1104,7 +1100,6 @@ class ImageProcessor:
                     f"{block_label} 最终抓取 TCP Z={pick_tcp_z:.3f} mm "
                     f"低于安全下限 {self.minimum_tcp_z_mm:.3f} mm"
                 )
-            block_observation_points.append(pose[:3])
             diagnostic = self.make_high_localization_diagnostic(
                 block["px"],
                 block["py"],
@@ -1128,16 +1123,35 @@ class ImageProcessor:
                     **diagnostic,
                 )
             )
+        return observed_blocks
 
-        block_plane = fit_z_plane(block_observation_points)
+    def _fit_calibration_block_plane(self, observed_blocks):
+        """由方块观察 TCP 点拟合 Z 平面，拒绝少点、共线和超限平面。"""
+        block_observation_points = [
+            np.asarray(block.observation_pose[:3], dtype=float)
+            for block in observed_blocks
+        ]
+        if len(block_observation_points) < 3:
+            raise RuntimeError(
+                "托盘标定至少需要 3 个不共线方块提供观察 Z 平面，请增加方块数量"
+            )
+        try:
+            block_plane = fit_z_plane(block_observation_points)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"方块观察点无法拟合 Z 平面（{exc}），请重新摆放方块使其不共线"
+            ) from exc
         if block_plane.rmse_mm > self.block_plane_max_rmse_mm:
             raise RuntimeError(
                 f"方块观察 TCP 平面 RMSE={block_plane.rmse_mm:.3f} mm "
                 f"超过阈值 {self.block_plane_max_rmse_mm:.3f} mm"
             )
+        return block_plane
 
+    def _build_calibration_tray_targets(self, specs, samples, block_plane, image_shape):
+        """把托盘格点规格和深度样本转成标定 PlacementTarget。"""
         placement_targets = []
-        for (item, point), sample in zip(placement_specs, tray_samples):
+        for (item, point), sample in zip(specs, samples):
             tray_tcp_xy = self.depth_rough_localizer.tcp_xy_from_world(sample["world"])
             tray_tcp_z = (
                 block_plane.predict(tray_tcp_xy[0], tray_tcp_xy[1])
@@ -1175,7 +1189,150 @@ class ImageProcessor:
                     **diagnostic,
                 )
             )
+        return placement_targets
+
+    def _build_calibration_targets(self, blocks, layout, image_shape):
+        """标定模式用深度 XYZ 生成方块和托盘粗位姿及完整诊断。"""
+        placement_specs = self._placement_specs(layout)
+        pixels = [(block["px"], block["py"]) for block in blocks]
+        pixels.extend(point for _item, point in placement_specs)
+        samples = self._query_stable_world_points(pixels)
+        observed_blocks = self._build_calibration_block_observed(
+            blocks,
+            samples[:len(blocks)],
+            image_shape,
+        )
+        block_plane = self._fit_calibration_block_plane(observed_blocks)
+        placement_targets = self._build_calibration_tray_targets(
+            placement_specs,
+            samples[len(blocks):],
+            block_plane,
+            image_shape,
+        )
         return observed_blocks, placement_targets
+
+    def _prepare_calibration_targets(self, image):
+        """标定模式准备：全部方块目标在前，可选 34 个托盘随机目标在后。"""
+        blocks, _counts = self._detect_blocks_raw(image)
+        tray_found = False
+        try:
+            self._detect_board_for_task(image)
+            tray_found = True
+        except Exception as exc:
+            self.board_grid_points = None
+            self.board_grid_image = None
+            self.board_grid_image_shape = None
+            rospy.logwarn("未识别到托盘，本轮标定只采集方块: %s", exc)
+        block_pixels = [(block["px"], block["py"]) for block in blocks]
+        tray_items = []
+        tray_pixels = []
+        if tray_found:
+            for index, spec in enumerate(select_calibration_tray_points()):
+                tray_items.append({
+                    "index": index,
+                    "row": spec["row"],
+                    "col": spec["col"],
+                    "angle_deg": 0.0,
+                    "category": "",
+                })
+            tray_pixels = [
+                interpolate_grid_point(self.board_grid_points, item["row"], item["col"])
+                for item in tray_items
+            ]
+        samples = self._query_stable_world_points([*block_pixels, *tray_pixels])
+        observed_blocks = self._build_calibration_block_observed(
+            blocks,
+            samples[:len(blocks)],
+            image.shape[:2],
+        )
+        block_targets = [
+            TaskTarget(
+                index=index,
+                category=block.category,
+                row=0.0,
+                col=0.0,
+                pick_observation_pose=tuple(float(value) for value in block.observation_pose),
+                place_observation_pose=(0.0,) * 6,
+                detected_angle_deg=float(block.detected_angle_deg),
+                rotation_delta_deg=0.0,
+                pick_surface_z_mm=float(block.pick_surface_z_mm),
+                pick_surface_z_valid=bool(block.pick_surface_z_valid),
+                target_type="block",
+                pick_high_detected_pixel_xy=tuple(
+                    float(value) for value in block.high_detected_pixel_xy
+                ),
+                pick_high_depth_sample_pixel_xy=tuple(
+                    float(value) for value in block.high_depth_sample_pixel_xy
+                ),
+                pick_high_image_center_xy=tuple(
+                    float(value) for value in block.high_image_center_xy
+                ),
+                pick_high_world_position=tuple(
+                    float(value) for value in block.high_world_position
+                ),
+                pick_high_world_position_valid=bool(block.high_world_position_valid),
+                pick_rough_localization_source=str(block.rough_localization_source),
+                pick_depth_valid_frame_count=int(block.depth_valid_frame_count),
+                pick_depth_median_mm=float(block.depth_median_mm),
+                pick_depth_mad_mm=float(block.depth_mad_mm),
+                pick_calibration_target_tcp_z_mm=float(
+                    block.calibration_target_tcp_z_mm
+                ),
+            )
+            for index, block in enumerate(observed_blocks)
+        ]
+        tray_targets = []
+        if tray_found:
+            block_plane = self._fit_calibration_block_plane(observed_blocks)
+            placement_targets = self._build_calibration_tray_targets(
+                list(zip(tray_items, tray_pixels)),
+                samples[len(blocks):],
+                block_plane,
+                image.shape[:2],
+            )
+            tray_targets = [
+                TaskTarget(
+                    index=len(block_targets) + index,
+                    category=str(target.category),
+                    row=float(target.row),
+                    col=float(target.col),
+                    pick_observation_pose=(0.0,) * 6,
+                    place_observation_pose=tuple(
+                        float(value) for value in target.observation_pose
+                    ),
+                    detected_angle_deg=0.0,
+                    rotation_delta_deg=0.0,
+                    pick_surface_z_mm=0.0,
+                    pick_surface_z_valid=False,
+                    target_type="tray",
+                    place_high_detected_pixel_xy=tuple(
+                        float(value) for value in target.high_detected_pixel_xy
+                    ),
+                    place_high_depth_sample_pixel_xy=tuple(
+                        float(value) for value in target.high_depth_sample_pixel_xy
+                    ),
+                    place_high_image_center_xy=tuple(
+                        float(value) for value in target.high_image_center_xy
+                    ),
+                    place_high_world_position=tuple(
+                        float(value) for value in target.high_world_position
+                    ),
+                    place_high_world_position_valid=bool(
+                        target.high_world_position_valid
+                    ),
+                    place_rough_localization_source=str(
+                        target.rough_localization_source
+                    ),
+                    place_depth_valid_frame_count=int(target.depth_valid_frame_count),
+                    place_depth_median_mm=float(target.depth_median_mm),
+                    place_depth_mad_mm=float(target.depth_mad_mm),
+                    place_calibration_target_tcp_z_mm=float(
+                        target.calibration_target_tcp_z_mm
+                    ),
+                )
+                for index, target in enumerate(placement_targets)
+            ]
+        return block_targets, tray_targets
 
     def prepare_task(self, request):
         """串行执行高位准备，禁止并发弹出两个人工编辑窗口。"""
@@ -1185,6 +1342,8 @@ class ImageProcessor:
             return PrepareTaskResponse(
                 success=False,
                 task_count=0,
+                block_count=0,
+                tray_count=0,
                 message="已有一轮高位识别或人工编辑正在进行，请勿并发请求",
             )
         try:
@@ -1205,38 +1364,57 @@ class ImageProcessor:
             return PrepareTaskResponse(
                 success=False,
                 task_count=0,
+                block_count=0,
+                tray_count=0,
                 message=f"等待高位新图像超时（{self.fresh_image_timeout_sec:.1f} 秒）",
             )
+        block_count = 0
+        tray_count = 0
         try:
-            self._detect_board_for_task(image)
             if self.calibration_mode:
-                blocks, cube_counts = self._detect_blocks_raw(image)
-                layout, layout_message = self._load_layout_for_request(request, cube_counts)
-                observed_blocks, placement_targets = self._build_calibration_targets(
-                    blocks,
-                    layout,
-                    image.shape[:2],
-                )
+                block_targets, tray_targets = self._prepare_calibration_targets(image)
+                self.task_targets = [*block_targets, *tray_targets]
+                block_count = len(block_targets)
+                tray_count = len(tray_targets)
+                if tray_targets:
+                    tray_coords = "，".join(
+                        f"({target.row:g},{target.col:g})" for target in tray_targets
+                    )
+                    message = (
+                        f"标定准备完成：方块 {block_count} 个，"
+                        f"托盘 {tray_count} 个（行列：{tray_coords}）"
+                    )
+                else:
+                    message = f"标定准备完成：方块 {block_count} 个，未识别到托盘，只采集方块"
             else:
+                self._detect_board_for_task(image)
                 observed_blocks, cube_counts = self._detect_blocks_for_task(image)
                 layout, layout_message = self._load_layout_for_request(request, cube_counts)
                 placement_targets = self._build_placement_targets(layout, image.shape[:2])
-            self.task_targets = assign_blocks_to_targets(
-                observed_blocks,
-                placement_targets,
-                board_angle_deg=self.board_theta,
-            )
-            message = f"{layout_message}准备完成，共 {len(self.task_targets)} 个任务"
+                self.task_targets = assign_blocks_to_targets(
+                    observed_blocks,
+                    placement_targets,
+                    board_angle_deg=self.board_theta,
+                )
+                message = f"{layout_message}准备完成，共 {len(self.task_targets)} 个任务"
             rospy.loginfo(message)
             return PrepareTaskResponse(
                 success=True,
                 task_count=len(self.task_targets),
+                block_count=block_count,
+                tray_count=tray_count,
                 message=message,
             )
         except Exception as exc:
             self.task_targets = []
             rospy.logerr("任务准备失败: %s", exc)
-            return PrepareTaskResponse(success=False, task_count=0, message=str(exc))
+            return PrepareTaskResponse(
+                success=False,
+                task_count=0,
+                block_count=0,
+                tray_count=0,
+                message=str(exc),
+            )
 
     def get_task_target(self, request):
         """按执行顺序返回一个完整抓放目标。"""
@@ -1244,6 +1422,7 @@ class ImageProcessor:
         if index < 0 or index >= len(self.task_targets):
             return GetTaskTargetResponse(
                 success=False,
+                target_type="",
                 pick_observation_pose=[0.0] * 6,
                 place_observation_pose=[0.0] * 6,
                 row=0.0,
@@ -1278,6 +1457,7 @@ class ImageProcessor:
         target = self.task_targets[index]
         return GetTaskTargetResponse(
             success=True,
+            target_type=str(getattr(target, "target_type", "pick_place") or "pick_place"),
             pick_observation_pose=list(target.pick_observation_pose),
             place_observation_pose=list(target.place_observation_pose),
             row=target.row,

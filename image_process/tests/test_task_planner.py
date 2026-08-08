@@ -100,3 +100,35 @@ def test_rotation_delta_preserves_legacy_boundary_direction():
     assert normalize_rotation_delta("T", 180, 0, 0) == 180
     assert normalize_rotation_delta("line", 90, 0, 0) == 90
     assert normalize_rotation_delta("square", 45, 0, 0) == 45
+
+
+def test_select_calibration_tray_points_returns_34_valid_points():
+    from image_process_lib.task_planner import (
+        CALIBRATION_TRAY_COL_COUNT,
+        CALIBRATION_TRAY_MODE_COUNTS,
+        CALIBRATION_TRAY_POINT_COUNT,
+        CALIBRATION_TRAY_ROW_COUNT,
+        select_calibration_tray_points,
+    )
+
+    points = select_calibration_tray_points(seed=7)
+
+    assert len(points) == CALIBRATION_TRAY_POINT_COUNT == 34
+    coordinates = [(point["row"], point["col"]) for point in points]
+    assert len(set(coordinates)) == len(coordinates)
+    for point in points:
+        assert 1.0 <= point["row"] <= CALIBRATION_TRAY_ROW_COUNT
+        assert 1.0 <= point["col"] <= CALIBRATION_TRAY_COL_COUNT
+        assert point["row"] * 2 == round(point["row"] * 2)
+        assert point["col"] * 2 == round(point["col"] * 2)
+    mode_counts = {}
+    for point in points:
+        mode_counts[point["mode"]] = mode_counts.get(point["mode"], 0) + 1
+    assert mode_counts == CALIBRATION_TRAY_MODE_COUNTS
+    assert sum(mode_counts.values()) == 34
+
+
+def test_select_calibration_tray_points_is_reproducible_with_seed():
+    from image_process_lib.task_planner import select_calibration_tray_points
+
+    assert select_calibration_tray_points(seed=11) == select_calibration_tray_points(seed=11)

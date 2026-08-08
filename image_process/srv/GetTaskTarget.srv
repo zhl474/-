@@ -1,6 +1,7 @@
 int32 index
 ---
 bool success
+string target_type
 float64[6] pick_observation_pose
 float64[6] place_observation_pose
 float64 row

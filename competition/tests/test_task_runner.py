@@ -1,5 +1,6 @@
 import importlib
 import csv
+import json
 import sys
 import types
 from dataclasses import replace
@@ -107,6 +108,19 @@ class _FakeClients:
             tcp_pose=[1, 2, 3, -180, 0, 90],
             camera_pose=[4, 5, 6, -180, 0, 90],
         )
+
+
+class _TargetTypeFakeClients(_FakeClients):
+    """支持按任务序号返回 target_type 的标定测试客户端。"""
+
+    def __init__(self, target_types):
+        super().__init__()
+        self.target_types = list(target_types)
+
+    def get_task_target(self, index):
+        target = super().get_task_target(index)
+        target.target_type = self.target_types[index]
+        return target
 
 
 def test_formal_pick_alignment_failure_never_writes_csv_or_reads_actual_pose(
@@ -681,3 +695,126 @@ def test_completed_state_logs_total_execution_time(monkeypatch):
 
     assert logs == ["任务状态: 完成", "全部方块抓放完成，总耗时: 5.25 秒"]
     assert runner.execution_start_time is None
+
+
+def _calibration_runner(module, clients, tmp_path, **changes):
+    return module.CalibrationTaskRunner(
+        clients=clients,
+        execution_config=_execution_config(**changes),
+        visual_config=load_visual_servo_config(),
+        servo_csv_output_dir=tmp_path,
+    )
+
+
+def test_calibration_runner_dispatches_block_then_tray(monkeypatch, tmp_path):
+    module = _load_task_runner(monkeypatch)
+    clients = _TargetTypeFakeClients(["block", "block", "tray", "tray"])
+    runner = _calibration_runner(module, clients, tmp_path)
+
+    def align_calling_offset(offset_func, start_pose, _label, **_kwargs):
+        offset_func()
+        return True, list(start_pose), None, "成功"
+
+    runner._align = align_calling_offset
+
+    runner.execute_all(4, block_count=2, tray_count=2)
+
+    assert [request[0] for request in clients.block_offset_requests] == ["T", "T"]
+    assert clients.board_offset_requests == [(1.0, 1.0), (1.0, 1.0)]
+    assert len(clients.moves) == 12
+    assert clients.suction_states == [module.RobotClients.OFF]
+    block_rows = _read_csv_rows(tmp_path / "方块视觉伺服.csv")
+    board_rows = _read_csv_rows(tmp_path / "托盘视觉伺服.csv")
+    assert [row["任务序号"] for row in block_rows] == ["1", "2"]
+    assert [row["任务序号"] for row in board_rows] == ["1", "2"]
+    assert [row["目标类型"] for row in block_rows] == ["方块", "方块"]
+    assert [row["目标类型"] for row in board_rows] == ["托盘", "托盘"]
+
+
+def test_calibration_runner_rejects_unknown_target_type_before_motion(monkeypatch, tmp_path):
+    module = _load_task_runner(monkeypatch)
+    clients = _TargetTypeFakeClients(["bogus"])
+    runner = _calibration_runner(module, clients, tmp_path)
+
+    with pytest.raises(RuntimeError, match="未知目标类型"):
+        runner.execute_all(1)
+
+    assert clients.moves == []
+    assert clients.block_offset_requests == []
+    assert clients.board_offset_requests == []
+    assert clients.suction_states == [module.RobotClients.OFF]
+    assert runner.state is module.TaskState.FAILED
+    assert runner.servo_csv_logger.is_open is False
+
+
+def test_calibration_runner_metadata_records_planned_counts(monkeypatch, tmp_path):
+    module = _load_task_runner(monkeypatch)
+    clients = _TargetTypeFakeClients(["block", "tray"])
+    runner = module.CalibrationTaskRunner(
+        clients=clients,
+        execution_config=_execution_config(),
+        visual_config=load_visual_servo_config(),
+        servo_csv_output_dir=tmp_path,
+        experiment_session_id="meta_test",
+    )
+    runner._align = lambda *_args, **_kwargs: (True, [1, 2, 200, -180, 0, 90], None, "成功")
+
+    runner.execute_all(2, block_count=1, tray_count=1)
+
+    metadata_path = tmp_path / "实验日志" / "meta_test" / "实验元数据.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["计划任务数量"] == 2
+    assert metadata["计划方块数量"] == 1
+    assert metadata["计划托盘数量"] == 1
+    assert metadata["实验状态"] == "完成"
+
+
+def test_calibration_runner_interactive_retries_and_passes_planned_counts(monkeypatch, tmp_path):
+    module = _load_task_runner(monkeypatch)
+    runner = _calibration_runner(module, _TargetTypeFakeClients([]), tmp_path)
+    responses = iter([
+        types.SimpleNamespace(
+            success=False,
+            task_count=0,
+            block_count=0,
+            tray_count=0,
+            message="托盘格点不足",
+        ),
+        types.SimpleNamespace(
+            success=True,
+            task_count=5,
+            block_count=2,
+            tray_count=3,
+            message="标定准备完成",
+        ),
+    ])
+    prepare_calls = []
+    runner.prepare = lambda **kwargs: prepare_calls.append(kwargs) or next(responses)
+    executed = []
+    runner.execute_all = lambda *args, **kwargs: executed.append((args, kwargs))
+
+    # 依次回答：准备失败后重试、识别结果满意、开始标定。
+    answers = iter(["", "1", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    runner.run_interactive()
+
+    assert len(prepare_calls) == 2
+    assert executed == [( (5,), {"block_count": 2, "tray_count": 3} )]
+
+
+def test_formal_runner_rejects_calibration_target_type(monkeypatch, tmp_path):
+    module = _load_task_runner(monkeypatch)
+    clients = _TargetTypeFakeClients(["block"])
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=_execution_config(),
+        visual_config=load_visual_servo_config(),
+        servo_csv_output_dir=tmp_path,
+    )
+
+    with pytest.raises(RuntimeError, match="只接受 pick_place"):
+        runner.execute_all(1)
+
+    assert clients.moves == []
+    assert clients.suction_states == []

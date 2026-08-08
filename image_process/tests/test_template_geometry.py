@@ -875,7 +875,6 @@ def test_calibration_mode_forces_closed_loop_high_tcp_safety_offset(monkeypatch,
     execution_data = yaml.safe_load(
         open(image_node_module.EXECUTION_CONFIG_PATH, "r", encoding="utf-8")
     )
-    execution_data["calibration_mode"] = True
     execution_data["servo"]["enabled"] = False
     execution_path = tmp_path / "execution.yaml"
     execution_path.write_text(
@@ -883,6 +882,11 @@ def test_calibration_mode_forces_closed_loop_high_tcp_safety_offset(monkeypatch,
         encoding="utf-8",
     )
     monkeypatch.setattr(image_node_module, "EXECUTION_CONFIG_PATH", str(execution_path))
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "get_param",
+        lambda name, default=None: True if name == "~calibration_mode" else default,
+    )
     monkeypatch.setattr(image_node_module.np, "load", lambda _path: np.eye(4))
     _stub_image_processor_runtime(monkeypatch, image_node_module)
     monkeypatch.setattr(
@@ -968,13 +972,17 @@ def test_calibration_initialization_creates_batch_depth_client_without_waiting(
     execution_data = yaml.safe_load(
         open(image_node_module.EXECUTION_CONFIG_PATH, "r", encoding="utf-8")
     )
-    execution_data["calibration_mode"] = True
     execution_path = tmp_path / "execution.yaml"
     execution_path.write_text(
         yaml.safe_dump(execution_data, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
     monkeypatch.setattr(image_node_module, "EXECUTION_CONFIG_PATH", str(execution_path))
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "get_param",
+        lambda name, default=None: True if name == "~calibration_mode" else default,
+    )
     monkeypatch.setattr(image_node_module.np, "load", lambda _path: np.eye(4))
     monkeypatch.setattr(image_node_module, "YOLO", lambda _path: object())
     monkeypatch.setattr(
@@ -2042,3 +2050,280 @@ def test_calibrated_height_rejects_low_final_pick_z_during_high_preparation(monk
 
     with pytest.raises(ValueError, match="最终抓取 TCP Z=.*低于安全下限"):
         processor.resolve_pick_surface_height(12.2, 33.8, 193.0)
+
+
+def _calibration_prep_processor(module):
+    """构造标定准备编排测试用的轻量图像节点。"""
+    processor = object.__new__(module.ImageProcessor)
+    processor.calibration_mode = True
+    processor.fresh_image_timeout_sec = 0.5
+    processor.task_targets = [object()]
+    processor.board_grid_points = None
+    processor.board_grid_image_shape = None
+    processor.board_grid_image = None
+    processor.block_plane_max_rmse_mm = 1.0
+    processor.get_image_snapshot_newer_than = lambda _stamp: np.zeros(
+        (6, 8, 3),
+        dtype=np.uint8,
+    )
+    return processor
+
+
+def _observed_block(px, py, z=200.0):
+    from image_process_lib.task_planner import ObservedBlock
+
+    return ObservedBlock(
+        category="square",
+        observation_pose=[px, py, z, -180.0, 0.0, 90.0],
+        detected_angle_deg=0.0,
+        pick_surface_z_mm=8.0,
+        pick_surface_z_valid=True,
+        high_detected_pixel_xy=(px, py),
+        high_image_center_xy=(640.0, 360.0),
+    )
+
+
+def _depth_sample_list(count):
+    return [
+        {
+            "pixel": (0.0, 0.0),
+            "world": np.asarray([-300.0, 0.0, 8.0]),
+            "valid_count": 15,
+            "depth_median_mm": 500.0,
+            "depth_mad_mm": 0.2,
+        }
+        for _ in range(count)
+    ]
+
+
+def test_calibration_prep_without_tray_keeps_all_block_targets(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_calibration_prep_no_tray")
+    processor = _calibration_prep_processor(module)
+    blocks = [
+        {"category": "square", "px": float(100 + index * 10), "py": 200.0, "theta": 0.0}
+        for index in range(5)
+    ]
+    processor._detect_blocks_raw = lambda _image: (blocks, [5, 0, 0, 0, 0, 0, 0])
+    processor._detect_board_for_task = lambda _image: (_ for _ in ()).throw(
+        RuntimeError("托盘格点不足")
+    )
+    queried_pixels = []
+    processor._query_stable_world_points = lambda pixels: (
+        queried_pixels.append(list(pixels)) or _depth_sample_list(len(pixels))
+    )
+    observed = [_observed_block(100.0 + index * 10, 200.0) for index in range(5)]
+    processor._build_calibration_block_observed = lambda _blocks, _samples, _shape: observed
+    tray_calls = []
+    processor._build_calibration_tray_targets = lambda *_args: tray_calls.append(True)
+
+    response = processor._prepare_task_locked(types.SimpleNamespace())
+
+    assert response.success is True
+    assert response.task_count == 5
+    assert response.block_count == 5
+    assert response.tray_count == 0
+    assert "未识别到托盘" in response.message
+    assert tray_calls == []
+    assert len(queried_pixels) == 1
+    assert len(queried_pixels[0]) == 5
+    assert [target.target_type for target in processor.task_targets] == ["block"] * 5
+
+
+def test_calibration_prep_with_tray_appends_34_tray_targets(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_calibration_prep_with_tray")
+    from image_process_lib.task_planner import PlacementTarget
+
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    monkeypatch.setattr(
+        image_node_module,
+        "interpolate_grid_point",
+        lambda _grid_points, row, col: (700.0 + row, 300.0 + col),
+    )
+    processor = _calibration_prep_processor(module)
+    blocks = [
+        {"category": "square", "px": 100.0, "py": 100.0, "theta": 0.0},
+        {"category": "square", "px": 200.0, "py": 100.0, "theta": 0.0},
+        {"category": "square", "px": 100.0, "py": 200.0, "theta": 0.0},
+    ]
+    processor._detect_blocks_raw = lambda _image: (blocks, [3, 0, 0, 0, 0, 0, 0])
+    processor._detect_board_for_task = lambda _image: None
+    queried_pixels = []
+    processor._query_stable_world_points = lambda pixels: (
+        queried_pixels.append(list(pixels)) or _depth_sample_list(len(pixels))
+    )
+    observed = [
+        _observed_block(-300.0, 0.0),
+        _observed_block(-250.0, 50.0),
+        _observed_block(-200.0, -20.0),
+    ]
+    processor._build_calibration_block_observed = lambda _blocks, _samples, _shape: observed
+    tray_placements = [
+        PlacementTarget(
+            index,
+            1.0 + index / 10.0,
+            1.0,
+            0.0,
+            "",
+            [-250.0, 20.0, 193.0, -180.0, 0.0, 90.0],
+        )
+        for index in range(34)
+    ]
+    tray_received = {}
+    processor._build_calibration_tray_targets = lambda specs, samples, plane, shape: (
+        tray_received.update({"specs": list(specs), "plane": plane}) or tray_placements
+    )
+
+    response = processor._prepare_task_locked(types.SimpleNamespace())
+
+    assert response.success is True
+    assert response.task_count == 37
+    assert response.block_count == 3
+    assert response.tray_count == 34
+    assert "行列：" in response.message
+    assert len(queried_pixels) == 1
+    assert len(queried_pixels[0]) == 3 + 34
+    assert tray_received["plane"] is not None
+    assert len(tray_received["specs"]) == 34
+    target_types = [target.target_type for target in processor.task_targets]
+    assert target_types == ["block"] * 3 + ["tray"] * 34
+    assert processor.task_targets[3].row == pytest.approx(1.0)
+    assert processor.task_targets[3].col == 1.0
+    assert processor.task_targets[36].row == pytest.approx(4.3)
+
+
+def test_calibration_prep_with_tray_rejects_fewer_than_three_blocks(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_calibration_prep_few_blocks")
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    monkeypatch.setattr(
+        image_node_module,
+        "interpolate_grid_point",
+        lambda _grid_points, row, col: (700.0 + row, 300.0 + col),
+    )
+    processor = _calibration_prep_processor(module)
+    blocks = [
+        {"category": "square", "px": 100.0, "py": 100.0, "theta": 0.0},
+        {"category": "square", "px": 200.0, "py": 100.0, "theta": 0.0},
+    ]
+    processor._detect_blocks_raw = lambda _image: (blocks, [2, 0, 0, 0, 0, 0, 0])
+    processor._detect_board_for_task = lambda _image: None
+    processor._query_stable_world_points = lambda pixels: _depth_sample_list(len(pixels))
+    observed = [_observed_block(-300.0, 0.0), _observed_block(-250.0, 50.0)]
+    processor._build_calibration_block_observed = lambda _blocks, _samples, _shape: observed
+
+    response = processor._prepare_task_locked(types.SimpleNamespace())
+
+    assert response.success is False
+    assert "至少需要 3 个不共线方块" in response.message
+    assert processor.task_targets == []
+
+
+def test_calibration_prep_with_tray_rejects_collinear_blocks(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_calibration_prep_collinear")
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    monkeypatch.setattr(
+        image_node_module,
+        "interpolate_grid_point",
+        lambda _grid_points, row, col: (700.0 + row, 300.0 + col),
+    )
+    processor = _calibration_prep_processor(module)
+    blocks = [
+        {"category": "square", "px": 100.0, "py": 100.0, "theta": 0.0},
+        {"category": "square", "px": 200.0, "py": 100.0, "theta": 0.0},
+        {"category": "square", "px": 300.0, "py": 100.0, "theta": 0.0},
+    ]
+    processor._detect_blocks_raw = lambda _image: (blocks, [3, 0, 0, 0, 0, 0, 0])
+    processor._detect_board_for_task = lambda _image: None
+    processor._query_stable_world_points = lambda pixels: _depth_sample_list(len(pixels))
+    observed = [
+        _observed_block(-300.0, 0.0),
+        _observed_block(-250.0, 0.0),
+        _observed_block(-200.0, 0.0),
+    ]
+    processor._build_calibration_block_observed = lambda _blocks, _samples, _shape: observed
+
+    response = processor._prepare_task_locked(types.SimpleNamespace())
+
+    assert response.success is False
+    assert "不共线" in response.message
+    assert processor.task_targets == []
+
+
+def test_calibration_prep_with_tray_rejects_high_plane_rmse(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_calibration_prep_rmse")
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    monkeypatch.setattr(
+        image_node_module,
+        "interpolate_grid_point",
+        lambda _grid_points, row, col: (700.0 + row, 300.0 + col),
+    )
+    processor = _calibration_prep_processor(module)
+    blocks = [
+        {"category": "square", "px": 100.0, "py": 100.0, "theta": 0.0},
+        {"category": "square", "px": 200.0, "py": 100.0, "theta": 0.0},
+        {"category": "square", "px": 100.0, "py": 200.0, "theta": 0.0},
+        {"category": "square", "px": 200.0, "py": 200.0, "theta": 0.0},
+    ]
+    processor._detect_blocks_raw = lambda _image: (blocks, [4, 0, 0, 0, 0, 0, 0])
+    processor._detect_board_for_task = lambda _image: None
+    processor._query_stable_world_points = lambda pixels: _depth_sample_list(len(pixels))
+    observed = [
+        _observed_block(-300.0, 0.0),
+        _observed_block(-250.0, 50.0),
+        _observed_block(-200.0, -20.0),
+        _observed_block(-250.0, -40.0, z=210.0),
+    ]
+    processor._build_calibration_block_observed = lambda _blocks, _samples, _shape: observed
+
+    response = processor._prepare_task_locked(types.SimpleNamespace())
+
+    assert response.success is False
+    assert "平面 RMSE" in response.message
+    assert processor.task_targets == []
+
+
+def test_task_target_service_returns_calibration_target_type(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_calibration_target_type")
+    processor = object.__new__(module.ImageProcessor)
+
+    def make_target(target_type):
+        return types.SimpleNamespace(
+            pick_observation_pose=[0.0] * 6,
+            place_observation_pose=[0.0] * 6,
+            row=0.0,
+            col=0.0,
+            category="square",
+            detected_angle_deg=0.0,
+            rotation_delta_deg=0.0,
+            pick_surface_z_mm=0.0,
+            pick_surface_z_valid=True,
+            pick_high_detected_pixel_xy=(0.0, 0.0),
+            pick_high_depth_sample_pixel_xy=(0.0, 0.0),
+            pick_high_image_center_xy=(0.0, 0.0),
+            pick_high_world_position=(0.0, 0.0, 0.0),
+            pick_high_world_position_valid=False,
+            pick_rough_localization_source="",
+            pick_depth_valid_frame_count=0,
+            pick_depth_median_mm=0.0,
+            pick_depth_mad_mm=0.0,
+            pick_calibration_target_tcp_z_mm=0.0,
+            place_high_detected_pixel_xy=(0.0, 0.0),
+            place_high_depth_sample_pixel_xy=(0.0, 0.0),
+            place_high_image_center_xy=(0.0, 0.0),
+            place_high_world_position=(0.0, 0.0, 0.0),
+            place_high_world_position_valid=False,
+            place_rough_localization_source="",
+            place_depth_valid_frame_count=0,
+            place_depth_median_mm=0.0,
+            place_depth_mad_mm=0.0,
+            place_calibration_target_tcp_z_mm=0.0,
+            target_type=target_type,
+        )
+
+    processor.task_targets = [make_target("block"), make_target("tray")]
+    assert processor.get_task_target(types.SimpleNamespace(index=0)).target_type == "block"
+    assert processor.get_task_target(types.SimpleNamespace(index=1)).target_type == "tray"
+
+    processor.task_targets = []
+    error_response = processor.get_task_target(types.SimpleNamespace(index=0))
+    assert error_response.success is False
+    assert error_response.target_type == ""
