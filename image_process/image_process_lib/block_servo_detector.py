@@ -1,6 +1,5 @@
 """高位类别/角度先验约束下的低位方块识别。"""
 
-import math
 import time
 
 import cv2
@@ -16,15 +15,13 @@ from image_process_lib.block_category import normalize_category_name
 from image_process_lib.template_config import load_color_segmentation_config, load_template_geometry
 from image_process_lib.template_match.kernels_create import (
     build_angle_values,
-    create_compact_rotation_kernels,
-    get_template_rect_size,
+    create_pick_aligned_kernels,
 )
-from image_process_lib.template_match.template_match import get_rect
+from image_process_lib.template_match.template_match import get_rect, match_pick_aligned
 
 
 _TIMING_STAGE_NAMES = (
     "先验ROI",
-    "ROI矫正",
     "RGB分割",
     "模板生成",
     "张量准备",
@@ -34,7 +31,8 @@ _TIMING_STAGE_NAMES = (
 )
 
 
-_LOW_PREPARED_TEMPLATE_CACHE = {}
+_LOW_PICK_TEMPLATE_CACHE = {}
+_LOW_PICK_TEMPLATE_CACHE_CAP = 16
 
 
 def _create_timing_info(category):
@@ -47,7 +45,7 @@ def _create_timing_info(category):
         "匹配图尺寸": None,
         "模板数量": None,
         "模板核尺寸": None,
-        "匹配模式": "原始方核",
+        "匹配模式": "快速像素匹配",
         "模板缓存": "未使用",
         "前景面积": None,
         "阶段毫秒": {stage_name: None for stage_name in _TIMING_STAGE_NAMES},
@@ -95,111 +93,32 @@ def _make_debug_image(img_bgr):
     return np.copy(img_bgr)
 
 
-def _clip_bbox_from_points(points, image_shape, expand_px=0):
-    """根据多边形点生成裁剪框，自动限制在图像范围内。"""
-    image_h, image_w = image_shape[:2]
-    expand_px = int(round(float(expand_px)))
-    x1 = max(0, int(np.floor(np.min(points[:, 0]))) - expand_px)
-    y1 = max(0, int(np.floor(np.min(points[:, 1]))) - expand_px)
-    x2 = min(image_w, int(np.ceil(np.max(points[:, 0]))) + expand_px + 1)
-    y2 = min(image_h, int(np.ceil(np.max(points[:, 1]))) + expand_px + 1)
-    return x1, y1, x2, y2
-
-
-def _build_rectified_roi_transform(center, expanded_size, high_theta_deg):
-    """构造原图到转正紧凑 ROI 的仿射变换及其逆变换。"""
-    roi_w = max(1, int(math.ceil(float(expanded_size[0]))))
-    roi_h = max(1, int(math.ceil(float(expanded_size[1]))))
-    matrix = cv2.getRotationMatrix2D(center, float(high_theta_deg), 1.0)
-    matrix[0, 2] += (roi_w - 1) / 2.0 - float(center[0])
-    matrix[1, 2] += (roi_h - 1) / 2.0 - float(center[1])
-    return matrix.astype(np.float32), cv2.invertAffineTransform(matrix).astype(np.float32), (roi_w, roi_h)
-
-
-def _warp_rectified_roi(img_bgr, matrix, roi_size):
-    """从原图一次旋转并裁出水平紧凑 ROI。"""
-    return cv2.warpAffine(
-        img_bgr,
-        matrix,
-        roi_size,
-        flags=cv2.INTER_NEAREST,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0),
-    )
-
-
-def _transform_point(point, matrix):
-    """使用仿射矩阵变换一个像素点。"""
-    point_array = np.asarray([[point]], dtype=np.float32)
-    transformed = cv2.transform(point_array, matrix)
-    return float(transformed[0, 0, 0]), float(transformed[0, 0, 1])
-
-
-def _transform_angle(angle_deg, inverse_matrix):
-    """把转正 ROI 内的方向角经逆仿射矩阵恢复到原图坐标。"""
-    angle_rad = math.radians(float(angle_deg))
-    direction = np.array([math.cos(angle_rad), math.sin(angle_rad)], dtype=np.float32)
-    source_direction = inverse_matrix[:, :2] @ direction
-    theta = math.degrees(math.atan2(float(source_direction[1]), float(source_direction[0])))
-    if theta <= -180.0:
-        theta += 360.0
-    elif theta > 180.0:
-        theta -= 360.0
-    return theta
-
-
-def _get_low_prepared_templates(block_px, connector_px, category, angle_step, angle_window):
-    """按低位残余角度惰性生成并缓存紧凑 CUDA 模板。"""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    angles = build_angle_values(
-        category,
-        angle_step=angle_step,
-        angle_center=0.0,
-        angle_window=angle_window,
-    )
+def _get_low_pick_templates(block_px, connector_px, category, angles, device, kernel_safety_margin_px):
+    """按设备、类别、几何、实际角度元组惰性生成并缓存抓取点对齐公共核。"""
     cache_key = (
         str(device),
         str(category),
         int(block_px),
         int(connector_px),
         tuple(round(float(angle), 6) for angle in angles),
+        int(kernel_safety_margin_px),
     )
-    prepared = _LOW_PREPARED_TEMPLATE_CACHE.get(cache_key)
-    if prepared is not None:
-        return prepared, "命中"
-
-    kernels, kernel_size, angles = create_compact_rotation_kernels(
+    cached = _LOW_PICK_TEMPLATE_CACHE.get(cache_key)
+    if cached is not None:
+        _LOW_PICK_TEMPLATE_CACHE[cache_key] = _LOW_PICK_TEMPLATE_CACHE.pop(cache_key)
+        return cached, "命中"
+    prepared = create_pick_aligned_kernels(
+        category,
         block_px,
         connector_px,
-        category,
+        angles,
         device=device,
-        angle_values=angles,
+        safety_margin_px=kernel_safety_margin_px,
     )
-    prepared = {
-        "kernels": kernels,
-        "kernel_size": kernel_size,
-        "angles": angles,
-    }
-    _LOW_PREPARED_TEMPLATE_CACHE[cache_key] = prepared
+    _LOW_PICK_TEMPLATE_CACHE[cache_key] = prepared
+    while len(_LOW_PICK_TEMPLATE_CACHE) > _LOW_PICK_TEMPLATE_CACHE_CAP:
+        _LOW_PICK_TEMPLATE_CACHE.pop(next(iter(_LOW_PICK_TEMPLATE_CACHE)))
     return prepared, "未命中"
-
-
-def _draw_rectified_template_on_original(debug_image, match_debug_output, inverse_matrix):
-    """把转正 ROI 内的最佳模板轮廓映回原图调试画面。"""
-    if debug_image is None or not match_debug_output:
-        return
-    best_kernel = match_debug_output.get("best_kernel")
-    template_top_left = match_debug_output.get("template_top_left")
-    if best_kernel is None or template_top_left is None:
-        return
-
-    contours, _ = cv2.findContours(best_kernel, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    offset = np.asarray(template_top_left, dtype=np.float32)
-    transformed_contours = []
-    for contour in contours:
-        local_contour = contour.astype(np.float32) + offset.reshape(1, 1, 2)
-        transformed_contours.append(cv2.transform(local_contour, inverse_matrix).astype(np.int32))
-    cv2.drawContours(debug_image, transformed_contours, -1, (0, 255, 0), 1)
 
 
 def _put_chinese_text(image, text, org, color, font_size=22):
@@ -307,8 +226,12 @@ def _make_block_debug_panel(
     return panel
 
 
-def _segment_roi_by_local_rgb_color(roi_bgr, category, return_stages=False):
-    """在低位 ROI 内用局部 RGB 颜色种子分割目标方块。"""
+def _segment_roi_by_local_rgb_color(roi_bgr, category, return_stages=False, search_center=None):
+    """在低位 ROI 内用局部 RGB 颜色种子分割目标方块。
+
+    search_center 为 ROI 内 seed 搜索中心（如相机中心在 ROI 中的坐标）；
+    None 时使用 ROI 几何中心。
+    """
     if roi_bgr is None or roi_bgr.size == 0:
         raise ValueError("低位 ROI 为空，无法进行 RGB 颜色分割")
 
@@ -321,8 +244,12 @@ def _segment_roi_by_local_rgb_color(roi_bgr, category, return_stages=False):
 
     roi_rgb = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
     roi_h, roi_w = roi_rgb.shape[:2]
-    center_x = roi_w / 2.0
-    center_y = roi_h / 2.0
+    if search_center is None:
+        center_x = roi_w / 2.0
+        center_y = roi_h / 2.0
+    else:
+        center_x = float(search_center[0])
+        center_y = float(search_center[1])
     search_x1 = max(0, int(np.floor(center_x - seed_search_half_size)))
     search_y1 = max(0, int(np.floor(center_y - seed_search_half_size)))
     search_x2 = min(roi_w, int(np.ceil(center_x + seed_search_half_size + 1)))
@@ -523,6 +450,101 @@ def _draw_prior_roi_debug(debug_image, roi_box, match_point=None, category="", t
         )
 
 
+def _attempt_legacy_slow(
+    img_bgr,
+    center_x,
+    center_y,
+    common_pick_x,
+    common_pick_y,
+    radius_px,
+    kernel_w,
+    kernel_h,
+    block_px,
+    connector_px,
+    category,
+    high_theta_deg,
+    angle_step,
+    angle_window,
+    min_foreground_area,
+    debug_image,
+    debug_enabled,
+    timing_info,
+):
+    """慢速兜底：在轴对齐 ROI 上用旧全方形核 + same-padding 匹配，不做任何旋转。"""
+    roi_w = kernel_w + 2 * radius_px
+    roi_h = kernel_h + 2 * radius_px
+    x1 = int(round(center_x - common_pick_x - radius_px))
+    y1 = int(round(center_y - common_pick_y - radius_px))
+    crop_x1 = max(0, x1)
+    crop_y1 = max(0, y1)
+    crop_x2 = min(img_bgr.shape[1], x1 + roi_w)
+    crop_y2 = min(img_bgr.shape[0], y1 + roi_h)
+    if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
+        return None, "ROI 越界为空"
+    roi_bgr = img_bgr[crop_y1:crop_y2, crop_x1:crop_x2]
+    seed_center = (center_x - crop_x1, center_y - crop_y1)
+    segmentation_started_at = time.perf_counter() if timing_info is not None else None
+    try:
+        if debug_enabled:
+            foreground_mask, mask_stages = _segment_roi_by_local_rgb_color(
+                roi_bgr,
+                category,
+                return_stages=True,
+                search_center=seed_center,
+            )
+        else:
+            foreground_mask = _segment_roi_by_local_rgb_color(
+                roi_bgr,
+                category,
+                search_center=seed_center,
+            )
+            mask_stages = None
+    except ValueError as exc:
+        _add_timing_stage(timing_info, "RGB分割", segmentation_started_at)
+        return None, f"seed 搜索失败: {exc}"
+    _add_timing_stage(timing_info, "RGB分割", segmentation_started_at)
+    foreground_area = int(cv2.countNonZero(foreground_mask))
+    if foreground_area < int(min_foreground_area):
+        return None, f"低位 ROI 前景面积过小: {foreground_area}"
+    match_debug_output = {}
+    rect = get_rect(
+        foreground_mask,
+        block_px,
+        connector_px,
+        category,
+        debug_image if debug_enabled else None,
+        crop_x1,
+        crop_y1,
+        angle_step=angle_step,
+        angle_center=-float(high_theta_deg),
+        angle_window=angle_window,
+        debug_output=match_debug_output,
+        timing_output=timing_info,
+    )
+    box = np.intp(cv2.boxPoints(rect))
+    local_px, local_py = float(rect[0][0]), float(rect[0][1])
+    if category in ("L_yellow", "L_blue"):
+        local_px, local_py = coreect_LL_location(box, foreground_mask, rect)
+    theta = float(rect[2])
+    if theta < -180:
+        theta += 360
+    return (
+        {
+            "crop_x1": crop_x1,
+            "crop_y1": crop_y1,
+            "local_px": local_px,
+            "local_py": local_py,
+            "theta": theta,
+            "roi_bgr": roi_bgr,
+            "foreground_mask": foreground_mask,
+            "mask_stages": mask_stages,
+            "match_debug_output": match_debug_output,
+            "roi_box": (x1, y1, roi_w, roi_h),
+        },
+        None,
+    )
+
+
 def detect_block_with_high_prior_roi(
     img_bgr,
     template_geometry=None,
@@ -531,19 +553,23 @@ def detect_block_with_high_prior_roi(
     high_theta_deg=0.0,
     angle_window=10.0,
     angle_step=1.0,
-    roi_expand_px=50,
+    search_radius_px=30,
+    fallback_search_radius_px=50,
+    boundary_guard_px=3,
+    kernel_safety_margin_px=2,
+    legacy_fallback_enabled=True,
     white_s_max=45,
     white_v_min=180,
     min_foreground_area=200,
     debug_enabled=True,
     timing_enabled=False,
-    rectified_roi_enabled=False,
 ):
-    """低位方块精定位：使用高位类别和角度生成 ROI 后直接模板匹配。
+    """低位方块精定位：取消转正，在轴对齐 ROI 上用抓取点对齐紧凑核无 padding 匹配。
 
-    低位画面中相机已在方块正上方，不再重新 YOLO 检测类别和框。
-    这里用画面中心、高位旋转角和低位模板尺寸估算旋转矩形 ROI；
-    可选地将该 ROI 直接旋正为紧凑矩形，并只匹配高位角度附近的残余角度。
+    第一级搜索半径 search_radius_px，卷积输出固定为 2*R+1 的方形；
+    结果触边、前景触边、ROI 被画面截断或分割/面积检查失败时扩大为
+    fallback_search_radius_px；仍异常才走旧全方形核 same-padding 慢速兜底。
+    每帧流程不调用任何仿射变换，坐标只经过整数裁剪偏移与模板锚点相加。
     """
     timing_info = _create_timing_info("") if timing_enabled else None
     debug_started_at = time.perf_counter() if timing_info is not None else None
@@ -570,193 +596,235 @@ def detect_block_with_high_prior_roi(
         template_geometry = load_template_geometry(template_profile)
     block_px = template_geometry["block_px"]
     connector_px = template_geometry["connector_px"]
-    rect_size = get_template_rect_size(category, block_px, connector_px)
-
-    roi_started_at = time.perf_counter() if timing_info is not None else None
     image_h, image_w = img_bgr.shape[:2]
-    center = (image_w / 2.0, image_h / 2.0)
+    center_x, center_y = image_w / 2.0, image_h / 2.0
     high_theta_deg = float(high_theta_deg)
-    roi_expand_px = max(0.0, float(roi_expand_px))
-    expanded_size = (
-        float(rect_size[0]) + 2.0 * roi_expand_px,
-        float(rect_size[1]) + 2.0 * roi_expand_px,
+    search_radius_px = max(0, int(round(float(search_radius_px))))
+    fallback_search_radius_px = max(
+        search_radius_px, int(round(float(fallback_search_radius_px)))
     )
-    roi_rect = (center, expanded_size, high_theta_deg)
-    roi_box = cv2.boxPoints(roi_rect)
-    crop_x1, crop_y1, crop_x2, crop_y2 = _clip_bbox_from_points(roi_box, img_bgr.shape)
-    if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
-        _add_timing_stage(timing_info, "先验ROI", roi_started_at)
-        return _empty_detection(
-            "低位先验 ROI 越界为空",
-            debug_image,
-            timing_info=_finalize_timing_info(timing_info, "ROI越界"),
-        )
-
-    rectified_matrix = None
-    inverse_rectified_matrix = None
-    if rectified_roi_enabled:
-        rectify_started_at = time.perf_counter() if timing_info is not None else None
-        rectified_matrix, inverse_rectified_matrix, rectified_roi_size = _build_rectified_roi_transform(
-            center,
-            expanded_size,
-            high_theta_deg,
-        )
-        roi_bgr = _warp_rectified_roi(img_bgr, rectified_matrix, rectified_roi_size)
-        _add_timing_stage(timing_info, "ROI矫正", rectify_started_at)
-        if timing_info is not None:
-            timing_info["匹配模式"] = "转正紧凑核"
-            timing_info["ROI尺寸"] = (int(crop_x2 - crop_x1), int(crop_y2 - crop_y1))
-    else:
-        roi_bgr = img_bgr[crop_y1:crop_y2, crop_x1:crop_x2]
-        if timing_info is not None:
-            timing_info["ROI尺寸"] = (int(roi_bgr.shape[1]), int(roi_bgr.shape[0]))
-    roi_debug_image = None
-    debug_started_at = time.perf_counter() if timing_info is not None else None
-    if debug_enabled:
-        roi_debug_image = _make_debug_image(roi_bgr) if rectified_roi_enabled else np.copy(debug_image)
-        if rectified_roi_enabled:
-            cv2.drawMarker(
-                roi_debug_image,
-                (roi_bgr.shape[1] // 2, roi_bgr.shape[0] // 2),
-                (255, 0, 0),
-                markerType=cv2.MARKER_CROSS,
-                markerSize=24,
-                thickness=2,
-            )
-            _put_chinese_text(roi_debug_image, "转正紧凑ROI", (12, 12), (255, 0, 0), font_size=22)
-        else:
-            _draw_prior_roi_debug(roi_debug_image, roi_box, category=category, theta=high_theta_deg)
-    _add_timing_stage(timing_info, "检测调试图", debug_started_at)
-    roi_polygon_mask = None
-    if not rectified_roi_enabled:
-        local_roi_box = roi_box - np.array([crop_x1, crop_y1], dtype=np.float32)
-        roi_polygon_mask = np.zeros(roi_bgr.shape[:2], dtype=np.uint8)
-        cv2.fillConvexPoly(roi_polygon_mask, np.intp(local_roi_box), 255)
-    _add_timing_stage(timing_info, "先验ROI", roi_started_at)
-
-    segmentation_started_at = time.perf_counter() if timing_info is not None else None
-    if debug_enabled:
-        foreground_mask, mask_stages = _segment_roi_by_local_rgb_color(
-            roi_bgr,
-            category,
-            return_stages=True,
-        )
-    else:
-        foreground_mask = _segment_roi_by_local_rgb_color(roi_bgr, category)
-        mask_stages = None
-        roi_seed_debug = None
-    _add_timing_stage(timing_info, "RGB分割", segmentation_started_at)
-
-    debug_started_at = time.perf_counter() if timing_info is not None else None
-    if debug_enabled:
-        roi_seed_debug = _draw_seed_patch_debug(roi_bgr, mask_stages)
-    _add_timing_stage(timing_info, "检测调试图", debug_started_at)
+    boundary_guard_px = max(0, int(round(float(boundary_guard_px))))
+    min_foreground_area = int(min_foreground_area)
 
     roi_started_at = time.perf_counter() if timing_info is not None else None
-    if roi_polygon_mask is not None:
-        foreground_mask = cv2.bitwise_and(foreground_mask, roi_polygon_mask)
-    foreground_area = int(cv2.countNonZero(foreground_mask))
-    _add_timing_stage(timing_info, "先验ROI", roi_started_at)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    angles = build_angle_values(
+        category,
+        angle_step=angle_step,
+        angle_center=-high_theta_deg,
+        angle_window=angle_window,
+    )
+    template_started_at = time.perf_counter() if timing_info is not None else None
+    prepared, cache_status = _get_low_pick_templates(
+        block_px, connector_px, category, angles, device, kernel_safety_margin_px,
+    )
     if timing_info is not None:
-        timing_info["前景面积"] = foreground_area
-    if foreground_area < int(min_foreground_area):
-        debug_panel = None
-        debug_started_at = time.perf_counter() if timing_info is not None else None
-        if debug_enabled:
-            _draw_prior_roi_debug(debug_image, roi_box, category=category, theta=high_theta_deg)
-            debug_panel = _make_block_debug_panel(
-                roi_debug_image,
-                roi_seed_debug=roi_seed_debug,
-                raw_mask=mask_stages["raw_mask"],
-                final_mask=foreground_mask,
-                match_mask_debug=_draw_template_match_on_mask(foreground_mask, None),
-                match_debug=debug_image,
-                message=_format_seed_debug_message(
-                    category,
-                    foreground_area,
-                    mask_stages,
-                    prefix="前景面积过小",
-                ),
-            )
-        _add_timing_stage(timing_info, "检测调试图", debug_started_at)
-        return _empty_detection(
-            f"低位 ROI 前景面积过小: {foreground_area}",
-            debug_image,
-            debug_panel=debug_panel,
-            timing_info=_finalize_timing_info(timing_info, "前景面积过小"),
-        )
+        timing_info["模板缓存"] = cache_status
+        if cache_status == "未命中":
+            if device == "cuda":
+                torch.cuda.synchronize()
+            timing_info["阶段毫秒"]["模板生成"] = (
+                time.perf_counter() - template_started_at
+            ) * 1000.0
+        else:
+            timing_info["阶段毫秒"]["模板生成"] = 0.0
+    kernels = prepared["kernels"]
+    kernel_h, kernel_w = prepared["kernel_size"]
+    rect_center_anchors = prepared["rect_center_anchors"]
+    pick_anchors = prepared["pick_anchors"]
+    common_pick_x, common_pick_y = prepared["pick_anchor"]
+    _add_timing_stage(timing_info, "先验ROI", roi_started_at)
 
-    prepared_templates = None
-    if rectified_roi_enabled:
-        template_started_at = time.perf_counter() if timing_info is not None else None
-        prepared_templates, cache_status = _get_low_prepared_templates(
+    def _roi_box(radius_px):
+        """按抓取点锚点计算轴对齐 ROI，返回裁剪范围、理论 ROI 与是否被画面截断。"""
+        roi_w = kernel_w + 2 * radius_px
+        roi_h = kernel_h + 2 * radius_px
+        x1 = int(round(center_x - common_pick_x - radius_px))
+        y1 = int(round(center_y - common_pick_y - radius_px))
+        x2, y2 = x1 + roi_w, y1 + roi_h
+        clipped = x1 < 0 or y1 < 0 or x2 > image_w or y2 > image_h
+        crop_x1 = max(0, x1)
+        crop_y1 = max(0, y1)
+        crop_x2 = min(image_w, x2)
+        crop_y2 = min(image_h, y2)
+        return (crop_x1, crop_y1, crop_x2, crop_y2), (x1, y1, roi_w, roi_h), clipped
+
+    last_state = {"roi_size": None, "foreground_area": None}
+
+    def _attempt_fast(radius_px):
+        """一级/二级快速匹配；返回 (成功信息 dict, 失败原因)。"""
+        (crop_x1, crop_y1, crop_x2, crop_y2), (roi_x1, roi_y1, roi_w, roi_h), clipped = _roi_box(
+            radius_px
+        )
+        last_state["roi_size"] = (roi_w, roi_h)
+        if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
+            return None, "ROI 越界为空"
+        if clipped:
+            return None, "ROI 被画面边界截断"
+        roi_bgr = img_bgr[crop_y1:crop_y2, crop_x1:crop_x2]
+        segmentation_started_at = time.perf_counter() if timing_info is not None else None
+        try:
+            if debug_enabled:
+                foreground_mask, mask_stages = _segment_roi_by_local_rgb_color(
+                    roi_bgr,
+                    category,
+                    return_stages=True,
+                    search_center=(common_pick_x + radius_px, common_pick_y + radius_px),
+                )
+            else:
+                foreground_mask = _segment_roi_by_local_rgb_color(
+                    roi_bgr,
+                    category,
+                    search_center=(common_pick_x + radius_px, common_pick_y + radius_px),
+                )
+                mask_stages = None
+        except ValueError as exc:
+            _add_timing_stage(timing_info, "RGB分割", segmentation_started_at)
+            return None, f"seed 搜索失败: {exc}"
+        _add_timing_stage(timing_info, "RGB分割", segmentation_started_at)
+        foreground_area = int(cv2.countNonZero(foreground_mask))
+        last_state["foreground_area"] = foreground_area
+        if foreground_area < min_foreground_area:
+            return None, f"低位 ROI 前景面积过小: {foreground_area}"
+        match_debug_output = {}
+        result = match_pick_aligned(
+            foreground_mask,
+            kernels,
+            (kernel_h, kernel_w),
+            prepared["angles"],
+            rect_center_anchors,
+            pick_anchors,
+            debug_output=match_debug_output,
+            timing_output=timing_info,
+        )
+        out_x, out_y = result["out_position"]
+        output_size = 2 * radius_px
+        # 只有一级检查结果是否贴近输出边界；二级本身即设计最大搜索范围，
+        # 一级因触边升级后，±fallback_search_radius_px 内的结果直接接受。
+        # 分割前景的散点噪声不参与判定：模板匹配对散点噪声不敏感，
+        # 目标是否仍在搜索范围内由结果位置与 ROI 截断两个检查保证。
+        if radius_px == search_radius_px and (
+            out_x <= boundary_guard_px
+            or out_y <= boundary_guard_px
+            or out_x >= output_size - boundary_guard_px
+            or out_y >= output_size - boundary_guard_px
+        ):
+            return None, "匹配结果贴近卷积输出边界"
+        return {
+            "result": result,
+            "match_debug_output": match_debug_output,
+            "roi_bgr": roi_bgr,
+            "foreground_mask": foreground_mask,
+            "mask_stages": mask_stages,
+            "crop_x1": crop_x1,
+            "crop_y1": crop_y1,
+            "roi_box": (roi_x1, roi_y1, roi_w, roi_h),
+        }, None
+
+    matched = None
+    match_mode = ""
+    fast_fail_reason = None
+    for radius_px, mode_name in (
+        (search_radius_px, f"快速{search_radius_px}像素"),
+        (fallback_search_radius_px, f"扩大{fallback_search_radius_px}像素"),
+    ):
+        if radius_px <= 0:
+            continue
+        attempt, fail_reason = _attempt_fast(radius_px)
+        if attempt is not None:
+            matched = attempt
+            match_mode = mode_name
+            break
+        if fail_reason is not None:
+            fast_fail_reason = fail_reason
+
+    legacy_info = None
+    if matched is None and legacy_fallback_enabled:
+        match_mode = "慢速兜底"
+        legacy_info, legacy_fail_reason = _attempt_legacy_slow(
+            img_bgr,
+            center_x,
+            center_y,
+            common_pick_x,
+            common_pick_y,
+            fallback_search_radius_px,
+            kernel_w,
+            kernel_h,
             block_px,
             connector_px,
             category,
+            high_theta_deg,
             angle_step,
             angle_window,
+            min_foreground_area,
+            debug_image,
+            debug_enabled,
+            timing_info,
         )
+        if legacy_info is None:
+            fast_fail_reason = legacy_fail_reason or "慢速兜底失败"
+    elif matched is None:
+        fast_fail_reason = "慢速兜底已禁用"
+
+    if matched is None and legacy_info is None:
+        status = "失败"
+        if "前景面积过小" in fast_fail_reason:
+            status = "前景面积过小"
         if timing_info is not None:
-            if cache_status == "未命中":
-                if prepared_templates["kernels"].device.type == "cuda":
-                    torch.cuda.synchronize()
-                timing_info["阶段毫秒"]["模板生成"] = (
-                    time.perf_counter() - template_started_at
-                ) * 1000.0
-            timing_info["模板缓存"] = cache_status
-        template_angle_center = 0.0
-    else:
-        # get_rect 内部模板角度为逆时针正；返回的 OpenCV 矩形角度是相反数。
-        template_angle_center = -high_theta_deg
-    match_debug_output = {} if debug_enabled else None
-    rect = get_rect(
-        foreground_mask,
-        block_px,
-        connector_px,
-        category,
-        None if rectified_roi_enabled else debug_image,
-        0 if rectified_roi_enabled else crop_x1,
-        0 if rectified_roi_enabled else crop_y1,
-        angle_step=angle_step,
-        angle_center=template_angle_center,
-        angle_window=angle_window,
-        debug_output=match_debug_output,
-        timing_output=timing_info,
-        prepared_templates=prepared_templates,
-    )
-    debug_started_at = time.perf_counter() if timing_info is not None else None
-    match_mask_debug = (
-        _draw_template_match_on_mask(foreground_mask, match_debug_output)
-        if debug_enabled else None
-    )
-    _add_timing_stage(timing_info, "检测调试图", debug_started_at)
+            timing_info["ROI尺寸"] = last_state["roi_size"]
+            timing_info["前景面积"] = last_state["foreground_area"]
+        return _empty_detection(
+            fast_fail_reason,
+            debug_image,
+            timing_info=_finalize_timing_info(timing_info, status),
+        )
+
+    # 只有快速路径未在第一级直接成功时，才记录失败原因，便于诊断兜底触发。
+    if fast_fail_reason is not None and timing_info is not None:
+        timing_info["快速路径失败原因"] = fast_fail_reason
 
     postprocess_started_at = time.perf_counter() if timing_info is not None else None
-    box = cv2.boxPoints(rect)
-    box = np.intp(box)
-    local_px, local_py = float(rect[0][0]), float(rect[0][1])
-    if category in ("L_yellow", "L_blue"):
-        local_px, local_py = coreect_LL_location(box, foreground_mask, rect)
-
-    if rectified_roi_enabled:
-        px, py = _transform_point((local_px, local_py), inverse_rectified_matrix)
-        theta = _transform_angle(rect[2], inverse_rectified_matrix)
-    else:
-        px = local_px + crop_x1
-        py = local_py + crop_y1
-        theta = rect[2]
+    if matched is not None:
+        result = matched["result"]
+        pick_x, pick_y = result["pick_point"]
+        px = float(matched["crop_x1"] + pick_x)
+        py = float(matched["crop_y1"] + pick_y)
+        theta = -result["angle"]
         if theta < -180:
             theta += 360
+        roi_bgr = matched["roi_bgr"]
+        foreground_mask = matched["foreground_mask"]
+        mask_stages = matched["mask_stages"]
+        match_debug_output = matched["match_debug_output"]
+        roi_box = matched["roi_box"]
+        crop_x1 = matched["crop_x1"]
+        crop_y1 = matched["crop_y1"]
+    else:
+        px = float(legacy_info["crop_x1"] + legacy_info["local_px"])
+        py = float(legacy_info["crop_y1"] + legacy_info["local_py"])
+        theta = float(legacy_info["theta"])
+        roi_bgr = legacy_info["roi_bgr"]
+        foreground_mask = legacy_info["foreground_mask"]
+        mask_stages = legacy_info["mask_stages"]
+        match_debug_output = legacy_info["match_debug_output"]
+        roi_box = legacy_info["roi_box"]
+        crop_x1 = legacy_info["crop_x1"]
+        crop_y1 = legacy_info["crop_y1"]
+    foreground_area = int(cv2.countNonZero(foreground_mask))
+    if timing_info is not None:
+        timing_info["匹配模式"] = match_mode
+        timing_info["ROI尺寸"] = (int(roi_bgr.shape[1]), int(roi_bgr.shape[0]))
+        timing_info["前景面积"] = foreground_area
     _add_timing_stage(timing_info, "匹配收尾", postprocess_started_at)
 
     debug_panel = None
     debug_started_at = time.perf_counter() if timing_info is not None else None
     if debug_enabled:
-        if rectified_roi_enabled:
-            _draw_rectified_template_on_original(debug_image, match_debug_output, inverse_rectified_matrix)
+        roi_seed_debug = _draw_seed_patch_debug(roi_bgr, mask_stages)
+        match_mask_debug = _draw_template_match_on_mask(foreground_mask, match_debug_output)
         cv2.drawMarker(
             debug_image,
-            (int(center[0]), int(center[1])),
+            (int(center_x), int(center_y)),
             (255, 0, 0),
             markerType=cv2.MARKER_CROSS,
             markerSize=24,
@@ -764,20 +832,24 @@ def detect_block_with_high_prior_roi(
         )
         cv2.line(
             debug_image,
-            (int(center[0]), int(center[1])),
+            (int(center_x), int(center_y)),
             (int(px), int(py)),
             (255, 0, 0),
             1,
         )
+        roi_x1, roi_y1, roi_w, roi_h = roi_box
+        roi_box_points = cv2.boxPoints(
+            ((roi_x1 + roi_w / 2.0, roi_y1 + roi_h / 2.0), (roi_w, roi_h), 0.0)
+        )
         _draw_prior_roi_debug(
             debug_image,
-            roi_box,
+            roi_box_points,
             match_point=(px, py),
             category=category,
             theta=theta,
         )
         debug_panel = _make_block_debug_panel(
-            roi_debug_image,
+            debug_image,
             roi_seed_debug=roi_seed_debug,
             raw_mask=mask_stages["raw_mask"],
             final_mask=foreground_mask,
@@ -786,11 +858,15 @@ def detect_block_with_high_prior_roi(
             # 以图像中心为零点显示视觉伺服使用的像素误差，便于逐帧核对修正方向。
             message=(
                 f"{_format_seed_debug_message(category, foreground_area, mask_stages)} | "
-                f"像素误差：px={px - center[0]:+.1f}，py={py - center[1]:+.1f}"
+                f"模式={match_mode} | "
+                f"像素误差：px={px - center_x:+.1f}，py={py - center_y:+.1f}"
             ),
         )
     _add_timing_stage(timing_info, "检测调试图", debug_started_at)
 
+    success_message = f"低位先验 ROI 模板匹配成功（{match_mode}）"
+    if legacy_info is not None and fast_fail_reason is not None:
+        success_message += f"；快速路径失败: {fast_fail_reason}"
     return {
         "found": True,
         "category": category,
@@ -800,6 +876,7 @@ def detect_block_with_high_prior_roi(
         "score": 1.0,
         "debug_image": debug_image,
         "debug_panel": debug_panel,
-        "message": "低位先验 ROI 模板匹配成功",
+        "match_debug": match_debug_output,
+        "message": success_message,
         "timing": _finalize_timing_info(timing_info, "成功"),
     }

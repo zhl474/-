@@ -309,10 +309,31 @@ class ImageProcessor:
         self.board_low_max_dot_aspect_ratio = rospy.get_param(
             "~board_low_max_dot_aspect_ratio", board_servo["max_dot_aspect_ratio"]
         )
-        self.block_low_roi_expand_px = rospy.get_param("~block_low_roi_expand_px", block_servo["roi_expand_px"])
-        self.block_low_rectified_roi_enabled = rospy.get_param(
-            "~block_low_rectified_roi_enabled",
-            block_servo.get("rectified_roi_enabled", False),
+        def low_match_int_param(name, default, positive=False):
+            value = rospy.get_param(f"~block_low_{name}", block_servo.get(name, default))
+            if isinstance(value, bool):
+                raise ValueError(f"block_servo.{name} 必须是非负整数")
+            try:
+                number = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"block_servo.{name} 必须是非负整数") from exc
+            if not math.isfinite(number) or not number.is_integer() or number < 0:
+                raise ValueError(f"block_servo.{name} 必须是非负整数")
+            if positive and number <= 0:
+                raise ValueError(f"block_servo.{name} 必须是正整数")
+            return int(number)
+
+        self.block_low_search_radius_px = low_match_int_param("search_radius_px", 30)
+        self.block_low_fallback_search_radius_px = low_match_int_param("fallback_search_radius_px", 50)
+        if self.block_low_fallback_search_radius_px < self.block_low_search_radius_px:
+            raise ValueError("block_servo.fallback_search_radius_px 必须大于等于 search_radius_px")
+        self.block_low_boundary_guard_px = low_match_int_param("boundary_guard_px", 3)
+        self.block_low_kernel_safety_margin_px = low_match_int_param("kernel_safety_margin_px", 2)
+        self.block_low_legacy_fallback_enabled = bool(
+            rospy.get_param(
+                "~block_low_legacy_fallback_enabled",
+                block_servo.get("legacy_fallback_enabled", True),
+            )
         )
         self.block_low_white_s_max = rospy.get_param("~block_low_white_s_max", block_servo["white_s_max"])
         self.block_low_white_v_min = rospy.get_param("~block_low_white_v_min", block_servo["white_v_min"])
@@ -664,7 +685,6 @@ class ImageProcessor:
         print(
             f"配置={format_ms(config_ms)}，"
             f"先验ROI={format_ms(stages_ms.get('先验ROI'))}，"
-            f"ROI矫正={format_ms(stages_ms.get('ROI矫正'))}，"
             f"RGB分割={format_ms(stages_ms.get('RGB分割'))}，"
             f"模板生成={format_ms(stages_ms.get('模板生成'))}，"
             f"张量准备={format_ms(stages_ms.get('张量准备'))}，"
@@ -1484,13 +1504,16 @@ class ImageProcessor:
                 high_theta_deg=float(angle_center),
                 angle_window=float(angle_window),
                 angle_step=float(angle_step),
-                roi_expand_px=self.block_low_roi_expand_px,
+                search_radius_px=self.block_low_search_radius_px,
+                fallback_search_radius_px=self.block_low_fallback_search_radius_px,
+                boundary_guard_px=self.block_low_boundary_guard_px,
+                kernel_safety_margin_px=self.block_low_kernel_safety_margin_px,
+                legacy_fallback_enabled=self.block_low_legacy_fallback_enabled,
                 white_s_max=self.block_low_white_s_max,
                 white_v_min=self.block_low_white_v_min,
                 min_foreground_area=self.block_low_min_foreground_area,
                 debug_enabled=self.visual_servo_debug_enabled,
                 timing_enabled=self.visual_servo_timing_debug,
-                rectified_roi_enabled=self.block_low_rectified_roi_enabled,
             )
             detection_finished_at = time.perf_counter()
             block_timing = target_block.get("timing")

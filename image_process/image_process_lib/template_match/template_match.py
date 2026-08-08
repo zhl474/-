@@ -111,6 +111,7 @@ def match_template(
 
     best_match = {
         "angle": float(angles[angle_idx.item()]),
+        "angle_index": angle_idx.item(),
         "y": top.item(),
         "x": left.item(),
         "score": feature_map[angle_idx, top, left].item(),
@@ -291,6 +292,82 @@ def _match_rect_screened(
         )
     _finish_timing_stage(timing_output, "检测调试图", debug_started_at, device)
     return rect
+
+
+def match_pick_aligned(
+    mask,
+    kernels,
+    kernel_size,
+    angles,
+    rect_center_anchors,
+    pick_anchors,
+    debug_output=None,
+    timing_output=None,
+):
+    """低位抓取点对齐匹配：无 padding、stride=1。
+
+    mask 为 ROI 内二值前景（0/255）；kernels 为按抓取点对齐的公共候选核。
+    返回矩形中心与抓取点（均在 mask 坐标）、角度与分数。
+    """
+    if mask is None or getattr(mask, "ndim", 0) != 2 or mask.size == 0:
+        raise ValueError("低位匹配输入 Mask 为空")
+    device = str(kernels.device.type)
+
+    tensor_started_at = time.perf_counter() if timing_output is not None else None
+    image_tensor = load_img(np.asarray(mask), device=device)
+    _finish_timing_stage(timing_output, "张量准备", tensor_started_at, device)
+
+    match_started_at = time.perf_counter() if timing_output is not None else None
+    best_kernel, positions = match_template(
+        image_tensor,
+        kernels,
+        kernel_size,
+        angles,
+        anchors=pick_anchors,
+        use_same_padding=False,
+    )
+    _finish_timing_stage(timing_output, "卷积选优", match_started_at, device)
+
+    postprocess_started_at = time.perf_counter() if timing_output is not None else None
+    angle_index = positions["angle_index"]
+    out_x, out_y = positions["x"], positions["y"]
+    rect_center = (
+        out_x + rect_center_anchors[angle_index][0],
+        out_y + rect_center_anchors[angle_index][1],
+    )
+    pick_point = (
+        out_x + pick_anchors[angle_index][0],
+        out_y + pick_anchors[angle_index][1],
+    )
+    conv_h = mask.shape[0] - int(kernel_size[0]) + 1
+    conv_w = mask.shape[1] - int(kernel_size[1]) + 1
+    if timing_output is not None:
+        timing_output["匹配图尺寸"] = (conv_h, conv_w)
+        timing_output["模板数量"] = len(angles)
+        timing_output["模板核尺寸"] = (int(kernel_size[1]), int(kernel_size[0]))
+        timing_output["后端"] = device
+    _finish_timing_stage(timing_output, "匹配收尾", postprocess_started_at, device)
+
+    debug_started_at = time.perf_counter() if timing_output is not None else None
+    if debug_output is not None:
+        debug_output.update({
+            "best_kernel": best_kernel.copy(),
+            "template_top_left": (float(out_x), float(out_y)),
+            "match_center": (float(rect_center[0]), float(rect_center[1])),
+            "pick_point": (float(pick_point[0]), float(pick_point[1])),
+            "angle": float(positions["angle"]),
+            "score": float(positions["score"]),
+            "conv_output_size": (conv_h, conv_w),
+        })
+    _finish_timing_stage(timing_output, "检测调试图", debug_started_at, device)
+
+    return {
+        "rect_center": rect_center,
+        "pick_point": pick_point,
+        "angle": float(positions["angle"]),
+        "score": float(positions["score"]),
+        "out_position": (out_x, out_y),
+    }
 
 
 def get_rect(

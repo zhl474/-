@@ -84,11 +84,18 @@ fallback:
   color_segmentation: true
 
 block_servo:
+  # 正常帧允许抓取点相对画面中心移动的像素范围，卷积输出固定为 2*search_radius_px+1 的方形。
+  search_radius_px: 30
+  # 首次结果触边时扩大后的搜索范围。
+  fallback_search_radius_px: 50
+  # 结果或前景进入边缘多少像素时触发扩大搜索。
+  boundary_guard_px: 3
+  # 紧边框模板四周保留的黑色安全边。
+  kernel_safety_margin_px: 2
+  # 扩大搜索仍异常时是否启用旧慢速匹配。
+  legacy_fallback_enabled: true
   angle_window_deg: 5.0
   angle_step_deg: 1.0
-  roi_expand_px: 50
-  # true 时低位方块先按高位角度转正为紧凑 ROI，再使用紧凑矩形模板核匹配。
-  rectified_roi_enabled: true
   white_s_max: 45
   white_v_min: 180
   min_foreground_area: 200

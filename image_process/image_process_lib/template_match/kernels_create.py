@@ -276,74 +276,156 @@ def create_rotation_kernels(
     )
 
 
-def create_compact_rotation_kernels(
+def _template_l_pick_in_canvas(binary, bbox, anchor, rect_size, template_angle):
+    """按 coreect_LL_location 相同规则计算 L 形模板抓取点（画布坐标）。
+
+    binary 为模板紧边框二值图，bbox 为其在画布中的左上角，anchor 为旋转中心
+    相对紧边框左上角的偏移；返回抓取点画布坐标，两候选都无实体时回退到矩形中心。
+    """
+    x1, y1 = bbox[0], bbox[1]
+    center_x = anchor[0] + x1
+    center_y = anchor[1] + y1
+    rect = ((float(center_x), float(center_y)), rect_size, -1.0 * float(template_angle))
+    box = np.intp(cv2.boxPoints(rect))
+    long_side = rect_size[0] if rect_size[0] > rect_size[1] else rect_size[1]
+
+    def _edge_length(point_a, point_b):
+        return math.sqrt(
+            (float(point_a[0]) - float(point_b[0])) ** 2
+            + (float(point_a[1]) - float(point_b[1])) ** 2
+        )
+
+    l1 = _edge_length(box[0], box[1])
+    l2 = _edge_length(box[0], box[2])
+    l3 = _edge_length(box[0], box[3])
+    if 0.9 * long_side <= l1 <= 1.1 * long_side:
+        long1, long2 = (box[0], box[1]), (box[2], box[3])
+    elif 0.9 * long_side <= l2 <= 1.1 * long_side:
+        long1, long2 = (box[0], box[2]), (box[1], box[3])
+    elif 0.9 * long_side <= l3 <= 1.1 * long_side:
+        long1, long2 = (box[0], box[3]), (box[1], box[2])
+    else:
+        long1, long2 = (box[0], box[1]), (box[2], box[3])
+
+    def _edge_midpoint(edge):
+        return (
+            (float(edge[0][0]) + float(edge[1][0])) / 2.0,
+            (float(edge[0][1]) + float(edge[1][1])) / 2.0,
+        )
+
+    mid1 = _edge_midpoint(long1)
+    mid2 = _edge_midpoint(long2)
+    point1 = (
+        int((center_x + mid1[0]) / 2.0),
+        int((center_y + mid1[1]) / 2.0),
+    )
+    point2 = (
+        int((center_x + mid2[0]) / 2.0),
+        int((center_y + mid2[1]) / 2.0),
+    )
+
+    def _covered(point):
+        px = point[0] - x1
+        py = point[1] - y1
+        if 0 <= px < binary.shape[1] and 0 <= py < binary.shape[0]:
+            return bool(binary[py, px] >= 1)
+        return False
+
+    if _covered(point1):
+        return point1
+    if _covered(point2):
+        return point2
+    return (int(round(center_x)), int(round(center_y)))
+
+
+def create_pick_aligned_kernels(
+    category,
     block_px,
     connector_px,
-    category,
+    angles,
     device=None,
-    angle_step=1,
-    angle_center=None,
-    angle_window=None,
-    angle_values=None,
     safety_margin_px=2,
 ):
-    """生成仅覆盖给定角度范围的紧凑矩形旋转卷积核。
+    """按抓取点对齐生成低位候选角度公共卷积核，保留各角度独立锚点。
 
-    先在旧的安全方形画布内旋转，再按所有模板的非零范围统一居中裁剪，
-    因而不会因矩形画布直接旋转而截断方块边缘。
+    每个角度生成纯黑底白前景的紧边框二值模板（四周保留 safety_margin_px
+    黑边），记录矩形中心锚点 rect_center_anchors 与抓取点锚点 pick_anchors；
+    所有模板按 pick_anchors 对齐到公共核同一像素 pick_anchor 后补齐统一大小。
     """
-    try:
-        safety_margin_px = int(safety_margin_px)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("safety_margin_px 必须是整数") from exc
+    if not angles:
+        raise ValueError("候选角度列表不能为空")
+    block_px, connector_px = _validate_geometry(block_px, connector_px)
+    safety_margin_px = int(safety_margin_px)
     if safety_margin_px < 0:
-        raise ValueError("safety_margin_px 必须大于等于 0")
+        raise ValueError("safety_margin_px 必须为非负整数")
+    metadata = build_angle_foreground_metadata(category, block_px, connector_px)
+    rect_size = get_template_rect_size(category, block_px, connector_px)
+    is_l = category in ("L_yellow", "L_blue")
+    crops = []
+    rect_center_anchors = []
+    pick_anchors = []
+    for angle in angles:
+        item = metadata.get(angle)
+        if item is None:
+            raise ValueError(f"候选角度缺少前景元数据: {angle}")
+        binary = item["binary"]
+        anchor_x, anchor_y = item["anchor"]
+        crop_h = binary.shape[0] + 2 * safety_margin_px
+        crop_w = binary.shape[1] + 2 * safety_margin_px
+        crop = np.zeros((crop_h, crop_w), dtype=np.float32)
+        crop[
+            safety_margin_px:safety_margin_px + binary.shape[0],
+            safety_margin_px:safety_margin_px + binary.shape[1],
+        ] = binary
+        rect_anchor = (anchor_x + safety_margin_px, anchor_y + safety_margin_px)
+        if is_l:
+            pick_canvas = _template_l_pick_in_canvas(
+                binary, item["bbox"], item["anchor"], rect_size, angle
+            )
+            pick = (
+                pick_canvas[0] - item["bbox"][0] + safety_margin_px,
+                pick_canvas[1] - item["bbox"][1] + safety_margin_px,
+            )
+        else:
+            pick = rect_anchor
+        crops.append(crop)
+        rect_center_anchors.append(rect_anchor)
+        pick_anchors.append(pick)
 
-    base_shape = create_base_shape(category, block_px, connector_px)
-    angles = build_angle_values(
-        category,
-        angle_step=angle_step,
-        angle_center=angle_center,
-        angle_window=angle_window,
-        angle_values=angle_values,
+    common_pick_x = max(pick[0] for pick in pick_anchors)
+    common_pick_y = max(pick[1] for pick in pick_anchors)
+    kernel_w = max(
+        common_pick_x - pick[0] + crop.shape[1]
+        for pick, crop in zip(pick_anchors, crops)
     )
-    full_kernels, length, angles = create_kernels(base_shape, angles, device=None)
-    full_kernels_np = full_kernels[:, 0].numpy()
-    center = length // 2
-
-    max_up = max_down = max_left = max_right = 0
-    for kernel in full_kernels_np:
-        ys, xs = np.nonzero(kernel > 0.5)
-        if len(xs) == 0 or len(ys) == 0:
-            raise ValueError("旋转模板不能为空")
-        max_up = max(max_up, center - int(np.min(ys)))
-        max_down = max(max_down, int(np.max(ys)) - center)
-        max_left = max(max_left, center - int(np.min(xs)))
-        max_right = max(max_right, int(np.max(xs)) - center)
-
-    half_h = max(max_up, max_down) + safety_margin_px
-    half_w = max(max_left, max_right) + safety_margin_px
-    kernel_h = 2 * half_h + 1
-    kernel_w = 2 * half_w + 1
-    compact_kernels = np.zeros((len(angles), kernel_h, kernel_w), dtype=full_kernels_np.dtype)
-    source_y1 = max(0, center - half_h)
-    source_y2 = min(length, center + half_h + 1)
-    source_x1 = max(0, center - half_w)
-    source_x2 = min(length, center + half_w + 1)
-    target_y1 = source_y1 - (center - half_h)
-    target_x1 = source_x1 - (center - half_w)
-    target_y2 = target_y1 + (source_y2 - source_y1)
-    target_x2 = target_x1 + (source_x2 - source_x1)
-    compact_kernels[:, target_y1:target_y2, target_x1:target_x2] = full_kernels_np[
-        :, source_y1:source_y2, source_x1:source_x2
-    ]
-
+    kernel_h = max(
+        common_pick_y - pick[1] + crop.shape[0]
+        for pick, crop in zip(pick_anchors, crops)
+    )
+    if kernel_w <= 0 or kernel_h <= 0:
+        raise ValueError("公共卷积核尺寸非法")
     kernel_dtype = np.float32 if device is None or str(device) == "cpu" else np.float16
-    kernels_tensor = torch.from_numpy(compact_kernels.astype(kernel_dtype, copy=False)).unsqueeze(1)
+    common = np.zeros((len(crops), kernel_h, kernel_w), dtype=kernel_dtype)
+    kernel_rect_anchors = []
+    kernel_pick_anchors = []
+    for index, (crop, pick, rect_anchor) in enumerate(zip(crops, pick_anchors, rect_center_anchors)):
+        top = common_pick_y - pick[1]
+        left = common_pick_x - pick[0]
+        common[index, top:top + crop.shape[0], left:left + crop.shape[1]] = crop
+        # 锚点统一换算成公共核坐标：裁剪图左上角在核中的位置 + 裁剪图内相对锚点。
+        kernel_rect_anchors.append((left + rect_anchor[0], top + rect_anchor[1]))
+        kernel_pick_anchors.append((left + pick[0], top + pick[1]))
+    kernels_tensor = torch.from_numpy(common).unsqueeze(1)
     if device is not None:
         kernels_tensor = kernels_tensor.to(device)
-
-    return kernels_tensor, (kernel_h, kernel_w), angles
+    return {
+        "kernels": kernels_tensor,
+        "kernel_size": (kernel_h, kernel_w),
+        "angles": [float(angle) for angle in angles],
+        "rect_center_anchors": kernel_rect_anchors,
+        "pick_anchors": kernel_pick_anchors,
+        "pick_anchor": (common_pick_x, common_pick_y),
+    }
 
 
 class ScreenedMatchFallbackError(RuntimeError):
