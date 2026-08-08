@@ -550,11 +550,10 @@ class TaskRunner:
             self.clients.move_arm(sucker_pose, self.config.arm_speed)
         else:
             sucker_pose = open_loop_sucker_pose
-            # 必须确认已经到达方块上方，随后才允许下探，避免斜向轨迹碰撞。
             self.clients.move_arm(
                 sucker_pose,
                 self.config.arm_speed,
-                wait_until_stable=True,
+                wait_until_stable=False,
             )
             if motor_wait > 0:
                 time.sleep(motor_wait)
@@ -640,7 +639,7 @@ class TaskRunner:
             place_pose = apply_camera_to_sucker_offset(camera_pose, self.visual_config)
             # 托盘标定给出的观察 Z 同时就是吹气释放 Z，此处只应用吸盘 XY 偏移。
             place_pose = self._validate_motion_pose(place_pose, "最终摆放位")
-            self.clients.move_arm(place_pose, self.config.arm_speed)
+            self.clients.move_arm(place_pose, self.config.arm_speed, wait_until_stable=True)
         else:
             place_pose = open_loop_place_pose
             self.clients.move_arm(

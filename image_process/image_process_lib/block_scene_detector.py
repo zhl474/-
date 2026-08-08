@@ -13,6 +13,9 @@ from image_process_lib.template_config import load_color_segmentation_config, lo
 from image_process_lib.template_match.kernels_create import get_template_rect_size
 from image_process_lib.template_match.template_match import get_rect
 
+# 高位快速模板匹配配置，由 image_node 从 perception.yaml 注入；None 时完全沿用旧逻辑。
+HIGH_SCREENING_CONFIG = None
+
 
 def undistort_bgr_image(img_bgr, camera_matrix, dist_coeff):
     """Gemini335 已输出可直接使用的图像，这里保留接口但不再做去畸变。"""
@@ -46,6 +49,7 @@ def match_block_mask(
     angle_values=None,
     search_center=None,
     search_radius=None,
+    screening_config=None,
 ):
     """根据一个确定的二值 Mask 重新计算方块中心和角度。"""
     crop_x1, crop_y1, crop_x2, crop_y2 = (int(value) for value in crop_box)
@@ -62,6 +66,10 @@ def match_block_mask(
             float(search_center[0]) - crop_x1,
             float(search_center[1]) - crop_y1,
         )
+    screening_config = (
+        screening_config if screening_config is not None else HIGH_SCREENING_CONFIG
+    )
+    match_debug_output = {}
     rect = get_rect(
         mask,
         template_geometry["block_px"],
@@ -76,6 +84,8 @@ def match_block_mask(
         angle_values=angle_values,
         search_center=local_search_center,
         search_radius=search_radius,
+        debug_output=match_debug_output,
+        screening_config=screening_config,
     )
 
     box = np.intp(cv2.boxPoints(rect))
@@ -108,6 +118,7 @@ def match_block_mask(
         "py": float(py),
         "theta": theta,
         "rect": rect,
+        "screening": match_debug_output,
     }
 
 

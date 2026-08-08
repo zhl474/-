@@ -1,6 +1,7 @@
 #!/home/zhl/fr3env/fr3env/bin/python
 """图像快照、任务规划和视觉伺服检测的 ROS 服务组合节点。"""
 
+import math
 import os
 import re
 import subprocess
@@ -19,6 +20,7 @@ import yaml
 from ultralytics import YOLO
 
 import image_process_lib.block_detection as block_detection_module
+import image_process_lib.block_scene_detector as block_scene_detector_module
 import image_process_lib.board_scene_detector as board_scene_detector_module
 from image_process_lib.template_config import load_template_geometry
 from image_process_lib.board_scene_detector import (
@@ -324,6 +326,54 @@ class ImageProcessor:
 
         fallback_config = perception_config.get("fallback", {})
         block_detection_module.ALLOW_COLOR_FALLBACK = bool(fallback_config.get("color_segmentation", True))
+
+        high_match_config = perception_config.get("high_template_match", {})
+        if not isinstance(high_match_config, dict):
+            raise ValueError("high_template_match 必须是字典")
+
+        def high_match_int_param(name, default, positive=False):
+            value = rospy.get_param(f"~high_template_{name}", high_match_config.get(name, default))
+            if isinstance(value, bool):
+                raise ValueError(f"high_template_match.{name} 必须是非负整数")
+            try:
+                number = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"high_template_match.{name} 必须是非负整数") from exc
+            if not math.isfinite(number) or not number.is_integer() or number < 0:
+                raise ValueError(f"high_template_match.{name} 必须是非负整数")
+            if positive and number <= 0:
+                raise ValueError(f"high_template_match.{name} 必须是正整数")
+            return int(number)
+
+        high_match_enabled = bool(
+            rospy.get_param("~high_template_enabled", high_match_config.get("enabled", True))
+        )
+        high_match_size_tolerance_px = high_match_int_param("size_tolerance_px", 4)
+        high_match_relaxed_size_tolerance_px = high_match_int_param("relaxed_size_tolerance_px", 8)
+        high_match_min_candidate_angles = high_match_int_param("min_candidate_angles", 3, positive=True)
+        if high_match_relaxed_size_tolerance_px < high_match_size_tolerance_px:
+            raise ValueError(
+                "high_template_match.relaxed_size_tolerance_px 必须大于等于 size_tolerance_px"
+            )
+        high_match_kernel_safety_margin_px = high_match_int_param("kernel_safety_margin_px", 2)
+        high_match_minimum_translation_margin_px = high_match_int_param(
+            "minimum_translation_margin_px", 4
+        )
+        high_match_legacy_fallback_enabled = bool(
+            rospy.get_param(
+                "~high_template_legacy_fallback_enabled",
+                high_match_config.get("legacy_fallback_enabled", True),
+            )
+        )
+        block_scene_detector_module.HIGH_SCREENING_CONFIG = {
+            "enabled": high_match_enabled,
+            "size_tolerance_px": high_match_size_tolerance_px,
+            "relaxed_size_tolerance_px": high_match_relaxed_size_tolerance_px,
+            "min_candidate_angles": high_match_min_candidate_angles,
+            "kernel_safety_margin_px": high_match_kernel_safety_margin_px,
+            "minimum_translation_margin_px": high_match_minimum_translation_margin_px,
+            "legacy_fallback_enabled": high_match_legacy_fallback_enabled,
+        }
 
         servo_config = execution_config.get("servo", {})
         if not isinstance(servo_config, dict):

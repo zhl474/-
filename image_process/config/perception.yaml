@@ -20,6 +20,24 @@ calibration:
   tray_pixel_to_tcp: image_process/config/tray_pixel_to_tcp_calibration.yaml
   hand_eye_matrix: camera/config/T_wrist2camera.npy
 
+# 高位模板匹配：先按 Mask 白色前景宽高筛选候选角度，再用紧边框模板做无 padding 卷积。
+# 尺寸筛选不可靠时回退到全角度、same-padding 慢匹配；本轮不修改低位匹配。
+high_template_match:
+  # 高位快速匹配总开关；false 时始终使用全角度、same-padding 慢匹配。
+  enabled: true
+  # 第一轮尺寸筛选容差：模板前景宽高与 Mask 前景宽高分别相差不超过 4 像素时保留。
+  size_tolerance_px: 20
+  # 第一轮候选太少时使用的放宽容差：宽高分别相差不超过 8 像素时保留。
+  relaxed_size_tolerance_px: 40
+  # 候选角度至少需要 3 个；少于 3 个说明尺寸先验不可靠。
+  min_candidate_angles: 3
+  # 每个紧边框模板在白色前景四周保留 2 像素黑边，防止旋转栅格化边缘贴住核边界。
+  kernel_safety_margin_px: 2
+  # 手动补边后每个方向至少允许模板平移 4 像素，补边后输入至少为卷积核加 8 像素。
+  minimum_translation_margin_px: 20
+  # 尺寸筛选失败时是否使用当前全角度、same-padding 慢匹配。
+  legacy_fallback_enabled: true
+
 # 仅在 execution.yaml 的 calibration_mode=true 时使用。
 # 每个目标像素在每帧先取 3×3 邻域有效深度的中位数，再对多帧结果计算中位数和 MAD。
 # 任一方块深度门禁或方块平面门禁失败时，本轮标定准备直接失败，不读取旧标定兜底。

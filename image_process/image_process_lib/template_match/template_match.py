@@ -5,8 +5,13 @@ from typing import List, Tuple
 import numpy as np
 import time
 from .kernels_create import (
+    ScreenedMatchFallbackError,
+    build_angle_foreground_metadata,
+    compute_screened_input_padding,
     create_rotation_kernels,
+    create_screened_kernels,
     get_template_rect_size,
+    select_screen_angles,
     show_all_kernels_grid,
     show_kernel,
 )
@@ -51,22 +56,35 @@ def _normalize_kernel_hw(kernel_size):
     return kernel_h, kernel_w
 
 
-def match_template(image: torch.Tensor, template: torch.Tensor, kernel_size, angles) -> Tuple[torch.Tensor, List[Tuple[int, int]]]:
+def match_template(
+    image,
+    template,
+    kernel_size,
+    angles,
+    anchors=None,
+    use_same_padding=True,
+) -> Tuple[torch.Tensor, dict]:
     """
     用卷积进行模板匹配。
     image: 大图，shape (1, 1, H, W)，值域 0/1
     template: 单个模板 (1, 1, h, w) 或模板列表
     angles: 每个模板对应的真实旋转角度
-    返回: (特征图 batch, 最佳匹配位置列表)
+    anchors: 每个模板的旋转中心相对模板左上角的位置；None 时取核中心
+    use_same_padding: True 时用 same padding，输出位置即核中心对准的输入位置；
+                      False 时无 padding，输出位置为核左上角对准的输入位置
+    返回: (特征图 batch, 最佳匹配信息)
           特征图形状 (N, H_out, W_out)，N 为模板个数
-          位置列表每个元素为 (top, left) 像素坐标
+          位置信息包含 angle、y、x、score、anchor
     """
 
     # 使用 conv2d 做互相关（卷积不翻转，等价于模板匹配中的相关性）
     # groups=1 表示普通卷积
     kernel_h, kernel_w = _normalize_kernel_hw(kernel_size)
-    pad = (kernel_h // 2, kernel_w // 2)
-    feature_map = F.conv2d(image, template, padding=pad, stride=1)
+    if use_same_padding:
+        pad = (kernel_h // 2, kernel_w // 2)
+        feature_map = F.conv2d(image, template, padding=pad, stride=1)
+    else:
+        feature_map = F.conv2d(image, template, padding=0, stride=1)
     # feature_map_small = F.conv2d(image, template, padding=pad, stride=2)
     # 上采样回原尺寸
     # feature_map = F.interpolate(
@@ -86,14 +104,20 @@ def match_template(image: torch.Tensor, template: torch.Tensor, kernel_size, ang
     top = remain // W
     left = remain % W
 
+    if anchors is None:
+        anchor = (kernel_w // 2, kernel_h // 2)
+    else:
+        anchor = anchors[angle_idx.item()]
+
     best_match = {
         "angle": float(angles[angle_idx.item()]),
         "y": top.item(),
         "x": left.item(),
-        "score": feature_map[angle_idx, top, left].item()
+        "score": feature_map[angle_idx, top, left].item(),
+        "anchor": anchor,
     }
 
-    best_kernel = show_kernel(template, angle_idx.item(),show=0)
+    best_kernel = show_kernel(template, angle_idx.item(), show=0)
     return best_kernel, best_match
 
 
@@ -120,6 +144,155 @@ def crop_image_for_search(image, search_center=None, search_radius=None, kernel_
     return image[y1:y2, x1:x2], (x1, y1)
 
 
+def _match_rect_screened(
+    image,
+    block_px,
+    connector_px,
+    category,
+    img_bgr2,
+    crop_x,
+    crop_y,
+    screening_config,
+    debug_output,
+    timing_output,
+):
+    """高位尺寸筛角 + 紧边框模板 + 无 padding 卷积的快速匹配。
+
+    输入 Mask 前景宽高先筛出候选角度，候选不足或尺寸非法时抛出
+    ScreenedMatchFallbackError 由调用方回退旧路径；GPU 运行错误不在此捕获。
+    """
+    if image is None or getattr(image, "ndim", 0) != 2 or image.size == 0:
+        raise ScreenedMatchFallbackError("输入 Mask 为空或不是二维图")
+    binary_mask = (np.asarray(image) > 0).astype(np.uint8)
+    ys, xs = np.nonzero(binary_mask)
+    if len(xs) == 0:
+        raise ScreenedMatchFallbackError("输入 Mask 前景为空")
+    mask_w = int(np.max(xs)) - int(np.min(xs)) + 1
+    mask_h = int(np.max(ys)) - int(np.min(ys)) + 1
+    image_h, image_w = binary_mask.shape
+
+    size_tolerance_px = int(screening_config.get("size_tolerance_px", 4))
+    relaxed_size_tolerance_px = int(screening_config.get("relaxed_size_tolerance_px", 8))
+    min_candidate_angles = int(screening_config.get("min_candidate_angles", 3))
+    kernel_safety_margin_px = int(screening_config.get("kernel_safety_margin_px", 2))
+    minimum_translation_margin_px = int(screening_config.get("minimum_translation_margin_px", 4))
+
+    screen_started_at = time.perf_counter() if timing_output is not None else None
+    metadata = build_angle_foreground_metadata(category, block_px, connector_px)
+    candidates, tolerance_used = select_screen_angles(
+        metadata,
+        mask_w,
+        mask_h,
+        size_tolerance_px,
+        relaxed_size_tolerance_px,
+        min_candidate_angles,
+    )
+    _finish_timing_stage(timing_output, "角度筛选", screen_started_at, "cpu")
+    if tolerance_used is None:
+        raise ScreenedMatchFallbackError(
+            f"尺寸筛选后候选角度不足 {min_candidate_angles} 个（Mask 前景 {mask_w}x{mask_h}）"
+        )
+
+    template_started_at = time.perf_counter() if timing_output is not None else None
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    prepared = create_screened_kernels(
+        category,
+        block_px,
+        connector_px,
+        candidates,
+        device=device,
+        safety_margin_px=kernel_safety_margin_px,
+    )
+    _finish_timing_stage(timing_output, "候选模板生成", template_started_at, device)
+    kernels = prepared["kernels"]
+    kernel_h, kernel_w = prepared["kernel_size"]
+    anchors = prepared["anchors"]
+    if kernel_h <= 0 or kernel_w <= 0:
+        raise ScreenedMatchFallbackError("候选卷积核尺寸非法")
+    for anchor_x, anchor_y in anchors:
+        if not (0 <= anchor_x < kernel_w and 0 <= anchor_y < kernel_h):
+            raise ScreenedMatchFallbackError("候选角度锚点越界")
+
+    pad_info = compute_screened_input_padding(
+        image_h,
+        image_w,
+        kernel_h,
+        kernel_w,
+        minimum_translation_margin_px,
+    )
+    target_h, target_w = pad_info["target_h"], pad_info["target_w"]
+    if target_h <= 0 or target_w <= 0:
+        raise ScreenedMatchFallbackError("补边后输入画布尺寸非法")
+    tensor_started_at = time.perf_counter() if timing_output is not None else None
+    padded = np.zeros((target_h, target_w), dtype=np.float32)
+    padded[
+        pad_info["pad_top"]:pad_info["pad_top"] + image_h,
+        pad_info["pad_left"]:pad_info["pad_left"] + image_w,
+    ] = (binary_mask * 255).astype(np.float32)
+    image_tensor = load_img(padded, device=device)
+    _finish_timing_stage(timing_output, "输入补边", tensor_started_at, device)
+
+    match_started_at = time.perf_counter() if timing_output is not None else None
+    best_kernel, positions = match_template(
+        image_tensor,
+        kernels,
+        (kernel_h, kernel_w),
+        prepared["angles"],
+        anchors=anchors,
+        use_same_padding=False,
+    )
+    _finish_timing_stage(timing_output, "卷积选优", match_started_at, device)
+
+    postprocess_started_at = time.perf_counter() if timing_output is not None else None
+    out_x = positions["x"]
+    out_y = positions["y"]
+    anchor_x, anchor_y = positions["anchor"]
+    center_x = out_x + anchor_x - pad_info["pad_left"]
+    center_y = out_y + anchor_y - pad_info["pad_top"]
+    start_x = out_x - pad_info["pad_left"]
+    start_y = out_y - pad_info["pad_top"]
+    rect_size = get_template_rect_size(category, block_px, connector_px)
+    rect = ((float(center_x), float(center_y)), rect_size, -1.0 * positions["angle"])
+    _finish_timing_stage(timing_output, "匹配收尾", postprocess_started_at, device)
+
+    debug_started_at = time.perf_counter() if timing_output is not None else None
+    if debug_output is not None:
+        debug_output.update({
+            "mask_fg_size": (mask_w, mask_h),
+            "tolerance_px": tolerance_used,
+            "full_angle_count": len(metadata),
+            "candidate_angle_count": len(candidates),
+            "kernel_size": (kernel_w, kernel_h),
+            "padding": (
+                pad_info["pad_left"],
+                pad_info["pad_right"],
+                pad_info["pad_top"],
+                pad_info["pad_bottom"],
+            ),
+            "conv_output_size": (target_h - kernel_h + 1, target_w - kernel_w + 1),
+            "anchor": (anchor_x, anchor_y),
+            "best_kernel": best_kernel.copy(),
+            "match_center": (float(center_x), float(center_y)),
+            "template_top_left": (float(start_x), float(start_y)),
+            "search_offset": (0, 0),
+            "angle": float(positions["angle"]),
+            "score": float(positions["score"]),
+            "screening_fallback": False,
+        })
+    if img_bgr2 is not None:
+        contours, _ = cv2.findContours(best_kernel, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(
+            img_bgr2,
+            contours,
+            -1,
+            (0, 255, 0),
+            1,
+            offset=(int(crop_x) + int(start_x), int(crop_y) + int(start_y)),
+        )
+    _finish_timing_stage(timing_output, "检测调试图", debug_started_at, device)
+    return rect
+
+
 def get_rect(
     image,
     block_px,
@@ -137,7 +310,35 @@ def get_rect(
     debug_output=None,
     timing_output=None,
     prepared_templates=None,
+    screening_config=None,
 ):
+    screening_enabled = (
+        screening_config is not None
+        and bool(screening_config.get("enabled", True))
+        and search_center is None
+        and angle_values is None
+        and angle_center is None
+    )
+    if screening_enabled:
+        try:
+            return _match_rect_screened(
+                image,
+                block_px,
+                connector_px,
+                category,
+                img_bgr2,
+                crop_x,
+                crop_y,
+                screening_config,
+                debug_output,
+                timing_output,
+            )
+        except ScreenedMatchFallbackError as fallback:
+            if debug_output is not None:
+                debug_output["screening_fallback"] = True
+                debug_output["screening_fallback_reason"] = str(fallback)
+            if not bool(screening_config.get("legacy_fallback_enabled", True)):
+                raise RuntimeError(f"高位筛选匹配回退被禁用: {fallback}") from fallback
     # 2. 加载模板（可以是一个或多个）
     template_started_at = time.perf_counter() if timing_output is not None else None
     if prepared_templates is None:

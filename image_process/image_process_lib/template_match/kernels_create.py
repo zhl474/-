@@ -344,3 +344,181 @@ def create_compact_rotation_kernels(
         kernels_tensor = kernels_tensor.to(device)
 
     return kernels_tensor, (kernel_h, kernel_w), angles
+
+
+class ScreenedMatchFallbackError(RuntimeError):
+    """高位尺寸筛选匹配无法继续，应回退到全角度、same-padding 慢匹配。"""
+
+
+_ANGLE_FOREGROUND_METADATA_CACHE = {}
+_SCREENED_KERNEL_CACHE = {}
+_SCREENED_KERNEL_CACHE_CAP = 8
+
+
+def build_angle_foreground_metadata(category, block_px, connector_px, angle_step=1.0):
+    """按类别生成全角度二值模板的前景紧边框元数据并缓存（纯 CPU，不生成 GPU 核）。
+
+    每个角度记录白色前景宽高、前景在安全方形画布中的紧边框、
+    旋转中心相对紧边框左上角的锚点，以及紧边框二值模板。
+    """
+    block_px, connector_px = _validate_geometry(block_px, connector_px)
+    cache_key = (str(category), block_px, connector_px, float(angle_step))
+    cached = _ANGLE_FOREGROUND_METADATA_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    angles = build_angle_values(category, angle_step=angle_step)
+    base_shape = create_base_shape(category, block_px, connector_px)
+    height, width = base_shape.shape
+    length = int(math.ceil(math.sqrt(width ** 2 + height ** 2)))
+    if length % 2 == 0:
+        length += 1
+    center = length // 2
+    base_canvas = embed_in_center(base_shape, length)
+    metadata = {}
+    for angle in angles:
+        rotated = rotate_image(base_canvas, angle)
+        binary = (rotated > 0.5).astype(np.uint8)
+        ys, xs = np.nonzero(binary)
+        if len(xs) == 0:
+            raise ValueError(f"旋转模板为空: 类别={category}, 角度={angle}")
+        x1, y1 = int(np.min(xs)), int(np.min(ys))
+        x2, y2 = int(np.max(xs)) + 1, int(np.max(ys)) + 1
+        metadata[angle] = {
+            "fg_w": x2 - x1,
+            "fg_h": y2 - y1,
+            "bbox": (x1, y1, x2, y2),
+            "anchor": (center - x1, center - y1),
+            "binary": binary[y1:y2, x1:x2].copy(),
+        }
+    _ANGLE_FOREGROUND_METADATA_CACHE[cache_key] = metadata
+    return metadata
+
+
+def select_screen_angles(
+    metadata,
+    mask_w,
+    mask_h,
+    size_tolerance_px,
+    relaxed_size_tolerance_px,
+    min_candidate_angles,
+):
+    """按 Mask 白色前景宽高筛选候选角度。
+
+    先按 size_tolerance_px 筛选；候选不足 min_candidate_angles 个时改用
+    relaxed_size_tolerance_px。返回 (候选角度列表, 使用的容差)；仍不足时
+    容差为 None，调用方应回退旧路径。
+    """
+    def _within(angle, tolerance):
+        item = metadata[angle]
+        return (
+            abs(item["fg_w"] - mask_w) <= tolerance
+            and abs(item["fg_h"] - mask_h) <= tolerance
+        )
+
+    sorted_angles = sorted(metadata)
+    candidates = [angle for angle in sorted_angles if _within(angle, size_tolerance_px)]
+    if len(candidates) >= min_candidate_angles:
+        return candidates, size_tolerance_px
+    candidates = [angle for angle in sorted_angles if _within(angle, relaxed_size_tolerance_px)]
+    if len(candidates) >= min_candidate_angles:
+        return candidates, relaxed_size_tolerance_px
+    return candidates, None
+
+
+def compute_screened_input_padding(image_h, image_w, kernel_h, kernel_w, margin):
+    """计算无 padding 卷积前的手动补边尺寸，保证卷积核可放入并留有平移余量。"""
+    margin = int(margin)
+    if margin < 0:
+        raise ValueError("minimum_translation_margin_px 必须为非负整数")
+    image_w, image_h = int(image_w), int(image_h)
+    kernel_w, kernel_h = int(kernel_w), int(kernel_h)
+    if image_w <= 0 or image_h <= 0 or kernel_w <= 0 or kernel_h <= 0:
+        raise ValueError("输入和卷积核尺寸必须为正")
+    target_w = max(image_w, kernel_w + 2 * margin)
+    target_h = max(image_h, kernel_h + 2 * margin)
+    pad_left = (target_w - image_w) // 2
+    pad_right = target_w - image_w - pad_left
+    pad_top = (target_h - image_h) // 2
+    pad_bottom = target_h - image_h - pad_top
+    return {
+        "pad_left": pad_left,
+        "pad_right": pad_right,
+        "pad_top": pad_top,
+        "pad_bottom": pad_bottom,
+        "target_w": target_w,
+        "target_h": target_h,
+    }
+
+
+def create_screened_kernels(
+    category,
+    block_px,
+    connector_px,
+    angles,
+    device=None,
+    safety_margin_px=2,
+):
+    """为候选角度生成公共紧边框卷积核 batch，并保留各角度独立的旋转中心锚点。
+
+    各模板按自身前景紧边框四周保留 safety_margin_px 黑边，统一放在公共核左上角，
+    右侧和下侧不足部分填 0。返回 kernels、kernel_size、angles、anchors。
+    """
+    if not angles:
+        raise ScreenedMatchFallbackError("候选角度列表为空")
+    block_px, connector_px = _validate_geometry(block_px, connector_px)
+    safety_margin_px = int(safety_margin_px)
+    if safety_margin_px < 0:
+        raise ValueError("kernel_safety_margin_px 必须为非负整数")
+    cache_key = (
+        str(device),
+        str(category),
+        block_px,
+        connector_px,
+        tuple(round(float(angle), 6) for angle in angles),
+        safety_margin_px,
+    )
+    cached = _SCREENED_KERNEL_CACHE.get(cache_key)
+    if cached is not None:
+        _SCREENED_KERNEL_CACHE[cache_key] = _SCREENED_KERNEL_CACHE.pop(cache_key)
+        return cached
+    metadata = build_angle_foreground_metadata(category, block_px, connector_px)
+    crops = []
+    anchors = []
+    max_w = 0
+    max_h = 0
+    for angle in angles:
+        item = metadata.get(angle)
+        if item is None:
+            raise ScreenedMatchFallbackError(f"候选角度缺少前景元数据: {angle}")
+        binary = item["binary"]
+        anchor_x, anchor_y = item["anchor"]
+        crop_h = binary.shape[0] + 2 * safety_margin_px
+        crop_w = binary.shape[1] + 2 * safety_margin_px
+        crop = np.zeros((crop_h, crop_w), dtype=np.float32)
+        crop[
+            safety_margin_px:safety_margin_px + binary.shape[0],
+            safety_margin_px:safety_margin_px + binary.shape[1],
+        ] = binary
+        crops.append(crop)
+        anchors.append((anchor_x + safety_margin_px, anchor_y + safety_margin_px))
+        max_w = max(max_w, crop_w)
+        max_h = max(max_h, crop_h)
+    if max_w <= 0 or max_h <= 0:
+        raise ScreenedMatchFallbackError("公共卷积核尺寸非法")
+    kernel_dtype = np.float32 if device is None or str(device) == "cpu" else np.float16
+    common = np.zeros((len(crops), max_h, max_w), dtype=kernel_dtype)
+    for index, crop in enumerate(crops):
+        common[index, :crop.shape[0], :crop.shape[1]] = crop
+    kernels_tensor = torch.from_numpy(common).unsqueeze(1)
+    if device is not None:
+        kernels_tensor = kernels_tensor.to(device)
+    prepared = {
+        "kernels": kernels_tensor,
+        "kernel_size": (max_h, max_w),
+        "angles": [float(angle) for angle in angles],
+        "anchors": anchors,
+    }
+    _SCREENED_KERNEL_CACHE[cache_key] = prepared
+    while len(_SCREENED_KERNEL_CACHE) > _SCREENED_KERNEL_CACHE_CAP:
+        _SCREENED_KERNEL_CACHE.pop(next(iter(_SCREENED_KERNEL_CACHE)))
+    return prepared
