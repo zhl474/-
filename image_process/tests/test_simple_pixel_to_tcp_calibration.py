@@ -81,8 +81,10 @@ def _v2_rows(subject, count=34, *, block_mad=0.2):
             source = "stable_depth_xy_block_plane_z"
             depth_mad = 20.0
         rows.append({
-            "方块类别": f"测试类别{index % 7}",
+            # 新版托盘日志不再借用方块类别标识目标。
+            "方块类别": f"测试类别{index % 7}" if subject == "block" else "",
             "事件": "伺服成功",
+            "目标类型": "方块" if subject == "block" else "托盘",
             "高位检测像素X": pixel_x,
             "高位检测像素Y": pixel_y,
             "高位世界坐标Z": world_z,

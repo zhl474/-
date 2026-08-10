@@ -381,7 +381,7 @@ def test_reported_block_pixel_outside_sample_hull_is_accepted_when_tcp_is_safe()
     pose = localizer.locate_block([1063.0, 571.0])
 
     assert pose == pytest.approx(
-        [-150.4206184720751, 219.46061429534058, 201.42959037238307, 180.0, 0.0, -90.0],
+        [-152.0510504722284, 216.944753678346, 203.99675126128128, 180.0, 0.0, -90.0],
         abs=1e-6,
     )
 

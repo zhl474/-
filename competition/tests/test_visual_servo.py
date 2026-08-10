@@ -29,11 +29,83 @@ def test_current_execution_and_servo_configs_are_valid():
     assert execution.minimum_tcp_z_mm == 165.0
     assert isinstance(execution.calibration_mode, bool)
     assert isinstance(execution.visual_servo_enabled, bool)
+    assert execution.block_error_threshold_px == 1.0
+    assert execution.tray_error_threshold_px == 0.5
     assert execution.post_success_sample_frames == 20
     assert len(execution.shooting_pose) == 6
     assert np.asarray(visual["pixel_to_robot_matrix"]).shape == (2, 2)
     assert "block_servo_height_offset_mm" not in visual
     assert "board_servo_height_offset_mm" not in visual
+
+
+def test_执行配置兼容旧版统一视觉伺服阈值(tmp_path):
+    config_data = yaml.safe_load(
+        Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
+    )
+    config_data["servo"].pop("block_error_threshold_px")
+    config_data["servo"].pop("tray_error_threshold_px")
+    config_data["servo"]["error_threshold_px"] = 0.75
+    config_path = tmp_path / "旧版统一阈值.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    config = load_execution_config(config_path)
+
+    assert config.block_error_threshold_px == 0.75
+    assert config.tray_error_threshold_px == 0.75
+
+
+@pytest.mark.parametrize(
+    "threshold_name,invalid_value",
+    [
+        ("block_error_threshold_px", -0.1),
+        ("block_error_threshold_px", float("inf")),
+        ("block_error_threshold_px", float("nan")),
+        ("block_error_threshold_px", "不是数值"),
+        ("tray_error_threshold_px", -0.1),
+        ("tray_error_threshold_px", float("inf")),
+        ("tray_error_threshold_px", float("nan")),
+        ("tray_error_threshold_px", "不是数值"),
+    ],
+)
+def test_执行配置拒绝非法目标级视觉伺服阈值(
+    tmp_path,
+    threshold_name,
+    invalid_value,
+):
+    config_data = yaml.safe_load(
+        Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
+    )
+    config_data["servo"][threshold_name] = invalid_value
+    config_path = tmp_path / "非法目标级阈值.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=threshold_name):
+        load_execution_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "missing_name",
+    ["block_error_threshold_px", "tray_error_threshold_px"],
+)
+def test_执行配置拒绝只配置一个目标级视觉伺服阈值(tmp_path, missing_name):
+    config_data = yaml.safe_load(
+        Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
+    )
+    config_data["servo"].pop(missing_name)
+    config_path = tmp_path / "缺少目标级阈值.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="必须同时配置"):
+        load_execution_config(config_path)
 
 
 @pytest.mark.parametrize("calibration_mode", [False, True])
@@ -174,6 +246,44 @@ def test_alignment_requires_configured_stable_frames():
         settle_sec=0,
     )
     assert result[0] is True
+
+
+def test_托盘小数阈值包含边界且超出时继续修正():
+    boundary_moves = []
+    boundary_result = run_offset_visual_servo_alignment(
+        lambda: _response(dx=0.5, dy=-0.5),
+        lambda *args, **kwargs: boundary_moves.append((args, kwargs)),
+        [0, 0, 200, 0, 0, 0],
+        {"pixel_to_robot_matrix": [[1, 0], [0, 1]]},
+        speed=25,
+        error_threshold_px=0.5,
+        max_step_mm=5,
+        max_iter=1,
+        success_stable_frames=1,
+        max_missed_frames=2,
+        settle_sec=0,
+        log_label="托盘视觉伺服",
+    )
+    over_limit_moves = []
+    over_limit_result = run_offset_visual_servo_alignment(
+        lambda: _response(dx=0.5001, dy=0.0),
+        lambda *args, **kwargs: over_limit_moves.append((args, kwargs)),
+        [0, 0, 200, 0, 0, 0],
+        {"pixel_to_robot_matrix": [[1, 0], [0, 1]]},
+        speed=25,
+        error_threshold_px=0.5,
+        max_step_mm=5,
+        max_iter=1,
+        success_stable_frames=1,
+        max_missed_frames=2,
+        settle_sec=0,
+        log_label="托盘视觉伺服",
+    )
+
+    assert boundary_result[0] is True
+    assert boundary_moves == []
+    assert over_limit_result[0] is False
+    assert len(over_limit_moves) == 1
 
 
 def test_alignment_stops_after_consecutive_misses():

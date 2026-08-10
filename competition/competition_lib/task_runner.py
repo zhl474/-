@@ -100,7 +100,14 @@ class TaskRunner:
         elif state is TaskState.FAILED:
             rospy.logerr("任务状态: %s", state.value)
 
-    def _align(self, offset_func, start_pose, log_label, event_callback=None):
+    def _align(
+        self,
+        offset_func,
+        start_pose,
+        log_label,
+        error_threshold_px,
+        event_callback=None,
+    ):
         start_pose = self._validate_motion_pose(start_pose, f"{log_label}起始位")
 
         def move_checked(pose, *args, **kwargs):
@@ -114,7 +121,7 @@ class TaskRunner:
             start_pose,
             self.visual_config,
             speed=self.config.servo_speed,
-            error_threshold_px=self.config.error_threshold_px,
+            error_threshold_px=error_threshold_px,
             max_step_mm=self.config.max_step_mm,
             min_step_mm=self.config.min_step_mm,
             max_iter=self.config.max_iter,
@@ -507,6 +514,7 @@ class TaskRunner:
                     ),
                     rough_pose,
                     "方块视觉伺服",
+                    self.config.block_error_threshold_px,
                     event_callback=round_callback,
                 )
             except Exception as exc:
@@ -599,6 +607,7 @@ class TaskRunner:
                     lambda: self.clients.detect_board_offset(target.row, target.col),
                     rough_pose,
                     "托盘视觉伺服",
+                    self.config.tray_error_threshold_px,
                     event_callback=round_callback,
                 )
             except Exception as exc:

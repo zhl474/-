@@ -85,6 +85,7 @@ DEPTH_MIN_VALID_FRAMES = 10  # 深度点在 3x3 邻域至少多少帧有效才�
 DEPTH_CAPTURE_TIMEOUT_SEC = 2.0  # 等待新深度帧的最大超时时间（秒）
 DEPTH_MAX_MAD_MM = 1.0  # 深度跨帧 MAD 上限（mm），超过判定深度失败
 IMAGE_TIMEOUT_SEC = 1.0  # 单次等待新相机帧的超时时间（秒）
+SERVO_ERROR_THRESHOLD_PX = 1.0  # ArUco 低位闭环成功阈值（px），独立于方块和托盘配置
 HIGH_DETECT_MAX_RETRIES = 30  # 高位连续取帧/识别失败多少次后放弃本样本
 IMAGE_TOPIC = "/camera/image_rect"  # 去畸变相机图像话题（bgr8）
 PROBE_DICT_NAMES = (  # 低位首帧诊断使用的多字典列表（第一个是正式检测字典）
@@ -649,7 +650,7 @@ def main():
         "安全X范围毫米": safe_x_range_mm,
         "安全Y范围毫米": safe_y_range_mm,
         "最低TCPZ毫米": minimum_z_mm,
-        "误差阈值像素": execution_config.error_threshold_px,
+        "误差阈值像素": SERVO_ERROR_THRESHOLD_PX,
         "最大步长毫米": execution_config.max_step_mm,
         "最小步长毫米": execution_config.min_step_mm,
         "最大轮数": execution_config.max_iter,
@@ -949,7 +950,7 @@ def run_one_sample(
                 low_pose,
                 visual_config,
                 speed=int(execution_config.servo_speed),
-                error_threshold_px=float(execution_config.error_threshold_px),
+                error_threshold_px=float(SERVO_ERROR_THRESHOLD_PX),
                 max_step_mm=float(execution_config.max_step_mm),
                 max_iter=int(execution_config.max_iter),
                 success_stable_frames=int(execution_config.success_stable_frames),

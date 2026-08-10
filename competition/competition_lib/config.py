@@ -25,7 +25,8 @@ class ExecutionConfig:
     lift_z: float
     minimum_tcp_z_mm: float
     timing_debug: bool
-    error_threshold_px: float
+    block_error_threshold_px: float
+    tray_error_threshold_px: float
     min_step_mm: float
     max_step_mm: float
     max_iter: int
@@ -60,12 +61,50 @@ def _nonnegative_int(value, name: str) -> int:
     return int(value)
 
 
+def _nonnegative_finite_float(value, name: str) -> float:
+    """严格读取有限非负浮点数，避免布尔值或非有限数进入运动配置。"""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} 必须是大于等于 0 的有限数值")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} 必须是大于等于 0 的有限数值") from None
+    if not np.isfinite(number) or number < 0:
+        raise ValueError(f"{name} 必须是大于等于 0 的有限数值")
+    return number
+
+
+def _servo_error_thresholds(servo: dict) -> tuple:
+    """读取目标级阈值，并兼容仅包含旧版统一阈值的配置。"""
+    block_key = "block_error_threshold_px"
+    tray_key = "tray_error_threshold_px"
+    has_block = block_key in servo
+    has_tray = tray_key in servo
+    if has_block != has_tray:
+        raise ValueError(
+            f"servo.{block_key} 和 servo.{tray_key} 必须同时配置"
+        )
+    if has_block:
+        return (
+            _nonnegative_finite_float(servo[block_key], f"servo.{block_key}"),
+            _nonnegative_finite_float(servo[tray_key], f"servo.{tray_key}"),
+        )
+    if "error_threshold_px" not in servo:
+        raise ValueError("servo 缺少方块和托盘视觉伺服误差阈值")
+    legacy_threshold = _nonnegative_finite_float(
+        servo["error_threshold_px"],
+        "servo.error_threshold_px",
+    )
+    return legacy_threshold, legacy_threshold
+
+
 def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> ExecutionConfig:
     with open(config_path, "r", encoding="utf-8") as config_file:
         data = yaml.safe_load(config_file) or {}
     motion = data.get("motion", {})
     servo = data.get("servo", {})
     motor = data.get("tool_motor", {})
+    block_error_threshold_px, tray_error_threshold_px = _servo_error_thresholds(servo)
     config = ExecutionConfig(
         calibration_mode=_strict_bool(data.get("calibration_mode", False), "calibration_mode"),
         visual_servo_enabled=_strict_bool(
@@ -80,7 +119,8 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         lift_z=float(motion["lift_z"]),
         minimum_tcp_z_mm=float(motion["minimum_tcp_z_mm"]),
         timing_debug=bool(servo.get("timing_debug", False)),
-        error_threshold_px=float(servo["error_threshold_px"]),
+        block_error_threshold_px=block_error_threshold_px,
+        tray_error_threshold_px=tray_error_threshold_px,
         min_step_mm=float(servo["min_step_mm"]),
         max_step_mm=float(servo["max_step_mm"]),
         max_iter=int(servo["max_iter"]),
@@ -99,7 +139,8 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
     numeric_values = [
         config.arm_speed, config.pick_speed, config.servo_speed, config.pick_surface_offset_mm, config.lift_z,
         config.minimum_tcp_z_mm,
-        config.error_threshold_px, config.min_step_mm, config.max_step_mm, config.max_iter,
+        config.block_error_threshold_px, config.tray_error_threshold_px,
+        config.min_step_mm, config.max_step_mm, config.max_iter,
         config.success_stable_frames, config.post_success_sample_frames,
         config.max_missed_frames, config.motor_velocity_deg_per_sec,
     ]
@@ -107,8 +148,8 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         raise ValueError("minimum_tcp_z_mm 必须是大于 0 的有限数值")
     if not np.all(np.isfinite(numeric_values)) or min(config.arm_speed, config.pick_speed, config.servo_speed) <= 0:
         raise ValueError("执行配置包含无效数值")
-    if config.error_threshold_px < 0 or not 0 <= config.min_step_mm <= config.max_step_mm:
-        raise ValueError("视觉伺服误差阈值和步长范围无效")
+    if not 0 <= config.min_step_mm <= config.max_step_mm:
+        raise ValueError("视觉伺服步长范围无效")
     if min(config.max_iter, config.success_stable_frames, config.max_missed_frames) <= 0:
         raise ValueError("视觉伺服迭代、稳定帧和丢失帧限制必须大于 0")
     if config.motor_velocity_deg_per_sec <= 0:

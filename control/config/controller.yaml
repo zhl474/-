@@ -6,7 +6,7 @@ arm_stability:
   timeout_seconds: 5.0
   poll_interval_seconds: 0.005
   duration_seconds: 0.01
-  linear_speed_threshold_mm_s: 3.0
-  angular_speed_threshold_deg_s: 3.0
-  position_tolerance_mm: 1.0
+  linear_speed_threshold_mm_s: 1.0
+  angular_speed_threshold_deg_s: 1.0
+  position_tolerance_mm: 0.5
   orientation_tolerance_deg: 0.5

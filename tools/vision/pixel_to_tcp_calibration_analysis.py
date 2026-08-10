@@ -34,7 +34,7 @@ RESULT_ROOT = SRC_DIR / "tools" / "vision" / "像素-tcp标定结果与数据分
 
 BLOCK_INPUT_CSV = Path("/home/zhl/桌面/标定数据/方块视觉伺服.csv")
 TRAY_INPUT_CSV = Path("/home/zhl/桌面/标定数据/托盘视觉伺服.csv")
-BLOCK_EXPECTED_SUCCESS_COUNT = 34
+BLOCK_EXPECTED_SUCCESS_COUNT = 35
 TRAY_EXPECTED_SUCCESS_COUNT = 34
 
 # TCP 点云的最小主轴/次小主轴不超过 1% 时认为近似共面。
@@ -884,6 +884,10 @@ def _read_v2_success_rows(job):
     dataframe[COL_EVENT] = dataframe[COL_EVENT].fillna("").astype(str).str.strip()
     dataframe[COL_CATEGORY] = dataframe[COL_CATEGORY].fillna("").astype(str).str.strip()
     dataframe[COL_SOURCE] = dataframe[COL_SOURCE].fillna("").astype(str).str.strip()
+    if COL_TARGET_TYPE in dataframe.columns:
+        dataframe[COL_TARGET_TYPE] = (
+            dataframe[COL_TARGET_TYPE].fillna("").astype(str).str.strip()
+        )
     invalid_events = sorted(set(dataframe[COL_EVENT]) - {SUCCESS_EVENT, FAILURE_EVENT})
     if invalid_events:
         raise ValueError(f"{job.label} CSV 存在非法事件值: {invalid_events}")
@@ -895,8 +899,19 @@ def _read_v2_success_rows(job):
         raise ValueError(
             f"{job.label}伺服成功数量为 {len(successes)}，期望 {job.expected_success_count}"
         )
-    if (successes[COL_CATEGORY] == "").any():
+    # 新版托盘日志使用目标类型和托盘行列标识目标，不再填写方块类别。
+    if job.subject == "block" and (successes[COL_CATEGORY] == "").any():
         raise ValueError(f"{job.label}成功记录存在空方块类别")
+    if COL_TARGET_TYPE in successes.columns:
+        expected_target_type = "方块" if job.subject == "block" else "托盘"
+        invalid_target_types = sorted(
+            set(successes[COL_TARGET_TYPE]) - {expected_target_type}
+        )
+        if invalid_target_types:
+            raise ValueError(
+                f"{job.label}成功记录的目标类型应全部为{expected_target_type}，"
+                f"实际异常值: {invalid_target_types}"
+            )
     numeric_columns = [
         *COL_PIXEL,
         *COL_TCP,

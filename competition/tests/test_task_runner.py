@@ -156,7 +156,10 @@ def test_闭环模式调用方块和托盘低位检测(monkeypatch):
         visual_config=load_visual_servo_config(),
     )
 
-    def align_once(offset_func, start_pose, _label, **_kwargs):
+    thresholds = []
+
+    def align_once(offset_func, start_pose, _label, error_threshold_px, **_kwargs):
+        thresholds.append(error_threshold_px)
         offset_func()
         return True, list(start_pose), None, "成功"
 
@@ -169,6 +172,10 @@ def test_闭环模式调用方块和托盘低位检测(monkeypatch):
 
     assert clients.block_offset_requests == [("T", 0.0)]
     assert clients.board_offset_requests == [(1.0, 1.0)]
+    assert thresholds == [
+        runner.config.block_error_threshold_px,
+        runner.config.tray_error_threshold_px,
+    ]
 
 
 def test_pick_uses_surface_height_and_configured_offset(monkeypatch):
@@ -444,7 +451,13 @@ def test_calibration_mode_writes_static_rounds_and_zero_error_tcp(monkeypatch, t
         score=0.9,
     )
 
-    def align_with_static_events(_func, pose, _label, event_callback=None):
+    def align_with_static_events(
+        _func,
+        pose,
+        _label,
+        _error_threshold_px,
+        event_callback=None,
+    ):
         event_callback({
             "事件": "稳定帧",
             "伺服轮次": 1,
@@ -508,7 +521,7 @@ def test_标定模式警告并强制开启视觉伺服(
         servo_csv_output_dir=tmp_path,
     )
     align_labels = []
-    runner._align = lambda _func, pose, label, **_kwargs: align_labels.append(label) or (
+    runner._align = lambda _func, pose, label, _threshold, **_kwargs: align_labels.append(label) or (
         True,
         list(pose),
         None,
@@ -711,7 +724,13 @@ def test_calibration_runner_dispatches_block_then_tray(monkeypatch, tmp_path):
     clients = _TargetTypeFakeClients(["block", "block", "tray", "tray"])
     runner = _calibration_runner(module, clients, tmp_path)
 
-    def align_calling_offset(offset_func, start_pose, _label, **_kwargs):
+    def align_calling_offset(
+        offset_func,
+        start_pose,
+        _label,
+        _error_threshold_px,
+        **_kwargs,
+    ):
         offset_func()
         return True, list(start_pose), None, "成功"
 
