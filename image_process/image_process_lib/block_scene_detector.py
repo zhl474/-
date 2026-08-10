@@ -17,11 +17,6 @@ from image_process_lib.template_match.template_match import get_rect
 HIGH_SCREENING_CONFIG = None
 
 
-def undistort_bgr_image(img_bgr, camera_matrix, dist_coeff):
-    """Gemini335 已输出可直接使用的图像，这里保留接口但不再做去畸变。"""
-    return img_bgr
-
-
 def _empty_detection(message, debug_image=None, debug_panel=None):
     return {
         "found": False,

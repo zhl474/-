@@ -46,6 +46,7 @@ from diagnostic_core import (  # noqa: E402
 # 可选值：board_check / capture / calibrate / verify
 MODE = "verify"
 
+# 仅用于专用原始彩图标定源；正式 camera_node 不发布这个话题。
 CAMERA_TOPIC = "/camera/image_raw"
 EXPECTED_IMAGE_SIZE = (1280, 720)  # (宽, 高)，不允许自动缩放
 PATTERN_SIZE = (4, 7)  # 暂按“每行4点、共7行”定义

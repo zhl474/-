@@ -86,7 +86,7 @@ DEPTH_CAPTURE_TIMEOUT_SEC = 2.0  # 等待新深度帧的最大超时时间（秒
 DEPTH_MAX_MAD_MM = 1.0  # 深度跨帧 MAD 上限（mm），超过判定深度失败
 IMAGE_TIMEOUT_SEC = 1.0  # 单次等待新相机帧的超时时间（秒）
 HIGH_DETECT_MAX_RETRIES = 30  # 高位连续取帧/识别失败多少次后放弃本样本
-IMAGE_TOPIC = "/camera/image_raw"  # 相机图像话题（bgr8）
+IMAGE_TOPIC = "/camera/image_rect"  # 去畸变相机图像话题（bgr8）
 PROBE_DICT_NAMES = (  # 低位首帧诊断使用的多字典列表（第一个是正式检测字典）
     "DICT_6X6_50", "DICT_6X6_250", "DICT_6X6_1000",
     "DICT_5X5_50", "DICT_4X4_50", "DICT_ARUCO_ORIGINAL",

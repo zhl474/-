@@ -5,6 +5,7 @@ import os
 import threading
 import time
 
+import cv2
 import numpy as np
 import rospy
 from cv_bridge import CvBridge
@@ -25,6 +26,79 @@ from camera.srv import (
 PACKAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DEFAULT_CAMERA_CONFIG = os.path.join(PACKAGE_DIR, "config", "新相机参数.yaml")
 DEFAULT_HAND_EYE_MATRIX = os.path.join(PACKAGE_DIR, "config", "T_wrist2camera.npy")
+EXPECTED_RGB_IMAGE_SIZE = (1280, 720)  # (宽, 高)
+HIGH_ORDER_DISTORTION_TOLERANCE = 1e-12
+
+
+def load_factory_rgb_calibration(camera_param, expected_image_size=EXPECTED_RGB_IMAGE_SIZE):
+    """把 SDK 当前设备的 RGB 出厂参数转换成 OpenCV K/D。"""
+    try:
+        intrinsic = camera_param.rgb_intrinsic
+        distortion = camera_param.rgb_distortion
+        width = int(intrinsic.width)
+        height = int(intrinsic.height)
+        intrinsic_values = np.asarray(
+            [intrinsic.fx, intrinsic.fy, intrinsic.cx, intrinsic.cy],
+            dtype=np.float64,
+        )
+        distortion_values = np.asarray(
+            [
+                distortion.k1,
+                distortion.k2,
+                distortion.p1,
+                distortion.p2,
+                distortion.k3,
+            ],
+            dtype=np.float64,
+        )
+        high_order_values = np.asarray(
+            [distortion.k4, distortion.k5, distortion.k6],
+            dtype=np.float64,
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError(f"SDK RGB 出厂标定参数不完整: {exc}") from exc
+
+    expected_width, expected_height = (int(value) for value in expected_image_size)
+    if (width, height) != (expected_width, expected_height):
+        raise ValueError(
+            f"SDK RGB 标定分辨率必须为 {expected_width}x{expected_height}，"
+            f"实际为 {width}x{height}"
+        )
+    if not np.all(np.isfinite(intrinsic_values)):
+        raise ValueError("SDK RGB 内参包含非有限数值")
+    if intrinsic_values[0] <= 0.0 or intrinsic_values[1] <= 0.0:
+        raise ValueError("SDK RGB 焦距必须为正数")
+    if not np.all(np.isfinite(distortion_values)):
+        raise ValueError("SDK RGB 五参数畸变系数包含非有限数值")
+    if not np.all(np.isfinite(high_order_values)):
+        raise ValueError("SDK RGB 高阶畸变系数包含非有限数值")
+    if np.any(np.abs(high_order_values) > HIGH_ORDER_DISTORTION_TOLERANCE):
+        raise ValueError(
+            "当前去畸变只支持 k4/k5/k6 为零的五参数模型，"
+            f"实际高阶系数为 {high_order_values.tolist()}"
+        )
+
+    fx, fy, cx, cy = intrinsic_values
+    camera_matrix = np.asarray(
+        [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    return camera_matrix, distortion_values
+
+
+def create_rgb_rectification_maps(camera_matrix, distortion, image_size):
+    """预计算从原始彩图到同一出厂 K 无畸变平面的浮点映射表。"""
+    width, height = (int(value) for value in image_size)
+    camera_matrix = np.asarray(camera_matrix, dtype=np.float64).reshape(3, 3)
+    distortion = np.asarray(distortion, dtype=np.float64).reshape(5)
+    return cv2.initUndistortRectifyMap(
+        camera_matrix,
+        distortion,
+        np.eye(3, dtype=np.float64),
+        camera_matrix,
+        (width, height),
+        cv2.CV_32FC1,
+    )
 
 
 class CameraNode:
@@ -33,6 +107,16 @@ class CameraNode:
         self.hand_eye_matrix_path = rospy.get_param("~hand_eye_matrix", DEFAULT_HAND_EYE_MATRIX)
         self.cap = AkaiGemini335(yaml_path=camera_config)
         self.cap.config = Config()  # 修复库 bug：release() 需要该属性
+        self.rgb_image_size = EXPECTED_RGB_IMAGE_SIZE
+        self.rgb_camera_matrix, self.rgb_distortion = load_factory_rgb_calibration(
+            self.cap.camera_param,
+            self.rgb_image_size,
+        )
+        self.rgb_rectify_map_x, self.rgb_rectify_map_y = create_rgb_rectification_maps(
+            self.rgb_camera_matrix,
+            self.rgb_distortion,
+            self.rgb_image_size,
+        )
         self.world_bias_mm = np.asarray(rospy.get_param("~world_bias_mm", [0.0, 0.0, 0.0]), dtype=float)
         if self.world_bias_mm.shape != (3,) or not np.all(np.isfinite(self.world_bias_mm)):
             raise ValueError("world_bias_mm 必须包含 3 个有限数值")
@@ -40,7 +124,7 @@ class CameraNode:
         if not np.isfinite(self.depth_max_age_sec) or self.depth_max_age_sec <= 0.0:
             raise ValueError("depth_max_age_sec 必须是大于 0 的有限数值")
 
-        self.image_pub = rospy.Publisher("/camera/image_raw", Image, queue_size=1)
+        self.image_pub = rospy.Publisher("/camera/image_rect", Image, queue_size=1)
         self.bridge = CvBridge()
         self.depth_lock = threading.Lock()
         self.depth_condition = threading.Condition(self.depth_lock)
@@ -63,6 +147,14 @@ class CameraNode:
             self.get_stable_world_points,
         )
         rospy.on_shutdown(self.close)
+        rospy.loginfo(
+            "RGB 使用 SDK 出厂参数统一去畸变：尺寸=%dx%d，K=%s，D=%s，"
+            "输出话题=/camera/image_rect，输出模型=P=K、D=0",
+            self.rgb_image_size[0],
+            self.rgb_image_size[1],
+            self.rgb_camera_matrix.tolist(),
+            self.rgb_distortion.tolist(),
+        )
         rospy.loginfo("相机节点已启动")
 
     @staticmethod
@@ -171,6 +263,30 @@ class CameraNode:
             self.latest_depth_image = None
             self.latest_depth_monotonic = None
             self.depth_condition.notify_all()
+
+    def _rectify_color_image(self, color_image):
+        """校验 SDK 彩图并转换到与对齐深度一致的无畸变 RGB 像素平面。"""
+        if not isinstance(color_image, np.ndarray):
+            raise ValueError("彩图必须是 numpy 数组")
+        expected_width, expected_height = self.rgb_image_size
+        expected_shape = (expected_height, expected_width, 3)
+        if color_image.shape != expected_shape:
+            raise ValueError(
+                f"彩图尺寸或通道数错误：期望 {expected_shape}，实际 {color_image.shape}"
+            )
+        if color_image.dtype != np.uint8:
+            raise ValueError(f"彩图类型必须为 uint8，实际为 {color_image.dtype}")
+        rectified = cv2.remap(
+            color_image,
+            self.rgb_rectify_map_x,
+            self.rgb_rectify_map_y,
+            cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+        )
+        if rectified is None or rectified.shape != expected_shape:
+            actual_shape = None if rectified is None else rectified.shape
+            raise RuntimeError(f"彩图去畸变输出尺寸错误：{actual_shape}")
+        return rectified
 
     @staticmethod
     def _median_depth_in_clipped_neighborhood(depth_image, x, y):
@@ -356,6 +472,19 @@ class CameraNode:
                 rate.sleep()
                 continue
 
+            if color_image is None:
+                self._clear_depth_cache()
+                rospy.logwarn("本次相机读取没有彩色图像，已丢弃同次深度图")
+                rate.sleep()
+                continue
+            try:
+                rectified_color_image = self._rectify_color_image(color_image)
+            except Exception as exc:
+                self._clear_depth_cache()
+                rospy.logerr("彩图去畸变失败，已丢弃同次彩图和深度图: %s", exc)
+                rate.sleep()
+                continue
+
             # 深度帧缺失或异常不影响同次彩色图像发布，但必须让旧深度立即失效。
             if depth_image is None:
                 self._clear_depth_cache()
@@ -366,16 +495,13 @@ class CameraNode:
                     self._clear_depth_cache()
                     rospy.logwarn("缓存深度图失败，本帧仍发布彩色图像: %s", exc)
 
-            if color_image is None:
-                rospy.logwarn("本次相机读取没有彩色图像")
-            else:
-                try:
-                    message = self.bridge.cv2_to_imgmsg(color_image, encoding="bgr8")
-                    message.header.stamp = rospy.Time.now()
-                    message.header.frame_id = "camera_frame"
-                    self.image_pub.publish(message)
-                except Exception as exc:
-                    rospy.logerr("发布彩色图像失败: %s", exc)
+            try:
+                message = self.bridge.cv2_to_imgmsg(rectified_color_image, encoding="bgr8")
+                message.header.stamp = rospy.Time.now()
+                message.header.frame_id = "camera_frame"
+                self.image_pub.publish(message)
+            except Exception as exc:
+                rospy.logerr("发布去畸变彩色图像失败: %s", exc)
             rate.sleep()
 
     def close(self):

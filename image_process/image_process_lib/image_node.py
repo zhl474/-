@@ -113,6 +113,10 @@ class ImageProcessor:
         self.fresh_image_timeout_sec = float(rospy.get_param("~fresh_image_timeout_sec", 0.5))
         if not np.isfinite(self.fresh_image_timeout_sec) or self.fresh_image_timeout_sec <= 0.0:
             raise ValueError("fresh_image_timeout_sec 必须是大于 0 的有限数值")
+        self.image_topic = rospy.get_param("~image_topic", "/camera/image_rect")
+        if not isinstance(self.image_topic, str) or not self.image_topic.strip():
+            raise ValueError("image_topic 必须是非空字符串")
+        self.image_topic = self.image_topic.strip()
         self.task_targets = []
         self.board_grid_points = None
         self.board_grid_image_shape = None
@@ -552,7 +556,7 @@ class ImageProcessor:
                 tray_calibration_path,
                 safety_mode,
             )
-        self.image_sub = rospy.Subscriber("/camera/image_raw", Image, self.image_callback)
+        self.image_sub = rospy.Subscriber(self.image_topic, Image, self.image_callback)
         self.prepare_task_service = rospy.Service("/perception/prepare_task", PrepareTask, self.prepare_task)
         self.get_task_target_service = rospy.Service(
             "/perception/get_task_target", GetTaskTarget, self.get_task_target
@@ -564,6 +568,7 @@ class ImageProcessor:
             "/perception/board_offset", DetectBoardOffset, self.detect_board_offset_service
         )
         rospy.on_shutdown(self.close_runtime_resources)
+        rospy.loginfo("图像处理节点订阅去畸变彩图: %s", self.image_topic)
         rospy.loginfo("图像处理服务已启动")
 
     def terminate_high_mask_editor_process(self):

@@ -8,6 +8,7 @@
 
   <node pkg="image_process" type="process.py" name="image_process_node" output="screen">
     <param name="calibration_mode" value="true"/>
+    <param name="image_topic" value="/camera/image_rect"/>
     <param name="experiment_session_id" value="$(arg experiment_session_id)"/>
     <param name="experiment_archive_root" value="$(arg experiment_archive_root)"/>
     <param name="save_top_surface_mask_vis" value="true"/>

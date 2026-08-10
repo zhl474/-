@@ -780,10 +780,11 @@ def test_runtime_initialization_never_creates_depth_client(monkeypatch, tmp_path
     image_node_module = sys.modules[module.ImageProcessor.__module__]
     _set_execution_calibration_mode(monkeypatch, tmp_path, image_node_module, False)
     monkeypatch.setattr(image_node_module, "YOLO", lambda _path: object())
+    subscriber_calls = []
     monkeypatch.setattr(
         image_node_module.rospy,
         "Subscriber",
-        lambda *_args, **_kwargs: object(),
+        lambda *args, **kwargs: subscriber_calls.append((args, kwargs)) or object(),
     )
     monkeypatch.setattr(
         image_node_module.rospy,
@@ -807,8 +808,18 @@ def test_runtime_initialization_never_creates_depth_client(monkeypatch, tmp_path
     processor = module.ImageProcessor()
 
     assert processor.calibration_mode is False
+    assert processor.image_topic == "/camera/image_rect"
+    assert subscriber_calls[0][0][0] == "/camera/image_rect"
     assert processor.stable_world_points_client is None
     assert processor.high_tcp_localizer is not None
+
+
+def test_formal_launch_files_explicitly_use_rectified_image_topic():
+    src_dir = os.path.dirname(PACKAGE_DIR)
+    for launch_name in ("competition.launch", "calibration.launch"):
+        launch_path = os.path.join(src_dir, "competition", "launch", launch_name)
+        text = open(launch_path, "r", encoding="utf-8").read()
+        assert '<param name="image_topic" value="/camera/image_rect"/>' in text
 
 
 @pytest.mark.parametrize(

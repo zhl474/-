@@ -29,7 +29,7 @@ from aruco_diagnostic_core import (  # noqa: E402
 from run_aruco_experiment import FreshImageReader  # noqa: E402
 
 # ==================== 运行参数（直接修改本文件后运行）====================
-IMAGE_TOPIC = "/camera/image_raw"  # 相机图像话题
+IMAGE_TOPIC = "/camera/image_rect"  # 去畸变相机图像话题
 IMAGE_TIMEOUT_SEC = 1.0  # 单次等待新相机帧的超时时间（秒）
 OUTPUT_DIR = Path("/home/zhl/桌面/aruco探针")  # 回车保存的图片输出目录
 DICT_NAMES = (  # 多字典诊断列表（第一个是正式检测字典）

@@ -5,6 +5,7 @@ import threading
 import time
 import types
 
+import cv2
 import numpy as np
 import pytest
 
@@ -21,7 +22,9 @@ class _Message:
 
 
 class _Publisher:
-    def __init__(self, *_args, **_kwargs):
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
         self.messages = []
 
     def publish(self, message):
@@ -29,9 +32,53 @@ class _Publisher:
 
 
 class _Bridge:
-    def cv2_to_imgmsg(self, _image, encoding):
+    def __init__(self):
+        self.images = []
+
+    def cv2_to_imgmsg(self, image, encoding):
         assert encoding == "bgr8"
+        self.images.append(np.asarray(image).copy())
         return _Message()
+
+
+def _camera_param(
+    *,
+    width=1280,
+    height=720,
+    fx=695.376221,
+    fy=695.366638,
+    cx=644.507324,
+    cy=359.515381,
+    k1=0.007665,
+    k2=-0.056596,
+    p1=-0.000349,
+    p2=0.000659,
+    k3=0.037667,
+    k4=0.0,
+    k5=0.0,
+    k6=0.0,
+):
+    """构造与 pyorbbecsdk 公共字段一致的轻量出厂参数。"""
+    return types.SimpleNamespace(
+        rgb_intrinsic=types.SimpleNamespace(
+            width=width,
+            height=height,
+            fx=fx,
+            fy=fy,
+            cx=cx,
+            cy=cy,
+        ),
+        rgb_distortion=types.SimpleNamespace(
+            k1=k1,
+            k2=k2,
+            p1=p1,
+            p2=p2,
+            k3=k3,
+            k4=k4,
+            k5=k5,
+            k6=k6,
+        ),
+    )
 
 
 def _load_camera(monkeypatch):
@@ -71,7 +118,10 @@ def _load_camera(monkeypatch):
     akai_fr.AkaiFr = object
     monkeypatch.setitem(sys.modules, "akai_fr", akai_fr)
     gemini = types.ModuleType("akai_gemini335")
-    gemini.AkaiGemini335 = lambda **_kwargs: types.SimpleNamespace(release=lambda: None)
+    gemini.AkaiGemini335 = lambda **_kwargs: types.SimpleNamespace(
+        camera_param=_camera_param(),
+        release=lambda: None,
+    )
     monkeypatch.setitem(sys.modules, "akai_gemini335", gemini)
 
     camera = types.ModuleType("camera")
@@ -109,6 +159,17 @@ def _make_node(module, depth_image=None, depth_stamp=100.0):
         depth_pixel2cam_point3d=lambda _x, _y, depth_value: [0.0, 0.0, depth_value]
     )
     return node
+
+
+def _set_test_rectification(node, width=2, height=2):
+    """给轻量发布节点安装确定的恒等 remap。"""
+    map_x, map_y = np.meshgrid(
+        np.arange(width, dtype=np.float32),
+        np.arange(height, dtype=np.float32),
+    )
+    node.rgb_image_size = (width, height)
+    node.rgb_rectify_map_x = map_x
+    node.rgb_rectify_map_y = map_y
 
 
 def _start_stable_request(node, request):
@@ -169,6 +230,80 @@ def test_node_startup_does_not_initialize_arm_or_load_hand_eye(monkeypatch):
     assert node.depth_collectors == []
     assert not hasattr(node, "depth_batch_max_span_sec")
     assert not hasattr(node, "depth_buffer_size")
+    assert node.image_pub.args[0] == "/camera/image_rect"
+    assert node.rgb_image_size == (1280, 720)
+    assert node.rgb_rectify_map_x.shape == (720, 1280)
+    assert node.rgb_rectify_map_y.shape == (720, 1280)
+
+
+def test_factory_rgb_calibration_uses_opencv_five_parameter_order(monkeypatch):
+    module = _load_camera(monkeypatch)
+
+    camera_matrix, distortion = module.load_factory_rgb_calibration(_camera_param())
+
+    np.testing.assert_allclose(
+        camera_matrix,
+        [
+            [695.376221, 0.0, 644.507324],
+            [0.0, 695.366638, 359.515381],
+            [0.0, 0.0, 1.0],
+        ],
+    )
+    np.testing.assert_allclose(
+        distortion,
+        [0.007665, -0.056596, -0.000349, 0.000659, 0.037667],
+    )
+
+
+@pytest.mark.parametrize(
+    ("camera_param", "message"),
+    [
+        (_camera_param(width=640), "标定分辨率必须为 1280x720"),
+        (_camera_param(fx=np.nan), "内参包含非有限数值"),
+        (_camera_param(k2=np.inf), "五参数畸变系数包含非有限数值"),
+        (_camera_param(k4=1e-5), "只支持 k4/k5/k6 为零"),
+    ],
+)
+def test_factory_rgb_calibration_rejects_unsafe_parameters(
+    monkeypatch,
+    camera_param,
+    message,
+):
+    module = _load_camera(monkeypatch)
+
+    with pytest.raises(ValueError, match=message):
+        module.load_factory_rgb_calibration(camera_param)
+
+
+def test_rectification_maps_match_opencv_point_model(monkeypatch):
+    module = _load_camera(monkeypatch)
+    camera_matrix, distortion = module.load_factory_rgb_calibration(_camera_param())
+
+    map_x, map_y = module.create_rgb_rectification_maps(
+        camera_matrix,
+        distortion,
+        (1280, 720),
+    )
+
+    assert map_x.shape == (720, 1280)
+    assert map_y.shape == (720, 1280)
+    assert map_x.dtype == np.float32
+    assert map_y.dtype == np.float32
+    output_points = np.asarray(
+        [[640, 360], [0, 0], [1279, 0], [0, 719], [1279, 719]],
+        dtype=np.float32,
+    )
+    source_points = np.asarray(
+        [[map_x[y, x], map_y[y, x]] for x, y in output_points.astype(int)],
+        dtype=np.float32,
+    ).reshape(-1, 1, 2)
+    recovered_points = cv2.undistortPoints(
+        source_points,
+        camera_matrix,
+        distortion,
+        P=camera_matrix,
+    ).reshape(-1, 2)
+    np.testing.assert_allclose(recovered_points, output_points, atol=0.02)
 
 
 def test_stable_world_points_use_temporal_median_mad_and_one_camera_pose(monkeypatch):
@@ -409,6 +544,7 @@ def test_rgb_is_published_when_same_capture_has_no_depth(monkeypatch):
     node.depth_collectors = []
     node.bridge = _Bridge()
     node.image_pub = _Publisher()
+    _set_test_rectification(node)
     shutdown_values = iter([False, True])
     monkeypatch.setattr(module.rospy, "is_shutdown", lambda: next(shutdown_values))
 
@@ -432,6 +568,7 @@ def test_new_rgb_without_depth_invalidates_previous_depth_cache(monkeypatch):
     node.depth_max_age_sec = 0.5
     node.bridge = _Bridge()
     node.image_pub = _Publisher()
+    _set_test_rectification(node)
     shutdown_values = iter([False, True])
     monkeypatch.setattr(module.rospy, "is_shutdown", lambda: next(shutdown_values))
 
@@ -463,11 +600,69 @@ def test_depth_cache_conversion_failure_invalidates_previous_cache(monkeypatch):
     node.depth_collectors = []
     node.bridge = _Bridge()
     node.image_pub = _Publisher()
+    _set_test_rectification(node)
     shutdown_values = iter([False, True])
     monkeypatch.setattr(module.rospy, "is_shutdown", lambda: next(shutdown_values))
 
     node.publish_images()
 
     assert len(node.image_pub.messages) == 1
+    assert node.latest_depth_image is None
+    assert node.latest_depth_monotonic is None
+
+
+def test_publish_uses_rectified_color_instead_of_raw_color(monkeypatch):
+    module = _load_camera(monkeypatch)
+    node = object.__new__(module.CameraNode)
+    color_image = np.asarray(
+        [
+            [[1, 1, 1], [2, 2, 2]],
+            [[3, 3, 3], [4, 4, 4]],
+        ],
+        dtype=np.uint8,
+    )
+    node.cap = types.SimpleNamespace(read=lambda: (color_image, None))
+    node.depth_lock = threading.Lock()
+    node.depth_condition = threading.Condition(node.depth_lock)
+    node.latest_depth_image = None
+    node.latest_depth_monotonic = None
+    node.depth_collectors = []
+    node.bridge = _Bridge()
+    node.image_pub = _Publisher()
+    node.rgb_image_size = (2, 2)
+    node.rgb_rectify_map_x = np.asarray([[1, 0], [1, 0]], dtype=np.float32)
+    node.rgb_rectify_map_y = np.asarray([[0, 0], [1, 1]], dtype=np.float32)
+    shutdown_values = iter([False, True])
+    monkeypatch.setattr(module.rospy, "is_shutdown", lambda: next(shutdown_values))
+
+    node.publish_images()
+
+    expected = color_image[:, ::-1]
+    assert len(node.image_pub.messages) == 1
+    np.testing.assert_array_equal(node.bridge.images[0], expected)
+
+
+def test_invalid_color_frame_is_not_published_and_clears_depth(monkeypatch):
+    module = _load_camera(monkeypatch)
+    node = object.__new__(module.CameraNode)
+    invalid_color = np.zeros((1, 2, 3), dtype=np.uint8)
+    node.cap = types.SimpleNamespace(
+        read=lambda: (invalid_color, np.full((2, 2), 300.0, dtype=np.float32))
+    )
+    node.depth_lock = threading.Lock()
+    node.depth_condition = threading.Condition(node.depth_lock)
+    node.latest_depth_image = np.full((2, 2), 100.0, dtype=float)
+    node.latest_depth_monotonic = 100.0
+    node.depth_collectors = []
+    node.bridge = _Bridge()
+    node.image_pub = _Publisher()
+    _set_test_rectification(node)
+    shutdown_values = iter([False, True])
+    monkeypatch.setattr(module.rospy, "is_shutdown", lambda: next(shutdown_values))
+
+    node.publish_images()
+
+    assert node.image_pub.messages == []
+    assert node.bridge.images == []
     assert node.latest_depth_image is None
     assert node.latest_depth_monotonic is None

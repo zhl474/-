@@ -23,7 +23,8 @@
 编辑 `rgb_circle_calibration.py` 开头的 `MODE`：
 
 - `board_check`：同时显示 `(4,7)` 和 `(7,4)` 的检测与点序；先用完整正视图确认。
-- `capture`：订阅正式 `/camera/image_raw`，空格/回车保存检测成功帧，`q` 退出。
+- `capture`：订阅专用原始彩图 `/camera/image_raw`；正式 `camera_node` 只发布
+  `/camera/image_rect`，需要重做 RGB 内参时应先停止正式节点并单独提供原始帧源。
 - `calibrate`：重新检测保存的原图，求五参数模型、零畸变基线和5折留出误差。
 - `verify`：加载已有 YAML，显示原图/去畸变图并打印指定像素修正量。
 

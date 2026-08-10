@@ -23,7 +23,7 @@ from image_process_lib.template_config import (
 # 直接改这里，不需要命令行传参
 # =========================
 TARGET_CATEGORY = "z_green"  # 可选: line / square / L_yellow / L_blue / z_blue / z_green / T
-CAMERA_TOPIC = "/camera/image_raw"
+CAMERA_TOPIC = "/camera/image_rect"
 PATCH_SIZE = 3
 WAIT_TIMEOUT = 30.0
 WRITE_BACK = True  # True: 按 s 写入 template_config.yaml；False: 按 s 只打印建议值

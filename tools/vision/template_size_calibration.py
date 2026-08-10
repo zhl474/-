@@ -22,7 +22,7 @@ from image_process_lib.template_config import TEMPLATE_CONFIG_PATH
 # ========================= 直接修改的运行参数 =========================
 INPUT_IMAGES = []  # 留空时从相机读取；也可填写多个图片路径。
 USE_CAMERA = True
-CAMERA_TOPIC = "/camera/image_raw"
+CAMERA_TOPIC = "/camera/image_rect"
 FRAME_COUNT = 1
 WAIT_TIMEOUT_SEC = 30.0
 SAVE_VISUALIZATION = False
@@ -38,7 +38,7 @@ MIN_CONTOUR_AREA = 50.0
 DETECT_MODEL_PATH = os.path.join(SRC_DIR, "competition", "model", "best5.14.pt")
 CALIBRATION_MATRIX_PATH = os.path.join(SRC_DIR, "competition", "config", "calibration_matrix.yaml")
 DEFAULT_VIS_DIR = os.path.join(os.path.expanduser("~/.ros/single_arm_tetris"), "模板尺寸标定")
-DEFAULT_CAMERA_TOPIC = "/camera/image_raw"
+DEFAULT_CAMERA_TOPIC = "/camera/image_rect"
 
 CATEGORY_NAME_MAP = {
     "LR": "L_blue",

@@ -37,7 +37,7 @@ POSITION_TOLERANCE_MM = 1.0
 ORIENTATION_TOLERANCE_DEG = 0.5
 
 # ========================= 相机与图像比较参数 =========================
-CAMERA_TOPIC = "/camera/image_raw"
+CAMERA_TOPIC = "/camera/image_rect"
 CAMERA_WAIT_TIMEOUT_SECONDS = 10.0
 # 第一张图拍摄后，等待此时间再获取第二张图。
 SECOND_IMAGE_DELAY_SECONDS = 2.0
