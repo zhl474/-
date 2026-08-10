@@ -20,6 +20,7 @@ if IMAGE_PROCESS_DIR not in sys.path:
     sys.path.insert(0, IMAGE_PROCESS_DIR)
 
 from akai_gemini335 import AkaiGemini335
+from pyorbbecsdk import Config
 from image_process_lib.board_scene_detector import (
     BOARD_COL_COUNT,
     BOARD_POINT_COUNT,
@@ -265,6 +266,7 @@ def main():
     try:
         print("正在连接 Gemini335；请确认 camera_node 已停止，避免相机被占用。")
         camera = AkaiGemini335(yaml_path=CAMERA_CONFIG_PATH)
+        camera.config = Config()  # 修复库 bug：release() 需要该属性
         color_image, depth_image = read_stable_frame(camera)
         print(f"已获取同帧彩色图和深度图，图像尺寸：{color_image.shape[1]}x{color_image.shape[0]}")
 

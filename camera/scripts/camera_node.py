@@ -13,6 +13,7 @@ from sensor_msgs.msg import Image
 from akai import DEG, MM, tf3d
 from akai_fr import AkaiFr
 from akai_gemini335 import AkaiGemini335
+from pyorbbecsdk import Config
 from camera.srv import (
     GetStableWorldPoints,
     GetStableWorldPointsResponse,
@@ -31,6 +32,7 @@ class CameraNode:
         camera_config = rospy.get_param("~camera_config", DEFAULT_CAMERA_CONFIG)
         self.hand_eye_matrix_path = rospy.get_param("~hand_eye_matrix", DEFAULT_HAND_EYE_MATRIX)
         self.cap = AkaiGemini335(yaml_path=camera_config)
+        self.cap.config = Config()  # 修复库 bug：release() 需要该属性
         self.world_bias_mm = np.asarray(rospy.get_param("~world_bias_mm", [0.0, 0.0, 0.0]), dtype=float)
         if self.world_bias_mm.shape != (3,) or not np.all(np.isfinite(self.world_bias_mm)):
             raise ValueError("world_bias_mm 必须包含 3 个有限数值")

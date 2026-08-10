@@ -267,7 +267,7 @@ def process_frame(frame, source_name, detect_model, camera_params, measurements,
     h, w = frame.shape[:2]
     result = detect_model(frame, iou=args.iou, conf=args.detect_conf, verbose=False)
     if not args.no_window:
-        cv2.imshow("检测结果", result[0].plot())
+        cv2.imshow("detection result", result[0].plot())
         cv2.waitKey(0)
         cv2.destroyAllWindows()
     if len(result) == 0 or result[0].boxes is None or len(result[0].boxes) == 0:
