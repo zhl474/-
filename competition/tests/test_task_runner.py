@@ -46,9 +46,21 @@ def _read_csv_rows(path):
         return list(csv.DictReader(file_handle))
 
 
+def _completed_rotation(module, angle_deg=180.0):
+    """构造一个已经到期的摆放旋转记录，供只测试摆放动作的用例使用。"""
+    return module.ServoRotationEstimate(
+        start_angle_deg=float(angle_deg),
+        target_angle_deg=float(angle_deg),
+        estimated_duration_sec=0.0,
+        command_accepted_at=0.0,
+        ready_at=0.0,
+    )
+
+
 class _FakeClients:
     def __init__(self):
         self.moves = []
+        self.rotation_angles = []
         self.suction_states = []
         self.prepare_requests = []
         self.actual_pose_calls = 0
@@ -83,7 +95,8 @@ class _FakeClients:
     def move_arm(self, pose, speed, wait_sec=0.0, wait_until_stable=False):
         self.moves.append((list(pose), speed, wait_sec, wait_until_stable))
 
-    def rotate_tool(self, _angle):
+    def rotate_tool(self, angle):
+        self.rotation_angles.append(float(angle))
         return None
 
     def set_suction(self, state):
@@ -167,8 +180,8 @@ def test_闭环模式调用方块和托盘低位检测(monkeypatch):
     target = clients.get_task_target(0)
     target.pick_surface_z_mm = 8.0
 
-    runner._pick(target)
-    runner._place(target)
+    place_rotation = runner._pick(target)
+    runner._place(target, place_rotation=place_rotation)
 
     assert clients.block_offset_requests == [("T", 0.0)]
     assert clients.board_offset_requests == [(1.0, 1.0)]
@@ -194,14 +207,10 @@ def test_pick_uses_surface_height_and_configured_offset(monkeypatch):
     assert clients.moves[2][0][2] == 177.5
 
 
-@pytest.mark.parametrize(
-    ("surface_z_mm", "expected_pick_z_mm"),
-    [(8.0, 170.0), (10.5, 172.5)],
-)
+@pytest.mark.parametrize("surface_z_mm", [8.0, 10.5])
 def test_闭环抓取使用动态预抓取和托盘伺服高度抬升(
     monkeypatch,
     surface_z_mm,
-    expected_pick_z_mm,
 ):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
@@ -221,9 +230,17 @@ def test_闭环抓取使用动态预抓取和托盘伺服高度抬升(
 
     runner._pick(target)
 
+    expected_pick_z_mm = surface_z_mm + runner.config.pick_surface_offset_mm
     expected_poses = [
         [0, 0, 200, -180, 0, 90],
-        [-93.1, -11.8, expected_pick_z_mm + 5.0, -180, 0, 90],
+        [
+            -93.1,
+            -11.8,
+            expected_pick_z_mm + runner.config.pick_approach_clearance_mm,
+            -180,
+            0,
+            90,
+        ],
         [-93.1, -11.8, expected_pick_z_mm, -180, 0, 90],
         [-93.1, -11.8, 200.0, -180, 0, 90],
     ]
@@ -256,9 +273,17 @@ def test_开环抓取直接到动态预抓取位并抬到托盘伺服高度(monk
 
     runner._pick(target)
 
+    expected_pick_z_mm = target.pick_surface_z_mm + execution_config.pick_surface_offset_mm
     expected_poses = [
-        [-94.1, -13.8, 175.0, -180.0, 0.0, 90.0],
-        [-94.1, -13.8, 170.0, -180.0, 0.0, 90.0],
+        [
+            -94.1,
+            -13.8,
+            expected_pick_z_mm + execution_config.pick_approach_clearance_mm,
+            -180.0,
+            0.0,
+            90.0,
+        ],
+        [-94.1, -13.8, expected_pick_z_mm, -180.0, 0.0, 90.0],
         [-94.1, -13.8, 200.0, -180.0, 0.0, 90.0],
     ]
     assert len(clients.moves) == len(expected_poses)
@@ -305,7 +330,7 @@ def test_place_keeps_dynamic_observation_height_and_directly_releases(monkeypatc
     runner._align = lambda *_args, **_kwargs: (True, [11, 12, 234, -180, 0, 90], None, "成功")
     target = clients.get_task_target(0)
 
-    runner._place(target)
+    runner._place(target, place_rotation=_completed_rotation(module))
 
     assert clients.moves[0][0] == [10, 10, 200, -180, 0, 90]
     assert clients.moves[1][0] == pytest.approx([-83.1, -1.8, 234.0, -180.0, 0.0, 90.0])
@@ -329,7 +354,10 @@ def test_开环摆放应用xy偏置并保留托盘高度(monkeypatch):
         AssertionError("开环摆放不应调用视觉伺服")
     )
 
-    runner._place(clients.get_task_target(0))
+    runner._place(
+        clients.get_task_target(0),
+        place_rotation=_completed_rotation(module),
+    )
 
     assert len(clients.moves) == 1
     assert clients.moves[0][0] == pytest.approx(
@@ -366,7 +394,7 @@ def test_pick_rejects_missing_surface_height_before_moving(monkeypatch):
         ("pick_observation_pose", [0, 0, 164.9, -180, 0, 90], "低于 TCP 安全下限"),
         ("place_observation_pose", [0, 0, 160.0, -180, 0, 90], "托盘观察位"),
         ("pick_surface_z_mm", float("inf"), "方块抓取表面高度"),
-        ("pick_surface_z_mm", 2.0, "最终抓取位"),
+        ("pick_surface_z_mm", -1.0, "最终抓取位"),
     ],
 )
 def test_pick_rejects_invalid_pose_or_height_before_moving(
@@ -760,6 +788,230 @@ def test_completed_state_logs_total_execution_time(monkeypatch):
     assert runner.execution_start_time is None
 
 
+def test_舵机命令服务返回后才开始预计计时(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    events = []
+
+    def rotate_tool(angle):
+        events.append(("舵机服务已返回", float(angle)))
+
+    def monotonic():
+        events.append(("记录开始时间", 50.0))
+        return 50.0
+
+    monkeypatch.setattr(module.time, "monotonic", monotonic)
+    planner = module.ServoAnglePlanner(
+        _execution_config(timing_debug=False),
+        rotate_tool,
+    )
+
+    rotation = planner.commit_place_angle(270.0)
+
+    assert events == [
+        ("舵机服务已返回", 270.0),
+        ("记录开始时间", 50.0),
+    ]
+    assert rotation.start_angle_deg == 180.0
+    assert rotation.target_angle_deg == 270.0
+    assert rotation.estimated_duration_sec == pytest.approx(90.0 / 270.0)
+    assert rotation.command_accepted_at == 50.0
+    assert rotation.ready_at == pytest.approx(50.0 + 90.0 / 270.0)
+
+
+def test_舵机命令失败时不更新软件角度(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+
+    def rotate_failed(_angle):
+        raise RuntimeError("串口发送失败")
+
+    planner = module.ServoAnglePlanner(
+        _execution_config(timing_debug=False),
+        rotate_failed,
+    )
+
+    with pytest.raises(RuntimeError, match="串口发送失败"):
+        planner.commit_place_angle(270.0)
+
+    assert planner.last_angle == 180.0
+
+
+@pytest.mark.parametrize(
+    ("now", "expected_remaining"),
+    [(10.3, 0.2), (10.8, 0.0)],
+)
+def test_舵机等待只补足未被其它步骤覆盖的时间(
+    monkeypatch,
+    now,
+    expected_remaining,
+):
+    module = _load_task_runner(monkeypatch)
+    runner = module.TaskRunner(
+        clients=_FakeClients(),
+        execution_config=_execution_config(timing_debug=False),
+        visual_config=load_visual_servo_config(),
+    )
+    rotation = module.ServoRotationEstimate(
+        start_angle_deg=180.0,
+        target_angle_deg=315.0,
+        estimated_duration_sec=0.5,
+        command_accepted_at=10.0,
+        ready_at=10.5,
+    )
+    sleep_calls = []
+    monkeypatch.setattr(module.time, "monotonic", lambda: now)
+    monkeypatch.setattr(module.time, "sleep", sleep_calls.append)
+
+    remaining_sec = runner._wait_for_motor_rotation(rotation, "测试阶段")
+
+    assert remaining_sec == pytest.approx(expected_remaining)
+    assert sleep_calls == pytest.approx(
+        [expected_remaining] if expected_remaining > 0.0 else []
+    )
+
+
+@pytest.mark.parametrize("visual_servo_enabled", [True, False])
+def test_抓取前预旋转统一在下探前检查(
+    monkeypatch,
+    visual_servo_enabled,
+):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    events = []
+
+    original_move_arm = clients.move_arm
+
+    def move_arm(*args, **kwargs):
+        original_move_arm(*args, **kwargs)
+        events.append(f"机械臂运动{len(clients.moves)}")
+
+    def rotate_tool(angle):
+        clients.rotation_angles.append(float(angle))
+        events.append(f"舵机旋转{float(angle):.0f}")
+
+    clients.move_arm = move_arm
+    clients.rotate_tool = rotate_tool
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=_execution_config(
+            timing_debug=False,
+            visual_servo_enabled=visual_servo_enabled,
+        ),
+        visual_config=load_visual_servo_config(),
+    )
+    runner.angle_planner.last_angle = 350.0
+    target = clients.get_task_target(0)
+    target.pick_surface_z_mm = 8.0
+    target.rotation_delta_deg = 20.0
+
+    if visual_servo_enabled:
+        runner._align = lambda *_args, **_kwargs: (
+            events.append("方块视觉伺服")
+            or (True, [0, 0, 200, -180, 0, 90], None, "成功")
+        )
+    else:
+        runner._align = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("开环抓取不应调用视觉伺服")
+        )
+
+    def wait_for_rotation(rotation, purpose):
+        assert rotation is not None
+        events.append(f"检查{purpose}")
+        return 0.0
+
+    runner._wait_for_motor_rotation = wait_for_rotation
+    runner._pick(target)
+
+    if visual_servo_enabled:
+        assert events[:6] == [
+            "舵机旋转330",
+            "机械臂运动1",
+            "方块视觉伺服",
+            "机械臂运动2",
+            "检查抓取前预旋转",
+            "机械臂运动3",
+        ]
+    else:
+        assert events[:4] == [
+            "舵机旋转330",
+            "机械臂运动1",
+            "检查抓取前预旋转",
+            "机械臂运动2",
+        ]
+
+
+def test_摆放旋转统一在喷气前检查(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    events = []
+
+    original_move_arm = clients.move_arm
+    original_set_suction = clients.set_suction
+
+    def move_arm(*args, **kwargs):
+        original_move_arm(*args, **kwargs)
+        events.append(f"机械臂运动{len(clients.moves)}")
+
+    def rotate_tool(angle):
+        clients.rotation_angles.append(float(angle))
+        events.append(f"舵机旋转{float(angle):.0f}")
+
+    def set_suction(state):
+        original_set_suction(state)
+        events.append(f"吸盘状态{state}")
+
+    clients.move_arm = move_arm
+    clients.rotate_tool = rotate_tool
+    clients.set_suction = set_suction
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=_execution_config(
+            timing_debug=False,
+            visual_servo_enabled=False,
+        ),
+        visual_config=load_visual_servo_config(),
+    )
+    target = clients.get_task_target(0)
+    target.pick_surface_z_mm = 8.0
+    target.rotation_delta_deg = 90.0
+
+    def wait_for_rotation(rotation, purpose):
+        events.append(f"检查{purpose}")
+        if purpose == "抓取前预旋转":
+            assert rotation is None
+        else:
+            assert rotation.target_angle_deg == 270.0
+            assert rotation.estimated_duration_sec == pytest.approx(90.0 / 270.0)
+        return 0.0
+
+    runner._wait_for_motor_rotation = wait_for_rotation
+    place_rotation = runner._pick(target)
+    runner._place(target, place_rotation=place_rotation)
+
+    assert events.index("舵机旋转270") < events.index("机械臂运动4")
+    assert events.index("机械臂运动4") < events.index("检查抓取后摆放旋转")
+    assert events.index("检查抓取后摆放旋转") < events.index(
+        f"吸盘状态{module.RobotClients.BLOW}"
+    )
+
+
+def test_缺少摆放旋转记录时禁止喷气(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=_execution_config(
+            timing_debug=False,
+            visual_servo_enabled=False,
+        ),
+        visual_config=load_visual_servo_config(),
+    )
+
+    with pytest.raises(RuntimeError, match="缺少本次舵机旋转记录"):
+        runner._place(clients.get_task_target(0))
+
+    assert module.RobotClients.BLOW not in clients.suction_states
+
+
 def test_任务步骤计时输出中文标签和耗时(monkeypatch):
     module = _load_task_runner(monkeypatch)
     runner = module.TaskRunner(
@@ -808,10 +1060,18 @@ def test_标定方块下探后退回自身观察高度且不读取全零托盘�
 
     runner._pick(target)
 
+    expected_pick_z_mm = target.pick_surface_z_mm + runner.config.pick_surface_offset_mm
     expected_poses = [
         [0, 0, 200, -180, 0, 90],
-        [-93.1, -11.8, 175.0, -180, 0, 90],
-        [-93.1, -11.8, 170.0, -180, 0, 90],
+        [
+            -93.1,
+            -11.8,
+            expected_pick_z_mm + runner.config.pick_approach_clearance_mm,
+            -180,
+            0,
+            90,
+        ],
+        [-93.1, -11.8, expected_pick_z_mm, -180, 0, 90],
         [-93.1, -11.8, 200.0, -180, 0, 90],
     ]
     for move, expected_pose in zip(clients.moves, expected_poses):

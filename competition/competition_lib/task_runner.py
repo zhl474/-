@@ -1,7 +1,7 @@
 """粗定位与视觉伺服抓放任务状态机。"""
 
 from enum import Enum
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 import math
 from pathlib import Path
@@ -30,6 +30,17 @@ class TaskState(Enum):
     FAILED = "失败"
 
 
+@dataclass(frozen=True)
+class ServoRotationEstimate:
+    """一次舵机指令的预计运动区间，时间基于命令服务成功返回的时刻。"""
+
+    start_angle_deg: float
+    target_angle_deg: float
+    estimated_duration_sec: float
+    command_accepted_at: float
+    ready_at: float
+
+
 class ServoAnglePlanner:
     def __init__(self, config, rotate_func):
         self.last_angle = config.initial_motor_angle_deg
@@ -38,24 +49,38 @@ class ServoAnglePlanner:
         self.upper_margin = config.motor_upper_margin_deg
         self.rotate_func = rotate_func
 
+    def _command_rotation(self, target_angle):
+        """发送绝对角度，并在服务确认命令已写出后开始保守计时。"""
+        start_angle = float(self.last_angle)
+        target_angle = float(target_angle)
+        estimated_duration_sec = abs(target_angle - start_angle) / self.velocity
+
+        # rotate_func 失败时会抛出异常，此时不得更新软件记录的舵机角度。
+        self.rotate_func(target_angle)
+        command_accepted_at = time.monotonic()
+        self.last_angle = target_angle
+        return ServoRotationEstimate(
+            start_angle_deg=start_angle,
+            target_angle_deg=target_angle,
+            estimated_duration_sec=estimated_duration_sec,
+            command_accepted_at=command_accepted_at,
+            ready_at=command_accepted_at + estimated_duration_sec,
+        )
+
     def plan(self, rotation_delta_deg):
-        wait_sec = 0.0
-        target = self.last_angle + float(rotation_delta_deg)
+        rotation_delta_deg = float(rotation_delta_deg)
+        pre_pick_rotation = None
+        target = self.last_angle + rotation_delta_deg
         if target > 360.0:
-            safe_pick_angle = self.upper_margin - float(rotation_delta_deg)
-            wait_sec = abs(self.last_angle - safe_pick_angle) / self.velocity
-            self.rotate_func(safe_pick_angle)
-            self.last_angle = safe_pick_angle
+            safe_pick_angle = self.upper_margin - rotation_delta_deg
+            pre_pick_rotation = self._command_rotation(safe_pick_angle)
         elif target < 0.0:
-            safe_pick_angle = self.lower_margin - float(rotation_delta_deg)
-            wait_sec = abs(self.last_angle - safe_pick_angle) / self.velocity
-            self.rotate_func(safe_pick_angle)
-            self.last_angle = safe_pick_angle
-        return self.last_angle, self.last_angle + float(rotation_delta_deg), wait_sec
+            safe_pick_angle = self.lower_margin - rotation_delta_deg
+            pre_pick_rotation = self._command_rotation(safe_pick_angle)
+        return self.last_angle, self.last_angle + rotation_delta_deg, pre_pick_rotation
 
     def commit_place_angle(self, place_angle):
-        self.rotate_func(place_angle)
-        self.last_angle = float(place_angle)
+        return self._command_rotation(place_angle)
 
 
 class TaskRunner:
@@ -110,6 +135,30 @@ class TaskRunner:
         finally:
             elapsed_ms = (time.monotonic() - started_at) * 1000.0
             rospy.loginfo("任务步骤耗时：%s=%.1f ms", label, elapsed_ms)
+
+    def _wait_for_motor_rotation(self, rotation, purpose):
+        """在关键动作前只补足舵机预计运动尚未被其它步骤覆盖的时间。"""
+        if rotation is None:
+            return 0.0
+
+        now = time.monotonic()
+        elapsed_sec = max(0.0, now - rotation.command_accepted_at)
+        remaining_sec = max(0.0, rotation.ready_at - now)
+        if remaining_sec > 0.0:
+            time.sleep(remaining_sec)
+
+        if self.config.timing_debug:
+            rospy.loginfo(
+                "舵机旋转等待：阶段=%s，角度=%.1f°→%.1f°，估算=%.1f ms，"
+                "已与其它步骤重叠=%.1f ms，补足=%.1f ms",
+                purpose,
+                rotation.start_angle_deg,
+                rotation.target_angle_deg,
+                rotation.estimated_duration_sec * 1000.0,
+                min(elapsed_sec, rotation.estimated_duration_sec) * 1000.0,
+                remaining_sec * 1000.0,
+            )
+        return remaining_sec
 
     def _align(
         self,
@@ -512,7 +561,7 @@ class TaskRunner:
             height_check_pose[2] = height
             self._validate_motion_pose(height_check_pose, label)
 
-        _, place_angle, motor_wait = self._timed_call(
+        _, place_angle, pre_pick_rotation = self._timed_call(
             "舵机角度规划与预旋转指令",
             self.angle_planner.plan,
             target.rotation_delta_deg,
@@ -526,12 +575,6 @@ class TaskRunner:
                 self.config.arm_speed,
                 wait_until_stable=True,
             )
-            if motor_wait > 0:
-                self._timed_call(
-                    "舵机避限位等待",
-                    time.sleep,
-                    motor_wait,
-                )
 
             self._set_state(TaskState.PICK_ALIGN)
             trial_context = self._build_trial_context(target, "pick", task_index)
@@ -598,14 +641,9 @@ class TaskRunner:
             self.config.pick_approach_speed,
             wait_until_stable=True,
         )
-        if not self.visual_servo_enabled:
-            if motor_wait > 0:
-                self._timed_call(
-                    "舵机避限位等待",
-                    time.sleep,
-                    motor_wait,
-                )
 
+        # 无论开环还是闭环，都只在真正下探前检查抓取前预旋转是否完成。
+        self._wait_for_motor_rotation(pre_pick_rotation, "抓取前预旋转")
         self._set_state(TaskState.PICKING)
         pick_pose = list(pre_pick_pose)
         pick_pose[2] = pick_z_mm
@@ -635,13 +673,14 @@ class TaskRunner:
             self.config.arm_speed,
             wait_until_stable=False,
         )
-        self._timed_call(
+        place_rotation = self._timed_call(
             "摆放角度舵机指令",
             self.angle_planner.commit_place_angle,
             place_angle,
         )
+        return place_rotation
 
-    def _place(self, target, task_index=None):
+    def _place(self, target, task_index=None, place_rotation=None):
         rough_pose = self._validate_motion_pose(target.place_observation_pose, "托盘观察位")
         open_loop_place_pose = None
         if not self.visual_servo_enabled:
@@ -733,6 +772,12 @@ class TaskRunner:
                 self.config.arm_speed,
                 wait_until_stable=True,
             )
+
+        if not self.config.calibration_mode:
+            if place_rotation is None:
+                raise RuntimeError("摆放前缺少本次舵机旋转记录，已禁止喷气")
+            # 机械臂搬运可以覆盖舵机转动时间，但喷气前必须确认预计旋转已经完成。
+            self._wait_for_motor_rotation(place_rotation, "抓取后摆放旋转")
 
         self._set_state(TaskState.PLACING)
         if not self.config.calibration_mode:
@@ -831,8 +876,12 @@ class TaskRunner:
                         f"{target_type!r}；标定采集请改用 calibration.py 启动"
                     )
                 rospy.loginfo("执行第 %d/%d 个任务，类别=%s", index + 1, task_count, target.category)
-                self._pick(target, task_index=index + 1)
-                self._place(target, task_index=index + 1)
+                place_rotation = self._pick(target, task_index=index + 1)
+                self._place(
+                    target,
+                    task_index=index + 1,
+                    place_rotation=place_rotation,
+                )
                 if self.config.timing_debug:
                     rospy.loginfo(
                         "单块任务总耗时：第 %d/%d 块=%.1f ms",
