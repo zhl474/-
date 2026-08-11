@@ -10,8 +10,13 @@ from akai_fr import AkaiFr
 # ========================= 直接修改的实机参数 =========================
 # 目标工具位姿：[X, Y, Z, Rx, Ry, Rz]，单位分别为 mm 和 °。
 # 默认值沿用项目现有复位测试点；运行前仍须根据现场确认其安全、可达。
-TARGET_POSE = [-250.4151306152343, -100, 200, -180.0, 0.0, 90.0]
-MOVE_SPEED = 50
+TARGET_POSE = [-337.4151306152343, 0, 200, -180.0, 0.0, 90.0]
+MOVE_SPEED = 180
+# 全局加速度百分比，范围建议为 1～100。
+# - None：不调用加速度设置接口，用于测试控制器当前保留的参数。
+# - 数值：运动前调用 SetOaccScale，例如设为 50、80 或 100。
+# 请先用 None 测一次，再改成目标数值测试；None 不会恢复此前被其他程序修改过的参数。
+ACCELERATION_SCALE = 100
 TOOL_ID = 0
 USER_ID = 0
 
@@ -22,7 +27,7 @@ SAMPLE_INTERVAL_SECONDS = 0.005
 STABLE_CONFIRM_SECONDS = 0.20
 
 # TCP 实际速度阈值。
-LINEAR_SPEED_THRESHOLD_MM_S = 1.0
+LINEAR_SPEED_THRESHOLD_MM_S = 3.0
 ANGULAR_SPEED_THRESHOLD_DEG_S = 1.0
 # TCP 到达目标点的误差阈值。
 POSITION_TOLERANCE_MM = 1.0
@@ -221,6 +226,10 @@ def print_report(events, move_return_time, move_call_seconds):
     intervals = [later - earlier for earlier, later in zip(sample_times, sample_times[1:])]
 
     print("\n========== MoveL 后实际速度停稳测试报告 ==========")
+    if ACCELERATION_SCALE is None:
+        print("全局加速度设置：未主动设置，使用控制器当前保留值")
+    else:
+        print(f"全局加速度设置：{float(ACCELERATION_SCALE):.1f}%")
     print(f"MoveL 调用耗时：{move_call_seconds:.3f} 秒")
     print(f"MoveL 返回时刻：{move_return_time:.3f} 秒")
     print(f"首次观测到运动中：{format_event_time(events['first_motion_time'], move_return_time)}")
@@ -286,6 +295,12 @@ def main():
     print("警告：本脚本会驱动真实机械臂运动。")
     print(f"目标 TCP 位姿：{TARGET_POSE}")
     print(f"运动速度：{MOVE_SPEED}")
+    if ACCELERATION_SCALE is None:
+        print("全局加速度：不主动设置，使用控制器当前保留值")
+    else:
+        if isinstance(ACCELERATION_SCALE, bool) or not 1 <= float(ACCELERATION_SCALE) <= 100:
+            raise ValueError("ACCELERATION_SCALE 必须为 None 或 1～100 之间的数值")
+        print(f"全局加速度：主动设置为 {float(ACCELERATION_SCALE):.1f}%")
     confirmation = input("确认目标点和运动路径安全后，输入 yes 开始测试：").strip().lower()
     if confirmation != "yes":
         print("已取消测试，未发送运动指令。")
@@ -296,6 +311,13 @@ def main():
     try:
         arm.set_speed(MOVE_SPEED)
         arm.set_tcf(1, [0, 0, 0, 0, 0, 0])
+        if ACCELERATION_SCALE is not None:
+            acceleration_result = xmlrpc_arm.SetOaccScale(float(ACCELERATION_SCALE))
+            if not move_result_succeeded(acceleration_result):
+                raise RuntimeError(
+                    f"设置全局加速度失败，返回值：{acceleration_result!r}"
+                )
+            print(f"全局加速度已设置为 {float(ACCELERATION_SCALE):.1f}%")
 
         initial_pose = unpack_rpc_result(
             "GetActualTCPPose",
@@ -331,5 +353,5 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (RuntimeError, TimeoutError) as error:
+    except (RuntimeError, TimeoutError, ValueError) as error:
         print(f"测试失败：{error}")

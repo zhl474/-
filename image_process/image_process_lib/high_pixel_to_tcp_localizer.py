@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -16,6 +17,23 @@ from image_process_lib.pixel_to_tcp_calibration import (
 DEFAULT_TCP_MIN_XYZ = (-444.224, -263.279, 165.0)
 DEFAULT_TCP_MAX_XYZ = (-148.17, 315.925, None)
 _SUBJECT_LABELS = {"block": "方块", "tray": "托盘"}
+_AXIS_NAMES = ("X", "Y", "Z")
+
+
+@dataclass(frozen=True)
+class HighTcpSafetyAssessment:
+    """一次高位像素定位及其实际待执行 TCP 的结构化安全评估。"""
+
+    subject: str
+    pixel_xy: tuple[float, float]
+    predicted_tcp_xyz: tuple[float, float, float]
+    safety_tcp_xyz: tuple[float, float, float]
+    violated_axes: tuple[str, ...]
+
+    @property
+    def safe(self) -> bool:
+        """没有任何坐标轴越界时视为安全。"""
+        return not self.violated_axes
 
 
 def _finite_vector(value: Sequence[float], size: int, name: str) -> np.ndarray:
@@ -126,6 +144,37 @@ class HighPixelToTcpLocalizer:
 
     def predict_tcp_xyz(self, subject: str, pixel_xy: Sequence[float]) -> np.ndarray:
         """预测并校验 TCP XYZ；标定样本凸包不作为正式抓取范围。"""
+        assessment = self.assess(subject, pixel_xy)
+        tcp_xyz = np.asarray(assessment.predicted_tcp_xyz, dtype=float)
+        safety_tcp_xyz = np.asarray(assessment.safety_tcp_xyz, dtype=float)
+        if assessment.safe:
+            return tcp_xyz.copy()
+
+        label = _SUBJECT_LABELS[subject]
+        maximum_text = [
+            float(value) if np.isfinite(value) else None
+            for value in self._tcp_max_xyz
+        ]
+        if np.any(self._safety_xy_offset != 0.0):
+            raise ValueError(
+                f"{label}（{subject}）高位像素 {pixel_xy!r} 预测 TCP XYZ "
+                f"{tcp_xyz.tolist()} 加安全校验 XY 偏移 "
+                f"{self._safety_xy_offset.tolist()} 后的待执行 TCP XYZ "
+                f"{safety_tcp_xyz.tolist()} 超出安全范围："
+                f"最小值 {self._tcp_min_xyz.tolist()}，最大值 {maximum_text}"
+            )
+        raise ValueError(
+            f"{label}（{subject}）高位像素 {pixel_xy!r} 预测 TCP XYZ "
+            f"{tcp_xyz.tolist()} 超出安全范围：最小值 {self._tcp_min_xyz.tolist()}，"
+            f"最大值 {maximum_text}"
+        )
+
+    def assess(
+        self,
+        subject: str,
+        pixel_xy: Sequence[float],
+    ) -> HighTcpSafetyAssessment:
+        """预测目标 TCP 并返回非抛出式安全结果；标定预测错误仍由调用方处理。"""
         calibration = self._subject_calibration(subject, pixel_xy)
         label = _SUBJECT_LABELS[subject]
         try:
@@ -137,29 +186,23 @@ class HighPixelToTcpLocalizer:
 
         safety_tcp_xyz = tcp_xyz.copy()
         safety_tcp_xyz[:2] += self._safety_xy_offset
-        if (
-            not np.all(np.isfinite(safety_tcp_xyz))
-            or np.any(safety_tcp_xyz < self._tcp_min_xyz)
-            or np.any(safety_tcp_xyz > self._tcp_max_xyz)
-        ):
-            maximum_text = [
-                float(value) if np.isfinite(value) else None
-                for value in self._tcp_max_xyz
-            ]
-            if np.any(self._safety_xy_offset != 0.0):
-                raise ValueError(
-                    f"{label}（{subject}）高位像素 {pixel_xy!r} 预测 TCP XYZ "
-                    f"{tcp_xyz.tolist()} 加安全校验 XY 偏移 "
-                    f"{self._safety_xy_offset.tolist()} 后的待执行 TCP XYZ "
-                    f"{safety_tcp_xyz.tolist()} 超出安全范围："
-                    f"最小值 {self._tcp_min_xyz.tolist()}，最大值 {maximum_text}"
-                )
-            raise ValueError(
-                f"{label}（{subject}）高位像素 {pixel_xy!r} 预测 TCP XYZ "
-                f"{tcp_xyz.tolist()} 超出安全范围：最小值 {self._tcp_min_xyz.tolist()}，"
-                f"最大值 {maximum_text}"
+        violated_axes = tuple(
+            axis_name
+            for axis_name, value, minimum, maximum in zip(
+                _AXIS_NAMES,
+                safety_tcp_xyz,
+                self._tcp_min_xyz,
+                self._tcp_max_xyz,
             )
-        return tcp_xyz.copy()
+            if not np.isfinite(value) or value < minimum or value > maximum
+        )
+        return HighTcpSafetyAssessment(
+            subject=subject,
+            pixel_xy=(float(pixel_xy[0]), float(pixel_xy[1])),
+            predicted_tcp_xyz=tuple(float(value) for value in tcp_xyz),
+            safety_tcp_xyz=tuple(float(value) for value in safety_tcp_xyz),
+            violated_axes=violated_axes,
+        )
 
     def locate(self, subject: str, pixel_xy: Sequence[float]) -> list[float]:
         """按主体生成 [X, Y, Z, R, P, YAW] 高位粗定位观察位姿。"""

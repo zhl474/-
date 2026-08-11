@@ -1307,10 +1307,22 @@ def test_prepare_task_uses_one_snapshot_and_clears_targets_when_any_point_fails(
     processor.get_image_snapshot_newer_than = lambda _stamp: snapshot
     received_images = []
     processor._detect_board_for_task = lambda image: received_images.append(image)
-    processor._detect_blocks_for_task = lambda image: (
-        received_images.append(image) or ([object()], [1, 0, 0, 0, 0, 0, 0])
+    raw_blocks = [{"category": "T", "px": 1.0, "py": 2.0, "theta": 0.0}]
+    processor._detect_blocks_automatic = lambda image: (
+        received_images.append(image) or (raw_blocks, image.copy(), {})
+    )
+    processor._summarize_detected_blocks = lambda blocks: (
+        blocks,
+        [1, 0, 0, 0, 0, 0, 0],
     )
     processor._load_layout_for_request = lambda _request, _counts: ([object()], "测试布局")
+    processor._validate_high_task_safety = lambda *_args: None
+    processor._edit_and_rematch_blocks = lambda _image, blocks, _geometry, debug: (
+        blocks,
+        debug,
+    )
+    processor._save_high_block_debug_images = lambda *_args: None
+    processor._build_observed_blocks_for_task = lambda blocks, _shape: blocks
 
     def fail_tray_calibration(_layout, _image_shape):
         raise ValueError("托盘预测 TCP 超出安全范围")
@@ -1634,21 +1646,17 @@ def test_shutdown_terminates_active_high_mask_editor_process(monkeypatch):
     assert recorder_closed == [True]
 
 
-@pytest.mark.parametrize("calibration_mode", [False, True])
-def test_manual_editor_failure_stops_before_localization_depth_and_planning(
-    monkeypatch,
-    calibration_mode,
-):
+def test_calibration_manual_editor_failure_stops_before_depth_and_planning(monkeypatch):
     module = _load_process_module_with_stubs(
         monkeypatch,
-        f"process_high_mask_failure_order_{calibration_mode}",
+        "process_high_mask_failure_order_calibration",
     )
     processor = object.__new__(module.ImageProcessor)
     processor.task_targets = [object()]
     processor.board_grid_points = object()
     processor.board_grid_image_shape = (1, 1)
     processor.board_grid_image = np.zeros((1, 1, 3), dtype=np.uint8)
-    processor.calibration_mode = calibration_mode
+    processor.calibration_mode = True
     processor.get_image_snapshot_newer_than = lambda _stamp: np.zeros(
         (20, 30, 3),
         dtype=np.uint8,
@@ -1723,6 +1731,177 @@ def test_block_raw_detection_applies_manual_masks_before_return(monkeypatch):
     assert call_order == ["人工编辑", "父进程重匹配"]
     assert blocks == [{"category": "T", "px": 50.0, "py": 60.0, "theta": 70.0}]
     assert sum(counts) == 1
+
+
+def test_high_safety_check_collects_all_block_and_tray_violations(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_high_safety_batch")
+    processor = object.__new__(module.ImageProcessor)
+    blocks = [
+        {"category": "T", "px": 10.0, "py": 20.0},
+        {"category": "square", "px": 30.0, "py": 40.0},
+    ]
+    layout = [
+        {"index": 5, "row": 1.0, "col": 2.0, "category": "T", "angle_deg": 0.0},
+    ]
+    processor._placement_specs = lambda _layout: [(layout[0], (50.0, 60.0))]
+
+    assessments = {
+        ("block", (10.0, 20.0)): types.SimpleNamespace(
+            safe=False,
+            safety_tcp_xyz=(-525.1, 80.3, 190.2),
+            violated_axes=("X",),
+        ),
+        ("block", (30.0, 40.0)): types.SimpleNamespace(
+            safe=False,
+            safety_tcp_xyz=(-180.2, 321.8, 189.7),
+            violated_axes=("Y",),
+        ),
+        ("tray", (50.0, 60.0)): types.SimpleNamespace(
+            safe=False,
+            safety_tcp_xyz=(-530.0, 320.0, 200.0),
+            violated_axes=("X", "Y"),
+        ),
+    }
+    processor.high_tcp_localizer = types.SimpleNamespace(
+        assess=lambda subject, pixel: assessments[(subject, tuple(pixel))]
+    )
+
+    violations = processor._collect_high_tcp_safety_violations(blocks, layout)
+
+    assert violations == [
+        "方块 1（T）：预测实际 TCP [-525.100, 80.300, 190.200]，X 越界",
+        "方块 2（square）：预测实际 TCP [-180.200, 321.800, 189.700]，Y 越界",
+        "托盘目标 6：预测实际 TCP [-530.000, 320.000, 200.000]，X、Y 越界",
+    ]
+
+
+def test_high_safety_check_continues_after_single_prediction_failure(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_high_safety_predict_error")
+    processor = object.__new__(module.ImageProcessor)
+    blocks = [
+        {"category": "T", "px": 10.0, "py": 20.0},
+        {"category": "square", "px": 30.0, "py": 40.0},
+    ]
+    processor._placement_specs = lambda _layout: []
+
+    def assess(_subject, pixel):
+        if tuple(pixel) == (10.0, 20.0):
+            raise ValueError("模型输入无效")
+        return types.SimpleNamespace(
+            safe=False,
+            safety_tcp_xyz=(-300.0, 320.0, 200.0),
+            violated_axes=("Y",),
+        )
+
+    processor.high_tcp_localizer = types.SimpleNamespace(assess=assess)
+
+    violations = processor._collect_high_tcp_safety_violations(blocks, [])
+
+    assert violations == [
+        "方块 1（T）：TCP 预测失败：模型输入无效",
+        "方块 2（square）：预测实际 TCP [-300.000, 320.000, 200.000]，Y 越界",
+    ]
+
+
+def test_formal_precheck_failure_does_not_open_mask_editor(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_high_safety_precheck")
+    processor = object.__new__(module.ImageProcessor)
+    processor.task_targets = [object()]
+    processor.board_grid_points = None
+    processor.board_grid_image_shape = None
+    processor.board_grid_image = None
+    processor.calibration_mode = False
+    processor.fresh_image_timeout_sec = 0.5
+    image = np.zeros((20, 30, 3), dtype=np.uint8)
+    processor.get_image_snapshot_newer_than = lambda _stamp: image
+    processor._detect_board_for_task = lambda _image: None
+    raw_blocks = [{"category": "T", "px": 10.0, "py": 20.0, "theta": 0.0}]
+    processor._detect_blocks_automatic = lambda _image: (raw_blocks, image.copy(), {})
+    layout = [{"index": 0, "row": 1.0, "col": 1.0, "category": "T", "angle_deg": 0.0}]
+    processor._load_layout_for_request = lambda _request, _counts: (layout, "测试布局")
+    processor._placement_specs = lambda _layout: [(layout[0], (50.0, 60.0))]
+
+    def assess(subject, _pixel):
+        if subject == "block":
+            return types.SimpleNamespace(
+                safe=False,
+                safety_tcp_xyz=(-525.1, 80.3, 190.2),
+                violated_axes=("X",),
+            )
+        return types.SimpleNamespace(
+            safe=True,
+            safety_tcp_xyz=(-300.0, 0.0, 200.0),
+            violated_axes=(),
+        )
+
+    processor.high_tcp_localizer = types.SimpleNamespace(assess=assess)
+    processor._edit_and_rematch_blocks = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("初检失败时不应打开 Mask 编辑器")
+    )
+
+    response = processor._prepare_task_locked(types.SimpleNamespace(advanced=False))
+
+    assert response.success is False
+    assert response.task_count == 0
+    assert response.message == (
+        "高位初步安全检查失败：\n"
+        "- 方块 1（T）：预测实际 TCP [-525.100, 80.300, 190.200]，X 越界\n"
+        "本轮未打开 Mask 编辑器"
+    )
+    assert processor.task_targets == []
+
+
+def test_formal_final_check_uses_edited_center_and_reports_all(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_high_safety_final")
+    processor = object.__new__(module.ImageProcessor)
+    processor.task_targets = []
+    processor.board_grid_points = None
+    processor.board_grid_image_shape = None
+    processor.board_grid_image = None
+    processor.calibration_mode = False
+    processor.fresh_image_timeout_sec = 0.5
+    image = np.zeros((20, 30, 3), dtype=np.uint8)
+    processor.get_image_snapshot_newer_than = lambda _stamp: image
+    processor._detect_board_for_task = lambda _image: None
+    raw_blocks = [{"category": "T", "px": 10.0, "py": 20.0, "theta": 0.0}]
+    edited_blocks = [{"category": "T", "px": 70.0, "py": 80.0, "theta": 5.0}]
+    processor._detect_blocks_automatic = lambda _image: (raw_blocks, image.copy(), {})
+    layout = [{"index": 0, "row": 1.0, "col": 1.0, "category": "T", "angle_deg": 0.0}]
+    processor._load_layout_for_request = lambda _request, _counts: (layout, "测试布局")
+    processor._placement_specs = lambda _layout: [(layout[0], (50.0, 60.0))]
+    edit_calls = []
+    processor._edit_and_rematch_blocks = lambda *_args: (
+        edit_calls.append(True) or (edited_blocks, image.copy())
+    )
+    processor._save_high_block_debug_images = lambda *_args: None
+
+    def assess(subject, pixel):
+        if subject == "block" and tuple(pixel) == (70.0, 80.0):
+            return types.SimpleNamespace(
+                safe=False,
+                safety_tcp_xyz=(-180.2, 321.8, 189.7),
+                violated_axes=("Y",),
+            )
+        return types.SimpleNamespace(
+            safe=True,
+            safety_tcp_xyz=(-300.0, 0.0, 200.0),
+            violated_axes=(),
+        )
+
+    processor.high_tcp_localizer = types.SimpleNamespace(assess=assess)
+    processor._build_observed_blocks_for_task = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("最终复检失败后不应生成正式目标")
+    )
+
+    response = processor._prepare_task_locked(types.SimpleNamespace(advanced=False))
+
+    assert edit_calls == [True]
+    assert response.success is False
+    assert response.message == (
+        "高位最终安全检查失败：\n"
+        "- 方块 1（T）：预测实际 TCP [-180.200, 321.800, 189.700]，Y 越界\n"
+        "请重新识别或重新编辑 Mask"
+    )
 
 
 def test_tray_target_uses_independent_tcp_calibration_and_predicted_z(monkeypatch):

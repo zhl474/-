@@ -125,6 +125,18 @@ class TaskRunner:
         elif state is TaskState.FAILED:
             rospy.logerr("任务状态: %s", state.value)
 
+    @staticmethod
+    def _print_prepare_failure(message):
+        """安全汇总直接按原格式显示，其他失败保留原粗定位前缀。"""
+        message = str(message)
+        if message.startswith((
+            "高位初步安全检查失败：",
+            "高位最终安全检查失败：",
+        )):
+            print(f"\033[91m{message}\033[0m")
+            return
+        print(f"\033[91m粗定位失败: {message}\033[0m")
+
     def _timed_call(self, label, operation, *args, **kwargs):
         """在开启调试时记录一次任务步骤的端到端耗时。"""
         if not self.config.timing_debug:
@@ -917,7 +929,7 @@ class TaskRunner:
         while True:
             response = self.prepare(advanced=advanced, place_order=place_order)
             if not response.success:
-                print(f"\033[91m粗定位失败: {response.message}\033[0m")
+                self._print_prepare_failure(response.message)
                 input("请调整托盘、方块或光照后按回车重新识别...")
                 continue
 

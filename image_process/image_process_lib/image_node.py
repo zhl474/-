@@ -100,6 +100,28 @@ DEFAULT_HIGH_MASK_EDITOR_SCRIPT = os.path.join(
 )
 
 
+class HighTcpSafetyCheckError(RuntimeError):
+    """正式高位准备中的可恢复批量安全检查失败。"""
+
+    def __init__(self, stage, violation_lines):
+        self.stage = str(stage)
+        self.violation_lines = tuple(str(line) for line in violation_lines)
+        tail = (
+            "本轮未打开 Mask 编辑器"
+            if self.stage == "初步"
+            else "请重新识别或重新编辑 Mask"
+        )
+        lines = [f"高位{self.stage}安全检查失败："]
+        lines.extend(f"- {line}" for line in self.violation_lines)
+        lines.append(tail)
+        super().__init__("\n".join(lines))
+
+    @property
+    def violation_count(self):
+        """返回本轮发生定位或越位问题的目标数量。"""
+        return len(self.violation_lines)
+
+
 class ImageProcessor:
     def __init__(self):
         self.bridge = CvBridge()
@@ -954,8 +976,8 @@ class ImageProcessor:
                 raise RuntimeError(f"高位 Mask 编辑子进程异常退出，退出码={exit_code}")
             return 读取已提交高位Mask(manifest_path, blocks)
 
-    def _detect_blocks_raw(self, image):
-        """识别高位方块，仅整理类别、像素和角度，不生成机械臂位姿。"""
+    def _detect_blocks_automatic(self, image):
+        """自动识别高位方块，保留初始 Mask 和重匹配所需的完整数据。"""
         geometry = load_template_geometry("high")
         blocks, debug_image = detect_blocks_in_image(
             image,
@@ -966,6 +988,10 @@ class ImageProcessor:
         )
         if not blocks:
             raise RuntimeError("高位没有识别到方块")
+        return blocks, debug_image, geometry
+
+    def _edit_and_rematch_blocks(self, image, blocks, geometry, debug_image):
+        """按配置人工编辑 Mask，并返回使用编辑结果重匹配后的完整方块。"""
         if getattr(self, "high_mask_manual_editor_enabled", False):
             edited_masks = self._run_high_mask_manual_editor(image, blocks)
             blocks, debug_image = rematch_blocks_from_masks(
@@ -975,12 +1001,20 @@ class ImageProcessor:
                 template_geometry=geometry,
                 save_mask_overlay=self.save_top_surface_mask_vis,
             )
+        return blocks, debug_image
+
+    def _save_high_block_debug_images(self, blocks, debug_image):
+        """保存最终采用的高位模板匹配和 Mask 调试图。"""
         self.save_experiment_debug_image(self.high_template_match_debug_path, debug_image)
         if self.save_top_surface_mask_vis:
             mask_image = blocks[-1].get("mask_overlay")
             if mask_image is None:
                 mask_image = debug_image
             self.save_experiment_debug_image(self.top_surface_mask_vis_path, mask_image)
+
+    @staticmethod
+    def _summarize_detected_blocks(blocks):
+        """提取规划需要的类别、像素和角度，并统计各类别数量。"""
         recognized = []
         counts = {category: 0 for category in BLOCK_CATEGORY_NAMES}
         for block in blocks:
@@ -999,9 +1033,20 @@ class ImageProcessor:
             raise RuntimeError("没有可用于任务规划的已知类别方块")
         return recognized, [counts[category] for category in BLOCK_CATEGORY_NAMES]
 
-    def _detect_blocks_for_task(self, image):
-        """正式模式识别高位方块并使用部署标定生成粗观察位。"""
-        blocks, count_list = self._detect_blocks_raw(image)
+    def _detect_blocks_raw(self, image):
+        """保持标定流程兼容：自动识别后立即编辑，再返回规划字段。"""
+        blocks, debug_image, geometry = self._detect_blocks_automatic(image)
+        blocks, debug_image = self._edit_and_rematch_blocks(
+            image,
+            blocks,
+            geometry,
+            debug_image,
+        )
+        self._save_high_block_debug_images(blocks, debug_image)
+        return self._summarize_detected_blocks(blocks)
+
+    def _build_observed_blocks_for_task(self, blocks, image_shape):
+        """正式模式使用部署标定把已确认的方块识别结果转成粗观察位。"""
         observed_blocks = []
         for block in blocks:
             category = block["category"]
@@ -1016,7 +1061,7 @@ class ImageProcessor:
             diagnostic = self.make_high_localization_diagnostic(
                 block["px"],
                 block["py"],
-                image.shape,
+                image_shape,
                 depth_sample_pixel_xy,
             )
             observed_blocks.append(
@@ -1029,7 +1074,12 @@ class ImageProcessor:
                     **diagnostic,
                 )
             )
-        return observed_blocks, count_list
+        return observed_blocks
+
+    def _detect_blocks_for_task(self, image):
+        """兼容旧调用：完成整套识别后生成正式方块观察目标。"""
+        blocks, count_list = self._detect_blocks_raw(image)
+        return self._build_observed_blocks_for_task(blocks, image.shape), count_list
 
     def _load_layout_for_request(self, request, cube_counts):
         if not request.advanced:
@@ -1082,6 +1132,47 @@ class ImageProcessor:
             )
             specs.append((item, (float(target_point[0]), float(target_point[1]))))
         return specs
+
+    @staticmethod
+    def _format_tcp_xyz(tcp_xyz):
+        """使用现场易读的固定三位小数格式显示 TCP XYZ。"""
+        return "[" + ", ".join(f"{float(value):.3f}" for value in tcp_xyz) + "]"
+
+    def _collect_high_tcp_safety_violations(self, blocks, layout):
+        """检查完整正式任务的方块和托盘目标，并返回全部问题。"""
+        candidates = []
+        for index, block in enumerate(blocks, start=1):
+            candidates.append((
+                f"方块 {index}（{block['category']}）",
+                "block",
+                (float(block["px"]), float(block["py"])),
+            ))
+        for fallback_index, (item, point) in enumerate(
+            self._placement_specs(layout),
+            start=1,
+        ):
+            target_index = int(item.get("index", fallback_index - 1)) + 1
+            candidates.append((f"托盘目标 {target_index}", "tray", point))
+
+        violations = []
+        for label, subject, pixel_xy in candidates:
+            try:
+                assessment = self.high_tcp_localizer.assess(subject, pixel_xy)
+            except Exception as exc:
+                violations.append(f"{label}：TCP 预测失败：{exc}")
+                continue
+            if assessment.safe:
+                continue
+            axis_text = "、".join(assessment.violated_axes)
+            tcp_text = self._format_tcp_xyz(assessment.safety_tcp_xyz)
+            violations.append(f"{label}：预测实际 TCP {tcp_text}，{axis_text} 越界")
+        return violations
+
+    def _validate_high_task_safety(self, blocks, layout, stage):
+        """全量检查正式高位任务，失败时抛出带完整现场摘要的可恢复错误。"""
+        violations = self._collect_high_tcp_safety_violations(blocks, layout)
+        if violations:
+            raise HighTcpSafetyCheckError(stage, violations)
 
     def _build_calibration_block_observed(self, blocks, samples, image_shape):
         """把方块深度样本转成标定 ObservedBlock，并校验 MAD、位姿和抓取高度。"""
@@ -1393,8 +1484,25 @@ class ImageProcessor:
                     message = f"标定准备完成：方块 {block_count} 个，未识别到托盘，只采集方块"
             else:
                 self._detect_board_for_task(image)
-                observed_blocks, cube_counts = self._detect_blocks_for_task(image)
+                raw_blocks, raw_debug_image, geometry = self._detect_blocks_automatic(image)
+                preliminary_blocks, cube_counts = self._summarize_detected_blocks(raw_blocks)
                 layout, layout_message = self._load_layout_for_request(request, cube_counts)
+                self._validate_high_task_safety(preliminary_blocks, layout, "初步")
+
+                final_blocks, final_debug_image = self._edit_and_rematch_blocks(
+                    image,
+                    raw_blocks,
+                    geometry,
+                    raw_debug_image,
+                )
+                self._save_high_block_debug_images(final_blocks, final_debug_image)
+                final_blocks, _final_counts = self._summarize_detected_blocks(final_blocks)
+                self._validate_high_task_safety(final_blocks, layout, "最终")
+
+                observed_blocks = self._build_observed_blocks_for_task(
+                    final_blocks,
+                    image.shape,
+                )
                 placement_targets = self._build_placement_targets(layout, image.shape[:2])
                 self.task_targets = assign_blocks_to_targets(
                     observed_blocks,
@@ -1409,6 +1517,20 @@ class ImageProcessor:
                 block_count=block_count,
                 tray_count=tray_count,
                 message=message,
+            )
+        except HighTcpSafetyCheckError as exc:
+            self.task_targets = []
+            rospy.logwarn(
+                "高位%s安全检查发现 %d 个问题，已停止本轮任务准备",
+                exc.stage,
+                exc.violation_count,
+            )
+            return PrepareTaskResponse(
+                success=False,
+                task_count=0,
+                block_count=0,
+                tray_count=0,
+                message=str(exc),
             )
         except Exception as exc:
             self.task_targets = []

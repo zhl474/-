@@ -767,6 +767,24 @@ def test_interactive_prepare_retries_after_failed_high_localization(monkeypatch)
     assert executed_counts == [3]
 
 
+def test_high_safety_prepare_failure_prints_summary_without_coarse_prefix(
+    monkeypatch,
+    capsys,
+):
+    module = _load_task_runner(monkeypatch)
+    message = (
+        "高位初步安全检查失败：\n"
+        "- 方块 2（T）：预测实际 TCP [-525.100, 80.300, 190.200]，X 越界\n"
+        "本轮未打开 Mask 编辑器"
+    )
+
+    module.TaskRunner._print_prepare_failure(message)
+
+    output = capsys.readouterr().out
+    assert message in output
+    assert "粗定位失败:" not in output
+
+
 def test_completed_state_logs_total_execution_time(monkeypatch):
     module = _load_task_runner(monkeypatch)
     logs = []

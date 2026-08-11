@@ -295,6 +295,46 @@ def test_open_loop_safety_offset_reports_raw_offset_and_executed_tcp(tmp_path):
     assert "超出安全范围" in message
 
 
+def test_structured_assessment_reports_actual_tcp_and_all_violated_axes(tmp_path):
+    block_path = tmp_path / "结构化方块标定.yaml"
+    tray_path = tmp_path / "结构化托盘标定.yaml"
+    block_path.write_text(
+        yaml.safe_dump(_affine_payload("block", [-440.0, -260.0, 160.0]), sort_keys=False),
+        encoding="utf-8",
+    )
+    tray_path.write_text(
+        yaml.safe_dump(_affine_payload("tray", [-300.0, 0.0, 200.0]), sort_keys=False),
+        encoding="utf-8",
+    )
+    localizer = HighPixelToTcpLocalizer(
+        block_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+        safety_xy_offset=[-94.1, -13.8],
+    )
+
+    assessment = localizer.assess("block", [0.0, 0.0])
+
+    assert assessment.predicted_tcp_xyz == (-440.0, -260.0, 160.0)
+    assert assessment.safety_tcp_xyz == pytest.approx((-534.1, -273.8, 160.0))
+    assert assessment.violated_axes == ("X", "Y", "Z")
+    assert assessment.safe is False
+
+
+def test_structured_assessment_closed_loop_uses_raw_prediction(tmp_path):
+    block_path, tray_path = _write_calibrations(tmp_path)
+    localizer = HighPixelToTcpLocalizer(
+        block_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+    )
+
+    assessment = localizer.assess("block", [10.0, 20.0])
+
+    assert assessment.safe is True
+    assert assessment.predicted_tcp_xyz == assessment.safety_tcp_xyz
+
+
 def test_safety_xy_offset_never_changes_z_validation(tmp_path):
     block_path = tmp_path / "低位方块标定.yaml"
     tray_path = tmp_path / "安全托盘标定.yaml"
