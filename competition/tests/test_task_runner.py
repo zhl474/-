@@ -194,7 +194,52 @@ def test_pick_uses_surface_height_and_configured_offset(monkeypatch):
     assert clients.moves[2][0][2] == 177.5
 
 
-def test_开环抓取先到上方再下探抬回且不调用对准(monkeypatch):
+@pytest.mark.parametrize(
+    ("surface_z_mm", "expected_pick_z_mm"),
+    [(8.0, 170.0), (10.5, 172.5)],
+)
+def test_闭环抓取使用动态预抓取和托盘伺服高度抬升(
+    monkeypatch,
+    surface_z_mm,
+    expected_pick_z_mm,
+):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=_execution_config(),
+        visual_config=load_visual_servo_config(),
+    )
+    runner._align = lambda *_args, **_kwargs: (
+        True,
+        [1, 2, 200, -180, 0, 90],
+        None,
+        "成功",
+    )
+    target = clients.get_task_target(0)
+    target.pick_surface_z_mm = surface_z_mm
+
+    runner._pick(target)
+
+    expected_poses = [
+        [0, 0, 200, -180, 0, 90],
+        [-93.1, -11.8, expected_pick_z_mm + 5.0, -180, 0, 90],
+        [-93.1, -11.8, expected_pick_z_mm, -180, 0, 90],
+        [-93.1, -11.8, 200.0, -180, 0, 90],
+    ]
+    for move, expected_pose in zip(clients.moves, expected_poses):
+        assert move[0] == pytest.approx(expected_pose)
+    assert [move[1] for move in clients.moves] == [
+        runner.config.arm_speed,
+        runner.config.pick_approach_speed,
+        runner.config.pick_speed,
+        runner.config.arm_speed,
+    ]
+    assert [move[3] for move in clients.moves] == [True, True, False, False]
+    assert clients.suction_states == [module.RobotClients.SUCK]
+
+
+def test_开环抓取直接到动态预抓取位并抬到托盘伺服高度(monkeypatch):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
     execution_config = _execution_config(visual_servo_enabled=False)
@@ -212,15 +257,19 @@ def test_开环抓取先到上方再下探抬回且不调用对准(monkeypatch):
     runner._pick(target)
 
     expected_poses = [
-        [-94.1, -13.8, 197.0, -180.0, 0.0, 90.0],
+        [-94.1, -13.8, 175.0, -180.0, 0.0, 90.0],
         [-94.1, -13.8, 170.0, -180.0, 0.0, 90.0],
-        [-94.1, -13.8, 197.0, -180.0, 0.0, 90.0],
+        [-94.1, -13.8, 200.0, -180.0, 0.0, 90.0],
     ]
     assert len(clients.moves) == len(expected_poses)
     for move, expected_pose in zip(clients.moves, expected_poses):
         assert move[0] == pytest.approx(expected_pose)
-    assert clients.moves[0][3] is True
-    assert clients.moves[1][1] == execution_config.pick_speed
+    assert [move[1] for move in clients.moves] == [
+        execution_config.pick_approach_speed,
+        execution_config.pick_speed,
+        execution_config.arm_speed,
+    ]
+    assert [move[3] for move in clients.moves] == [True, False, False]
     assert clients.suction_states == [module.RobotClients.SUCK]
     assert clients.block_offset_requests == []
     assert runner.state is module.TaskState.PICKING
@@ -260,7 +309,7 @@ def test_place_keeps_dynamic_observation_height_and_directly_releases(monkeypatc
 
     assert clients.moves[0][0] == [10, 10, 200, -180, 0, 90]
     assert clients.moves[1][0] == pytest.approx([-83.1, -1.8, 234.0, -180.0, 0.0, 90.0])
-    assert [move[3] for move in clients.moves] == [True, False]
+    assert [move[3] for move in clients.moves] == [True, True]
     assert clients.suction_states == [module.RobotClients.BLOW]
     assert not hasattr(execution_config, "place_high_z")
     assert not hasattr(execution_config, "place_down_z")
@@ -315,6 +364,7 @@ def test_pick_rejects_missing_surface_height_before_moving(monkeypatch):
     [
         ("pick_observation_pose", [0, 0, float("nan"), -180, 0, 90], "方块观察位"),
         ("pick_observation_pose", [0, 0, 164.9, -180, 0, 90], "低于 TCP 安全下限"),
+        ("place_observation_pose", [0, 0, 160.0, -180, 0, 90], "托盘观察位"),
         ("pick_surface_z_mm", float("inf"), "方块抓取表面高度"),
         ("pick_surface_z_mm", 2.0, "最终抓取位"),
     ],
@@ -710,6 +760,28 @@ def test_completed_state_logs_total_execution_time(monkeypatch):
     assert runner.execution_start_time is None
 
 
+def test_任务步骤计时输出中文标签和耗时(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    runner = module.TaskRunner(
+        clients=_FakeClients(),
+        execution_config=_execution_config(timing_debug=True),
+        visual_config=load_visual_servo_config(),
+    )
+    clock_values = iter([20.0, 20.125])
+    logs = []
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(clock_values))
+    monkeypatch.setattr(
+        module.rospy,
+        "loginfo",
+        lambda message, *args: logs.append(message % args),
+    )
+
+    result = runner._timed_call("吸盘吸气服务", lambda: "完成")
+
+    assert result == "完成"
+    assert logs == ["任务步骤耗时：吸盘吸气服务=125.0 ms"]
+
+
 def _calibration_runner(module, clients, tmp_path, **changes):
     return module.CalibrationTaskRunner(
         clients=clients,
@@ -717,6 +789,35 @@ def _calibration_runner(module, clients, tmp_path, **changes):
         visual_config=load_visual_servo_config(),
         servo_csv_output_dir=tmp_path,
     )
+
+
+def test_标定方块下探后退回自身观察高度且不读取全零托盘位(monkeypatch, tmp_path):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    runner = _calibration_runner(module, clients, tmp_path)
+    runner._align = lambda *_args, **_kwargs: (
+        True,
+        [1, 2, 200, -180, 0, 90],
+        None,
+        "成功",
+    )
+    target = clients.get_task_target(0)
+    target.target_type = "block"
+    target.pick_surface_z_mm = 8.0
+    target.place_observation_pose = [0.0] * 6
+
+    runner._pick(target)
+
+    expected_poses = [
+        [0, 0, 200, -180, 0, 90],
+        [-93.1, -11.8, 175.0, -180, 0, 90],
+        [-93.1, -11.8, 170.0, -180, 0, 90],
+        [-93.1, -11.8, 200.0, -180, 0, 90],
+    ]
+    for move, expected_pose in zip(clients.moves, expected_poses):
+        assert move[0] == pytest.approx(expected_pose)
+    assert [move[3] for move in clients.moves] == [True, True, False, False]
+    assert clients.suction_states == []
 
 
 def test_calibration_runner_dispatches_block_then_tray(monkeypatch, tmp_path):

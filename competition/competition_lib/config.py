@@ -22,7 +22,8 @@ class ExecutionConfig:
     pick_speed: int
     servo_speed: int
     pick_surface_offset_mm: float
-    lift_z: float
+    pick_approach_clearance_mm: float
+    pick_approach_speed: int
     minimum_tcp_z_mm: float
     timing_debug: bool
     block_error_threshold_px: float
@@ -61,6 +62,13 @@ def _nonnegative_int(value, name: str) -> int:
     return int(value)
 
 
+def _positive_int(value, name: str) -> int:
+    """严格读取正整数，避免布尔值或小数被静默转换为运动速度。"""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} 必须是大于 0 的整数")
+    return int(value)
+
+
 def _nonnegative_finite_float(value, name: str) -> float:
     """严格读取有限非负浮点数，避免布尔值或非有限数进入运动配置。"""
     if isinstance(value, bool):
@@ -71,6 +79,14 @@ def _nonnegative_finite_float(value, name: str) -> float:
         raise ValueError(f"{name} 必须是大于等于 0 的有限数值") from None
     if not np.isfinite(number) or number < 0:
         raise ValueError(f"{name} 必须是大于等于 0 的有限数值")
+    return number
+
+
+def _positive_finite_float(value, name: str) -> float:
+    """严格读取有限正浮点数，供动态预抓取间隙等运动参数使用。"""
+    number = _nonnegative_finite_float(value, name)
+    if number <= 0:
+        raise ValueError(f"{name} 必须是大于 0 的有限数值")
     return number
 
 
@@ -116,7 +132,14 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         pick_speed=int(motion["pick_speed"]),
         servo_speed=int(motion["servo_speed"]),
         pick_surface_offset_mm=float(motion["pick_surface_offset_mm"]),
-        lift_z=float(motion["lift_z"]),
+        pick_approach_clearance_mm=_positive_finite_float(
+            motion["pick_approach_clearance_mm"],
+            "motion.pick_approach_clearance_mm",
+        ),
+        pick_approach_speed=_positive_int(
+            motion["pick_approach_speed"],
+            "motion.pick_approach_speed",
+        ),
         minimum_tcp_z_mm=float(motion["minimum_tcp_z_mm"]),
         timing_debug=bool(servo.get("timing_debug", False)),
         block_error_threshold_px=block_error_threshold_px,
@@ -137,7 +160,9 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         motor_upper_margin_deg=float(motor["upper_margin_deg"]),
     )
     numeric_values = [
-        config.arm_speed, config.pick_speed, config.servo_speed, config.pick_surface_offset_mm, config.lift_z,
+        config.arm_speed, config.pick_speed, config.servo_speed,
+        config.pick_surface_offset_mm, config.pick_approach_clearance_mm,
+        config.pick_approach_speed,
         config.minimum_tcp_z_mm,
         config.block_error_threshold_px, config.tray_error_threshold_px,
         config.min_step_mm, config.max_step_mm, config.max_iter,
@@ -146,7 +171,12 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
     ]
     if not np.isfinite(config.minimum_tcp_z_mm) or config.minimum_tcp_z_mm <= 0:
         raise ValueError("minimum_tcp_z_mm 必须是大于 0 的有限数值")
-    if not np.all(np.isfinite(numeric_values)) or min(config.arm_speed, config.pick_speed, config.servo_speed) <= 0:
+    if not np.all(np.isfinite(numeric_values)) or min(
+        config.arm_speed,
+        config.pick_speed,
+        config.servo_speed,
+        config.pick_approach_speed,
+    ) <= 0:
         raise ValueError("执行配置包含无效数值")
     if not 0 <= config.min_step_mm <= config.max_step_mm:
         raise ValueError("视觉伺服步长范围无效")
@@ -158,8 +188,6 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         raise ValueError("舵机安全角度边界无效")
     if config.shooting_pose[2] < config.minimum_tcp_z_mm:
         raise ValueError("shooting_pose 的 TCP Z 低于安全下限")
-    if config.lift_z < config.minimum_tcp_z_mm:
-        raise ValueError("lift_z 低于 TCP Z 安全下限")
     return config
 
 

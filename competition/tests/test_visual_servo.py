@@ -26,6 +26,8 @@ def test_current_execution_and_servo_configs_are_valid():
     visual = load_visual_servo_config()
     assert execution.arm_speed > 0
     assert execution.servo_speed > 0
+    assert execution.pick_approach_clearance_mm == 5.0
+    assert execution.pick_approach_speed == 30
     assert execution.minimum_tcp_z_mm == 165.0
     assert isinstance(execution.calibration_mode, bool)
     assert isinstance(execution.visual_servo_enabled, bool)
@@ -33,6 +35,7 @@ def test_current_execution_and_servo_configs_are_valid():
     assert execution.tray_error_threshold_px == 0.5
     assert execution.post_success_sample_frames == 20
     assert len(execution.shooting_pose) == 6
+    assert not hasattr(execution, "lift_z")
     assert np.asarray(visual["pixel_to_robot_matrix"]).shape == (2, 2)
     assert "block_servo_height_offset_mm" not in visual
     assert "board_servo_height_offset_mm" not in visual
@@ -216,6 +219,41 @@ def test_execution_config_rejects_non_positive_minimum_tcp_z(tmp_path, invalid_m
     )
 
     with pytest.raises(ValueError, match="minimum_tcp_z_mm 必须是大于 0 的有限数值"):
+        load_execution_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    [0.0, -1.0, float("inf"), float("nan"), True, "不是数值"],
+)
+def test_执行配置拒绝非法预抓取间隙(tmp_path, invalid_value):
+    config_data = yaml.safe_load(
+        Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
+    )
+    config_data["motion"]["pick_approach_clearance_mm"] = invalid_value
+    config_path = tmp_path / "非法预抓取间隙.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="motion.pick_approach_clearance_mm"):
+        load_execution_config(config_path)
+
+
+@pytest.mark.parametrize("invalid_value", [0, -1, 1.5, True, "30"])
+def test_执行配置拒绝非法斜向接近速度(tmp_path, invalid_value):
+    config_data = yaml.safe_load(
+        Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
+    )
+    config_data["motion"]["pick_approach_speed"] = invalid_value
+    config_path = tmp_path / "非法斜向接近速度.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="motion.pick_approach_speed"):
         load_execution_config(config_path)
 
 

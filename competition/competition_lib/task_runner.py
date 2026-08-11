@@ -100,6 +100,17 @@ class TaskRunner:
         elif state is TaskState.FAILED:
             rospy.logerr("任务状态: %s", state.value)
 
+    def _timed_call(self, label, operation, *args, **kwargs):
+        """在开启调试时记录一次任务步骤的端到端耗时。"""
+        if not self.config.timing_debug:
+            return operation(*args, **kwargs)
+        started_at = time.monotonic()
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            elapsed_ms = (time.monotonic() - started_at) * 1000.0
+            rospy.loginfo("任务步骤耗时：%s=%.1f ms", label, elapsed_ms)
+
     def _align(
         self,
         offset_func,
@@ -470,35 +481,57 @@ class TaskRunner:
             pick_surface_z_mm + self.config.pick_surface_offset_mm,
             "最终抓取高度",
         )
+        pre_pick_z_mm = self._validate_finite_value(
+            pick_z_mm + self.config.pick_approach_clearance_mm,
+            "预抓取高度",
+        )
         rough_pose = self._validate_motion_pose(target.pick_observation_pose, "方块观察位")
 
-        # 开环模式必须在任何运动前校验偏置后的上方位和下探位。
-        open_loop_sucker_pose = None
-        if not self.visual_servo_enabled:
-            open_loop_sucker_pose = apply_camera_to_sucker_offset(
-                rough_pose,
-                self.visual_config,
-            )
-            open_loop_sucker_pose[2] = self.config.lift_z
-            open_loop_sucker_pose = self._validate_motion_pose(
-                open_loop_sucker_pose,
-                "开环吸盘抓取上方位",
-            )
-            open_loop_pick_pose = list(open_loop_sucker_pose)
-            open_loop_pick_pose[2] = pick_z_mm
-            self._validate_motion_pose(open_loop_pick_pose, "开环最终抓取位")
+        target_type = str(getattr(target, "target_type", "pick_place") or "pick_place")
+        is_calibration_block = self.config.calibration_mode and target_type == "block"
+        if is_calibration_block:
+            # 标定方块没有托盘目标，模拟下探后退回本方块观察高度。
+            retreat_z_mm = rough_pose[2]
+            retreat_label = "标定方块退回位"
         else:
-            # 闭环最终 XY 尚未得到，先用粗定位姿态校验本次下探高度。
-            pick_height_check_pose = list(rough_pose)
-            pick_height_check_pose[2] = pick_z_mm
-            self._validate_motion_pose(pick_height_check_pose, "最终抓取位")
+            # 正式任务吸住后原地抬到托盘伺服高度，再以相同 Z 进入托盘区域。
+            place_observation_pose = self._validate_motion_pose(
+                target.place_observation_pose,
+                "托盘观察位",
+            )
+            retreat_z_mm = place_observation_pose[2]
+            retreat_label = "吸取后托盘高度抬升位"
 
-        _, place_angle, motor_wait = self.angle_planner.plan(target.rotation_delta_deg)
+        # 闭环最终 XY 尚未得到，先用粗定位 XY 校验本次全部运动高度。
+        for height, label in (
+            (pre_pick_z_mm, "预抓取位"),
+            (pick_z_mm, "最终抓取位"),
+            (retreat_z_mm, retreat_label),
+        ):
+            height_check_pose = list(rough_pose)
+            height_check_pose[2] = height
+            self._validate_motion_pose(height_check_pose, label)
+
+        _, place_angle, motor_wait = self._timed_call(
+            "舵机角度规划与预旋转指令",
+            self.angle_planner.plan,
+            target.rotation_delta_deg,
+        )
         self._set_state(TaskState.PICK_COARSE)
         if self.visual_servo_enabled:
-            self.clients.move_arm(rough_pose, self.config.arm_speed, wait_until_stable=True)
+            self._timed_call(
+                "方块观察位运动",
+                self.clients.move_arm,
+                rough_pose,
+                self.config.arm_speed,
+                wait_until_stable=True,
+            )
             if motor_wait > 0:
-                time.sleep(motor_wait)
+                self._timed_call(
+                    "舵机避限位等待",
+                    time.sleep,
+                    motor_wait,
+                )
 
             self._set_state(TaskState.PICK_ALIGN)
             trial_context = self._build_trial_context(target, "pick", task_index)
@@ -551,32 +584,62 @@ class TaskRunner:
                 final_command_pose=camera_pose,
                 last_response=last_response,
             )
-
-            sucker_pose = apply_camera_to_sucker_offset(camera_pose, self.visual_config)
-            sucker_pose[2] = self.config.lift_z
-            sucker_pose = self._validate_motion_pose(sucker_pose, "吸盘抓取抬升位")
-            self.clients.move_arm(sucker_pose, self.config.arm_speed)
         else:
-            sucker_pose = open_loop_sucker_pose
-            self.clients.move_arm(
-                sucker_pose,
-                self.config.arm_speed,
-                wait_until_stable=False,
-            )
+            camera_pose = rough_pose
+
+        # 相机位姿转换到吸盘 XY 后，直接斜向进入动态预抓取位并等待停稳。
+        pre_pick_pose = apply_camera_to_sucker_offset(camera_pose, self.visual_config)
+        pre_pick_pose[2] = pre_pick_z_mm
+        pre_pick_pose = self._validate_motion_pose(pre_pick_pose, "预抓取位")
+        self._timed_call(
+            "预抓取位运动",
+            self.clients.move_arm,
+            pre_pick_pose,
+            self.config.pick_approach_speed,
+            wait_until_stable=True,
+        )
+        if not self.visual_servo_enabled:
             if motor_wait > 0:
-                time.sleep(motor_wait)
+                self._timed_call(
+                    "舵机避限位等待",
+                    time.sleep,
+                    motor_wait,
+                )
 
         self._set_state(TaskState.PICKING)
-        pick_pose = list(sucker_pose)
+        pick_pose = list(pre_pick_pose)
         pick_pose[2] = pick_z_mm
         pick_pose = self._validate_motion_pose(pick_pose, "最终抓取位")
-        self.clients.move_arm(pick_pose, self.config.pick_speed)
+        self._timed_call(
+            "抓取下探运动",
+            self.clients.move_arm,
+            pick_pose,
+            self.config.pick_speed,
+            wait_until_stable=False,
+        )
         # input("吸取方块后请确认吸盘已吸住方块，按回车继续...")
         if not self.config.calibration_mode:
-            self.clients.set_suction(RobotClients.SUCK)
+            self._timed_call(
+                "吸盘吸气服务",
+                self.clients.set_suction,
+                RobotClients.SUCK,
+            )
             self.holding_block = True
-        self.clients.move_arm(sucker_pose, self.config.arm_speed)
-        self.angle_planner.commit_place_angle(place_angle)
+        retreat_pose = list(pre_pick_pose)
+        retreat_pose[2] = retreat_z_mm
+        retreat_pose = self._validate_motion_pose(retreat_pose, retreat_label)
+        self._timed_call(
+            "抓后抬升运动",
+            self.clients.move_arm,
+            retreat_pose,
+            self.config.arm_speed,
+            wait_until_stable=False,
+        )
+        self._timed_call(
+            "摆放角度舵机指令",
+            self.angle_planner.commit_place_angle,
+            place_angle,
+        )
 
     def _place(self, target, task_index=None):
         rough_pose = self._validate_motion_pose(target.place_observation_pose, "托盘观察位")
@@ -594,7 +657,13 @@ class TaskRunner:
 
         self._set_state(TaskState.PLACE_COARSE)
         if self.visual_servo_enabled:
-            self.clients.move_arm(rough_pose, self.config.arm_speed, wait_until_stable=True)
+            self._timed_call(
+                "托盘观察位运动",
+                self.clients.move_arm,
+                rough_pose,
+                self.config.arm_speed,
+                wait_until_stable=True,
+            )
 
             self._set_state(TaskState.PLACE_ALIGN)
             trial_context = self._build_trial_context(target, "place", task_index)
@@ -648,10 +717,18 @@ class TaskRunner:
             place_pose = apply_camera_to_sucker_offset(camera_pose, self.visual_config)
             # 托盘标定给出的观察 Z 同时就是吹气释放 Z，此处只应用吸盘 XY 偏移。
             place_pose = self._validate_motion_pose(place_pose, "最终摆放位")
-            self.clients.move_arm(place_pose, self.config.arm_speed, wait_until_stable=True)
+            self._timed_call(
+                "最终摆放位运动",
+                self.clients.move_arm,
+                place_pose,
+                self.config.arm_speed,
+                wait_until_stable=True,
+            )
         else:
             place_pose = open_loop_place_pose
-            self.clients.move_arm(
+            self._timed_call(
+                "最终摆放位运动",
+                self.clients.move_arm,
                 place_pose,
                 self.config.arm_speed,
                 wait_until_stable=True,
@@ -659,7 +736,11 @@ class TaskRunner:
 
         self._set_state(TaskState.PLACING)
         if not self.config.calibration_mode:
-            self.clients.set_suction(RobotClients.BLOW)
+            self._timed_call(
+                "吸盘喷气服务",
+                self.clients.set_suction,
+                RobotClients.BLOW,
+            )
         self.holding_block = False
 
     def prepare(self, advanced=False, place_order=()):
@@ -735,7 +816,12 @@ class TaskRunner:
                 # 标定采集必须先确认气泵和电磁阀已关闭，失败则不允许开始运动。
                 self.clients.set_suction(RobotClients.OFF)
             for index in range(int(task_count)):
-                target = self.clients.get_task_target(index)
+                task_started_at = time.monotonic()
+                target = self._timed_call(
+                    f"读取第 {index + 1} 个任务目标",
+                    self.clients.get_task_target,
+                    index,
+                )
                 target_type = str(
                     getattr(target, "target_type", "pick_place") or "pick_place"
                 )
@@ -747,6 +833,13 @@ class TaskRunner:
                 rospy.loginfo("执行第 %d/%d 个任务，类别=%s", index + 1, task_count, target.category)
                 self._pick(target, task_index=index + 1)
                 self._place(target, task_index=index + 1)
+                if self.config.timing_debug:
+                    rospy.loginfo(
+                        "单块任务总耗时：第 %d/%d 块=%.1f ms",
+                        index + 1,
+                        task_count,
+                        (time.monotonic() - task_started_at) * 1000.0,
+                    )
             if not self.config.calibration_mode:
                 self.clients.set_suction(RobotClients.OFF)
             experiment_status = "完成"

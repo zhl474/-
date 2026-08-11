@@ -7,7 +7,7 @@ import serial
 # ========================= 直接修改的运行参数 =========================
 SERIAL_PORT = "/dev/servo_motor"
 SERIAL_BAUDRATE = 115200
-TARGET_ANGLE_DEG = 180.0
+TARGET_ANGLE_DEG = 90
 
 
 def main():
