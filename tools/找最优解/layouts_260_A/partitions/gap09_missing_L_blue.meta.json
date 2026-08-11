@@ -1,0 +1,14 @@
+{
+  "gap_row": 9,
+  "missing_category": "L_blue",
+  "status": "UNKNOWN",
+  "complete": false,
+  "solutions": 0,
+  "raw_geometric_solutions": 0,
+  "elapsed_s": 0.565541526000743,
+  "seed": 30,
+  "partition_time": 0.0,
+  "max_solutions": 0,
+  "output": "layouts_260_A/partitions/gap09_missing_L_blue.partial.jsonl",
+  "skipped": false
+}

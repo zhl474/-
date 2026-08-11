@@ -1,0 +1,14 @@
+{
+  "gap_row": 1,
+  "missing_category": "z_green",
+  "status": "FEASIBLE",
+  "complete": false,
+  "solutions": 57,
+  "raw_geometric_solutions": 71,
+  "elapsed_s": 810.0220913100002,
+  "seed": 3,
+  "partition_time": 0.0,
+  "max_solutions": 0,
+  "output": "layouts_260_A/partitions/gap01_missing_z_green.partial.jsonl",
+  "skipped": false
+}

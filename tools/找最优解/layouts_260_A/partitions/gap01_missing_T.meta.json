@@ -1,0 +1,14 @@
+{
+  "gap_row": 1,
+  "missing_category": "T",
+  "status": "FEASIBLE",
+  "complete": false,
+  "solutions": 22,
+  "raw_geometric_solutions": 47,
+  "elapsed_s": 810.0213733479995,
+  "seed": 5,
+  "partition_time": 0.0,
+  "max_solutions": 0,
+  "output": "layouts_260_A/partitions/gap01_missing_T.partial.jsonl",
+  "skipped": false
+}

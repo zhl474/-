@@ -1,0 +1,14 @@
+{
+  "gap_row": 14,
+  "missing_category": "square",
+  "status": "FEASIBLE",
+  "complete": false,
+  "solutions": 21,
+  "raw_geometric_solutions": 21,
+  "elapsed_s": 120.0042524720011,
+  "seed": 1,
+  "partition_time": 120.0,
+  "max_solutions": 1000,
+  "output": "layouts_260/partitions/gap14_missing_square.partial.jsonl",
+  "skipped": false
+}
