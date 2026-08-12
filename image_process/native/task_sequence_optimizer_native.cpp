@@ -513,7 +513,7 @@ void validate_input(
         throw std::invalid_argument("source_count 必须大于等于 target_count");
     }
     if (input.beam_width <= 0 || input.beam_width > kMaxBeamWidth) {
-        throw std::invalid_argument("beam_width 必须位于 [1, 5000]");
+        throw std::invalid_argument("beam_width 必须位于 [1, 50000]");
     }
     if (output_candidate_capacity < input.beam_width) {
         throw std::invalid_argument("输出候选容量必须大于等于 beam_width");

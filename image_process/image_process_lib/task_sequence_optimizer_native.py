@@ -28,7 +28,7 @@ NATIVE_ABI_VERSION = 1
 CATEGORY_COUNT = 7
 MAX_SOURCES_PER_CATEGORY = 5
 MAX_TARGET_COUNT = 63
-MAX_BEAM_WIDTH = 5000
+MAX_BEAM_WIDTH = 50000
 MAX_INT32 = (1 << 31) - 1
 LIBRARY_BASENAME = "libtask_sequence_optimizer_native.so"
 LIBRARY_ENVIRONMENT_VARIABLE = "TASK_SEQUENCE_OPTIMIZER_NATIVE_LIB"
@@ -211,7 +211,7 @@ def run_native_task_sequence_search(
     source_count = len(source_ids)
     beam_width = _validate_positive_integer(beam_width, "beam_width")
     if beam_width > MAX_BEAM_WIDTH:
-        raise ValueError("beam_width 必须位于 [1, 5000]")
+        raise ValueError("beam_width 必须位于 [1, 50000]")
     if not 1 <= target_count <= MAX_TARGET_COUNT:
         raise ValueError("target 数量必须位于 [1, 63]")
     if source_count < target_count:

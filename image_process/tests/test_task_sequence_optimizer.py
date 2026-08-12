@@ -388,8 +388,8 @@ def test_native_wrapper_rejects_missing_library_and_invalid_inputs(tmp_path):
         run_native_task_sequence_search(**too_many_sources)
 
     too_wide = dict(valid)
-    too_wide["beam_width"] = 5001
-    with pytest.raises(ValueError, match=r"\[1, 5000\]"):
+    too_wide["beam_width"] = 50001
+    with pytest.raises(ValueError, match=r"\[1, 50000\]"):
         run_native_task_sequence_search(**too_wide)
 
     with pytest.raises(ValueError, match=r"\[1, 63\]"):

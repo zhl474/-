@@ -8,8 +8,8 @@ models:
 
 # 固定盘面最短摆放方案 V1。shadow 计算并记录新方案，但仍执行旧匈牙利方案。
 task_sequence_optimizer:
-  mode: execute           # legacy / shadow / execute
-  beam_width: 5000
+  mode: legacy           # legacy / shadow / execute
+  beam_width: 50000
   report_top_candidates: 20
 
 # 高位方块 Seg/模板匹配完成后，在像素转 TCP、深度采样和任务规划前人工修正 Mask。
