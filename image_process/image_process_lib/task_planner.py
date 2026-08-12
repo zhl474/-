@@ -12,6 +12,7 @@ import yaml
 from scipy.optimize import linear_sum_assignment
 
 from image_process_lib.block_category import normalize_category_name
+from image_process_lib.task_geometry import build_support_graph, normalize_cells
 
 
 # 与 board_scene_detector 的 BOARD_ROW_COUNT / BOARD_COL_COUNT 保持一致，
@@ -78,6 +79,8 @@ class ObservedBlock:
     category: str
     observation_pose: Sequence[float]
     detected_angle_deg: float
+    # 本轮正式规划内唯一的实体编号；旧调用未编号时保持 -1。
+    source_id: int = -1
     # 所选高度策略得到的方块上表面绝对 Z，单位 mm。
     pick_surface_z_mm: float = 0.0
     # false 表示高度策略失败，执行端禁止继续下探抓取。
@@ -103,6 +106,8 @@ class PlacementTarget:
     desired_angle_deg: float
     category: str
     observation_pose: Sequence[float]
+    # 该目标在 14×10 托盘上占据的四个权威整数格，格式为 (列, 行)。
+    cells: Sequence[Sequence[int]] = ()
     # 以下字段保留现有服务兼容性，并保存高位托盘像素标定诊断。
     high_detected_pixel_xy: Sequence[float] = (0.0, 0.0)
     high_depth_sample_pixel_xy: Sequence[float] = (0.0, 0.0)
@@ -128,6 +133,8 @@ class TaskTarget:
     rotation_delta_deg: float
     pick_surface_z_mm: float
     pick_surface_z_valid: bool
+    # 被分配到该目标的本轮实体编号；标定任务和旧调用可保持 -1。
+    source_id: int = -1
     # 目标种类：正式任务为 pick_place，标定方块为 block，标定托盘为 tray。
     target_type: str = "pick_place"
     # 抓取侧与摆放侧分别保留，避免任务分配后丢失高位标定诊断数据。
@@ -168,6 +175,7 @@ def load_task_layout(config_path: str) -> List[dict]:
             row = float(item["row"])
             col = float(item["col"])
             angle_deg = float(item["angle_deg"])
+            cells = normalize_cells(item["cells"], f"任务布局第 {index} 项 cells")
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"任务布局第 {index} 项无效: {item}") from exc
         if not category or not np.all(np.isfinite([row, col, angle_deg])):
@@ -178,7 +186,10 @@ def load_task_layout(config_path: str) -> List[dict]:
             "col": col,
             "angle_deg": angle_deg,
             "category": category,
+            "cells": cells,
         })
+    # 基础盘面在加载阶段即完成完整几何和支撑可达性检查，禁止错误盘面进入定位。
+    build_support_graph(targets)
     return targets
 
 
@@ -217,6 +228,68 @@ def _group_by_category(items: Iterable, category_getter) -> Dict[str, list]:
         category = normalize_category_name(category_getter(item))
         grouped.setdefault(category, []).append(item)
     return grouped
+
+
+def make_task_target(
+    block: ObservedBlock,
+    target: PlacementTarget,
+    board_angle_deg: float,
+) -> TaskTarget:
+    """由一个已经确定的实体—目标对应生成完整执行任务。"""
+    block_category = normalize_category_name(block.category)
+    target_category = normalize_category_name(target.category)
+    if block_category != target_category:
+        raise ValueError(
+            f"实体类别 {block_category} 与目标类别 {target_category} 不一致"
+        )
+    _validate_pose(block.observation_pose, f"{block_category} 方块观察位")
+    _validate_pose(target.observation_pose, f"{target_category} 摆放观察位")
+    return TaskTarget(
+        index=int(target.index),
+        category=target_category,
+        row=float(target.row),
+        col=float(target.col),
+        pick_observation_pose=tuple(float(value) for value in block.observation_pose),
+        place_observation_pose=tuple(float(value) for value in target.observation_pose),
+        detected_angle_deg=float(block.detected_angle_deg),
+        rotation_delta_deg=normalize_rotation_delta(
+            target_category,
+            target.desired_angle_deg,
+            block.detected_angle_deg,
+            board_angle_deg,
+        ),
+        pick_surface_z_mm=float(block.pick_surface_z_mm),
+        pick_surface_z_valid=bool(block.pick_surface_z_valid),
+        source_id=int(block.source_id),
+        pick_high_detected_pixel_xy=tuple(float(value) for value in block.high_detected_pixel_xy),
+        pick_high_depth_sample_pixel_xy=tuple(
+            float(value) for value in block.high_depth_sample_pixel_xy
+        ),
+        pick_high_image_center_xy=tuple(float(value) for value in block.high_image_center_xy),
+        pick_high_world_position=tuple(float(value) for value in block.high_world_position),
+        pick_high_world_position_valid=bool(block.high_world_position_valid),
+        pick_rough_localization_source=str(block.rough_localization_source),
+        pick_depth_valid_frame_count=int(block.depth_valid_frame_count),
+        pick_depth_median_mm=float(block.depth_median_mm),
+        pick_depth_mad_mm=float(block.depth_mad_mm),
+        pick_calibration_target_tcp_z_mm=float(block.calibration_target_tcp_z_mm),
+        place_high_detected_pixel_xy=tuple(
+            float(value) for value in target.high_detected_pixel_xy
+        ),
+        place_high_depth_sample_pixel_xy=tuple(
+            float(value) for value in target.high_depth_sample_pixel_xy
+        ),
+        place_high_image_center_xy=tuple(
+            float(value) for value in target.high_image_center_xy
+        ),
+        place_high_world_position=tuple(float(value) for value in target.high_world_position),
+        place_high_world_position_valid=bool(target.high_world_position_valid),
+        place_rough_localization_source=str(target.rough_localization_source),
+        place_depth_valid_frame_count=int(target.depth_valid_frame_count),
+        place_depth_median_mm=float(target.depth_median_mm),
+        place_depth_mad_mm=float(target.depth_mad_mm),
+        place_calibration_target_tcp_z_mm=float(target.calibration_target_tcp_z_mm),
+    )
 
 
 def assign_blocks_to_targets(
@@ -264,50 +337,10 @@ def assign_blocks_to_targets(
         assignment = {col: row for row, col in zip(row_indices, col_indices)}
         for target_offset, target in enumerate(category_targets):
             block = category_blocks[assignment[target_offset]]
-            result_by_index[target.index] = TaskTarget(
-                index=target.index,
-                category=category,
-                row=float(target.row),
-                col=float(target.col),
-                pick_observation_pose=tuple(float(value) for value in block.observation_pose),
-                place_observation_pose=tuple(float(value) for value in target.observation_pose),
-                detected_angle_deg=float(block.detected_angle_deg),
-                rotation_delta_deg=normalize_rotation_delta(
-                    category,
-                    target.desired_angle_deg,
-                    block.detected_angle_deg,
-                    board_angle_deg,
-                ),
-                pick_surface_z_mm=float(block.pick_surface_z_mm),
-                pick_surface_z_valid=bool(block.pick_surface_z_valid),
-                pick_high_detected_pixel_xy=tuple(float(value) for value in block.high_detected_pixel_xy),
-                pick_high_depth_sample_pixel_xy=tuple(
-                    float(value) for value in block.high_depth_sample_pixel_xy
-                ),
-                pick_high_image_center_xy=tuple(float(value) for value in block.high_image_center_xy),
-                pick_high_world_position=tuple(float(value) for value in block.high_world_position),
-                pick_high_world_position_valid=bool(block.high_world_position_valid),
-                pick_rough_localization_source=str(block.rough_localization_source),
-                pick_depth_valid_frame_count=int(block.depth_valid_frame_count),
-                pick_depth_median_mm=float(block.depth_median_mm),
-                pick_depth_mad_mm=float(block.depth_mad_mm),
-                pick_calibration_target_tcp_z_mm=float(block.calibration_target_tcp_z_mm),
-                place_high_detected_pixel_xy=tuple(
-                    float(value) for value in target.high_detected_pixel_xy
-                ),
-                place_high_depth_sample_pixel_xy=tuple(
-                    float(value) for value in target.high_depth_sample_pixel_xy
-                ),
-                place_high_image_center_xy=tuple(
-                    float(value) for value in target.high_image_center_xy
-                ),
-                place_high_world_position=tuple(float(value) for value in target.high_world_position),
-                place_high_world_position_valid=bool(target.high_world_position_valid),
-                place_rough_localization_source=str(target.rough_localization_source),
-                place_depth_valid_frame_count=int(target.depth_valid_frame_count),
-                place_depth_median_mm=float(target.depth_median_mm),
-                place_depth_mad_mm=float(target.depth_mad_mm),
-                place_calibration_target_tcp_z_mm=float(target.calibration_target_tcp_z_mm),
+            result_by_index[target.index] = make_task_target(
+                block,
+                target,
+                board_angle_deg,
             )
 
     expected_indices = sorted(target_by_index)

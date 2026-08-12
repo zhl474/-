@@ -524,6 +524,52 @@ def test_prepare_waits_for_shooting_pose_to_stabilize(monkeypatch):
     assert clients.prepare_requests == [(True, [1, 2])]
 
 
+def test_prepare_actively_resets_servo_before_shooting(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    events = []
+
+    def rotate_tool(angle):
+        clients.rotation_angles.append(float(angle))
+        events.append(("舵机复位", float(angle)))
+
+    def move_arm(pose, speed, **kwargs):
+        clients.moves.append((list(pose), speed, 0.0, kwargs.get("wait_until_stable", False), None))
+        events.append(("高位拍摄位", list(pose)))
+
+    def prepare_task(advanced=False, place_order=()):
+        events.append(("拍摄后规划", bool(advanced)))
+        return types.SimpleNamespace(success=True, task_count=1, message="成功")
+
+    clients.rotate_tool = rotate_tool
+    clients.move_arm = move_arm
+    clients.prepare_task = prepare_task
+    monkeypatch.setattr(
+        module.time,
+        "sleep",
+        lambda seconds: events.append(("最坏角差等待", float(seconds))),
+    )
+    config = _execution_config(initial_motor_angle_deg=180.0)
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=config,
+        visual_config=load_visual_servo_config(),
+    )
+    runner.angle_planner.last_angle = 23.0
+
+    runner.prepare()
+
+    assert [event[0] for event in events] == [
+        "舵机复位",
+        "最坏角差等待",
+        "高位拍摄位",
+        "拍摄后规划",
+    ]
+    assert events[0][1] == 180.0
+    assert events[1][1] == pytest.approx(180.0 / 270.0)
+    assert runner.angle_planner.last_angle == 180.0
+
+
 def test_calibration_mode_writes_one_final_row_per_target(monkeypatch, tmp_path, capsys):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()

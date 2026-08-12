@@ -1925,6 +1925,7 @@ def test_tray_target_uses_independent_tcp_calibration_and_predicted_z(monkeypatc
         "col": 2.0,
         "angle_deg": 0.0,
         "category": "T",
+        "cells": ((1, 1), (2, 1), (2, 2), (3, 1)),
     }]
 
     targets = processor._build_placement_targets(layout, (720, 1280))

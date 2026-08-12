@@ -1,36 +1,36 @@
 # 基础任务唯一摆放表。行列坐标允许使用半格。
 targets:
-  - {col: 1, row: 2, angle_deg: 90, category: L_yellow}
-  - {col: 4, row: 1.5, angle_deg: 0, category: T}
-  - {col: 7.5, row: 1, angle_deg: 0, category: line}
-  - {col: 9.5, row: 2, angle_deg: -90, category: z_green}
-  - {col: 2, row: 3, angle_deg: 90, category: L_yellow}
-  - {col: 4, row: 3, angle_deg: 180, category: L_blue}
-  - {col: 7, row: 2, angle_deg: 0, category: L_yellow}
-  - {col: 1.5, row: 5, angle_deg: 90, category: T}
-  - {col: 3.5, row: 5, angle_deg: 90, category: z_blue}
-  - {col: 5, row: 4.5, angle_deg: 0, category: z_green}
-  - {col: 6.5, row: 3.5, angle_deg: 0, category: square}
-  - {col: 9, row: 5, angle_deg: -90, category: L_blue}
-  - {col: 10, row: 4.5, angle_deg: 90, category: line}
-  - {col: 7.5, row: 5.5, angle_deg: 0, category: square}
-  - {col: 1.5, row: 7, angle_deg: -90, category: z_green}
-  - {col: 3.5, row: 7, angle_deg: 90, category: z_blue}
-  - {col: 6.5, row: 7, angle_deg: 90, category: T}
-  - {col: 5, row: 7.5, angle_deg: 90, category: line}
-  - {col: 9, row: 7, angle_deg: 0, category: L_blue}
-  - {col: 3, row: 9, angle_deg: -90, category: L_blue}
-  - {col: 7, row: 8.5, angle_deg: 180, category: T}
-  - {col: 9.5, row: 8.5, angle_deg: 0, category: square}
-  - {col: 1, row: 10, angle_deg: 90, category: L_yellow}
-  - {col: 4.5, row: 10, angle_deg: 90, category: T}
-  - {col: 6.5, row: 11, angle_deg: 90, category: z_blue}
-  - {col: 8.5, row: 10, angle_deg: 0, category: line}
-  - {col: 2.5, row: 11, angle_deg: 90, category: z_blue}
-  - {col: 8, row: 12, angle_deg: 90, category: L_yellow}
-  - {col: 9.5, row: 12, angle_deg: -90, category: z_green}
-  - {col: 1.5, row: 12.5, angle_deg: 0, category: square}
-  - {col: 3.5, row: 13, angle_deg: -90, category: z_green}
-  - {col: 5, row: 12.5, angle_deg: 90, category: line}
-  - {col: 6.5, row: 13, angle_deg: 90, category: z_blue}
-  - {col: 9, row: 14, angle_deg: 180, category: L_blue}
+  - {col: 1, row: 2, angle_deg: 90, category: L_yellow, cells: [[1, 1], [1, 2], [1, 3], [2, 1]]}
+  - {col: 4, row: 1.5, angle_deg: 0, category: T, cells: [[3, 1], [4, 1], [4, 2], [5, 1]]}
+  - {col: 7.5, row: 1, angle_deg: 0, category: line, cells: [[6, 1], [7, 1], [8, 1], [9, 1]]}
+  - {col: 9.5, row: 2, angle_deg: -90, category: z_green, cells: [[9, 2], [9, 3], [10, 1], [10, 2]]}
+  - {col: 2, row: 3, angle_deg: 90, category: L_yellow, cells: [[2, 2], [2, 3], [2, 4], [3, 2]]}
+  - {col: 4, row: 3, angle_deg: 180, category: L_blue, cells: [[3, 3], [4, 3], [5, 2], [5, 3]]}
+  - {col: 7, row: 2, angle_deg: 0, category: L_yellow, cells: [[6, 2], [7, 2], [8, 2], [8, 3]]}
+  - {col: 1.5, row: 5, angle_deg: 90, category: T, cells: [[1, 4], [1, 5], [1, 6], [2, 5]]}
+  - {col: 3.5, row: 5, angle_deg: 90, category: z_blue, cells: [[3, 4], [3, 5], [4, 5], [4, 6]]}
+  - {col: 5, row: 4.5, angle_deg: 0, category: z_green, cells: [[4, 4], [5, 4], [5, 5], [6, 5]]}
+  - {col: 6.5, row: 3.5, angle_deg: 0, category: square, cells: [[6, 3], [6, 4], [7, 3], [7, 4]]}
+  - {col: 9, row: 5, angle_deg: -90, category: L_blue, cells: [[8, 4], [9, 4], [9, 5], [9, 6]]}
+  - {col: 10, row: 4.5, angle_deg: 90, category: line, cells: [[10, 3], [10, 4], [10, 5], [10, 6]]}
+  - {col: 7.5, row: 5.5, angle_deg: 0, category: square, cells: [[7, 5], [7, 6], [8, 5], [8, 6]]}
+  - {col: 1.5, row: 7, angle_deg: -90, category: z_green, cells: [[1, 7], [1, 8], [2, 6], [2, 7]]}
+  - {col: 3.5, row: 7, angle_deg: 90, category: z_blue, cells: [[3, 6], [3, 7], [4, 7], [4, 8]]}
+  - {col: 6.5, row: 7, angle_deg: 90, category: T, cells: [[6, 6], [6, 7], [6, 8], [7, 7]]}
+  - {col: 5, row: 7.5, angle_deg: 90, category: line, cells: [[5, 6], [5, 7], [5, 8], [5, 9]]}
+  - {col: 9, row: 7, angle_deg: 0, category: L_blue, cells: [[8, 7], [8, 8], [9, 7], [10, 7]]}
+  - {col: 3, row: 9, angle_deg: -90, category: L_blue, cells: [[2, 8], [3, 8], [3, 9], [3, 10]]}
+  - {col: 7, row: 8.5, angle_deg: 180, category: T, cells: [[6, 9], [7, 8], [7, 9], [8, 9]]}
+  - {col: 9.5, row: 8.5, angle_deg: 0, category: square, cells: [[9, 8], [9, 9], [10, 8], [10, 9]]}
+  - {col: 1, row: 10, angle_deg: 90, category: L_yellow, cells: [[1, 9], [1, 10], [1, 11], [2, 9]]}
+  - {col: 4.5, row: 10, angle_deg: 90, category: T, cells: [[4, 9], [4, 10], [4, 11], [5, 10]]}
+  - {col: 6.5, row: 11, angle_deg: 90, category: z_blue, cells: [[6, 10], [6, 11], [7, 11], [7, 12]]}
+  - {col: 8.5, row: 10, angle_deg: 0, category: line, cells: [[7, 10], [8, 10], [9, 10], [10, 10]]}
+  - {col: 2.5, row: 11, angle_deg: 90, category: z_blue, cells: [[2, 10], [2, 11], [3, 11], [3, 12]]}
+  - {col: 8, row: 12, angle_deg: 90, category: L_yellow, cells: [[8, 11], [8, 12], [8, 13], [9, 11]]}
+  - {col: 9.5, row: 12, angle_deg: -90, category: z_green, cells: [[9, 12], [9, 13], [10, 11], [10, 12]]}
+  - {col: 1.5, row: 12.5, angle_deg: 0, category: square, cells: [[1, 12], [1, 13], [2, 12], [2, 13]]}
+  - {col: 3.5, row: 13, angle_deg: -90, category: z_green, cells: [[3, 13], [3, 14], [4, 12], [4, 13]]}
+  - {col: 5, row: 12.5, angle_deg: 90, category: line, cells: [[5, 11], [5, 12], [5, 13], [5, 14]]}
+  - {col: 6.5, row: 13, angle_deg: 90, category: z_blue, cells: [[6, 12], [6, 13], [7, 13], [7, 14]]}
+  - {col: 9, row: 14, angle_deg: 180, category: L_blue, cells: [[8, 14], [9, 14], [10, 13], [10, 14]]}

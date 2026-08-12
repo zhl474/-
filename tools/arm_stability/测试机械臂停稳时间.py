@@ -10,8 +10,8 @@ from akai_fr import AkaiFr
 # ========================= 直接修改的实机参数 =========================
 # 目标工具位姿：[X, Y, Z, Rx, Ry, Rz]，单位分别为 mm 和 °。
 # 默认值沿用项目现有复位测试点；运行前仍须根据现场确认其安全、可达。
-TARGET_POSE = [-337.4151306152343, 0, 200, -180.0, 0.0, 90.0]
-MOVE_SPEED = 180
+TARGET_POSE = [-337.4151306152343, -40, 200, -180.0, 0.0, 90.0]
+MOVE_SPEED = 100
 # 全局加速度百分比，范围建议为 1～100。
 # - None：不调用加速度设置接口，用于测试控制器当前保留的参数。
 # - 数值：运动前调用 SetOaccScale，例如设为 50、80 或 100。
@@ -21,13 +21,13 @@ TOOL_ID = 0
 USER_ID = 0
 
 # MoveL 返回后，最多再等待多少秒。
-STABLE_TIMEOUT_SECONDS = 5.0
+STABLE_TIMEOUT_SECONDS = 10.0
 # 期望采样周期，以及所有条件需要连续保持的时间。
 SAMPLE_INTERVAL_SECONDS = 0.005
-STABLE_CONFIRM_SECONDS = 0.20
+STABLE_CONFIRM_SECONDS = 0.01
 
 # TCP 实际速度阈值。
-LINEAR_SPEED_THRESHOLD_MM_S = 3.0
+LINEAR_SPEED_THRESHOLD_MM_S = 5.0
 ANGULAR_SPEED_THRESHOLD_DEG_S = 1.0
 # TCP 到达目标点的误差阈值。
 POSITION_TOLERANCE_MM = 1.0

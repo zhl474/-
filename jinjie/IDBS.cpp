@@ -364,8 +364,11 @@ bool idbs(){
 /*
 以下为被导出为so文件后被调用的接口
 */
-extern "C" API_SYMBOL char* IDBS(int block1, int block2, int block3, int block4, int block5, int block6, int block7,
-                                       int order1, int order2, int order3, int order4, int order5, int order6, int order7){
+static char* run_idbs(bool with_cells,
+                      int block1, int block2, int block3, int block4,
+                      int block5, int block6, int block7,
+                      int order1, int order2, int order3, int order4,
+                      int order5, int order6, int order7){
     best_step_count = 0;
     memset(counts, 0, sizeof(counts));
     memset(layers, 0, sizeof(layers));
@@ -465,11 +468,15 @@ extern "C" API_SYMBOL char* IDBS(int block1, int block2, int block3, int block4,
         }
     }
 
-    char* result = (char*)malloc(5000);
+    const size_t result_size = 10000;
+    char* result = (char*)malloc(result_size);
     if (!result) return NULL;
     result[0] = '\0';
-    
+
     best_step_count = best_state.cur_step_len;
+    if (with_cells) {
+        snprintf(result, result_size, "IDBS_WITH_CELLS_V1,%d,", best_step_count);
+    }
     for (int i = 0; i < best_step_count; i++) {
         float cx, cy;
         calculate_center(best_state.cur_step[i].id, best_state.cur_step[i].rotation,
@@ -513,23 +520,70 @@ extern "C" API_SYMBOL char* IDBS(int block1, int block2, int block3, int block4,
             if (angle == -90) x += 0.5;
         }
 
-        char buffer[100];
-        if (i == 0) {
-            snprintf(result, 5000, "%s,%.0f,%.1f,%.1f,", 
+        char buffer[256];
+        if (with_cells) {
+            int runtime_cells[4][2];
+            for (int cell_index = 0; cell_index < 4; cell_index++) {
+                int internal_row = best_state.cur_step[i].x
+                    + bricks[best_state.cur_step[i].id][best_state.cur_step[i].rotation][cell_index].dx;
+                int internal_col = best_state.cur_step[i].y
+                    + bricks[best_state.cur_step[i].id][best_state.cur_step[i].rotation][cell_index].dy;
+                // 运行时托盘使用左侧为第 1 列、底层为第 1 行。
+                runtime_cells[cell_index][0] = COLS - internal_col;
+                runtime_cells[cell_index][1] = internal_row + 1;
+            }
+            snprintf(
+                buffer,
+                sizeof(buffer),
+                "%s,%.0f,%.1f,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,",
+                brick_name[best_state.cur_step[i].id],
+                angle,
+                x + 0.5f,
+                y + 0.5f,
+                runtime_cells[0][0], runtime_cells[0][1],
+                runtime_cells[1][0], runtime_cells[1][1],
+                runtime_cells[2][0], runtime_cells[2][1],
+                runtime_cells[3][0], runtime_cells[3][1]
+            );
+            strncat(result, buffer, result_size - strlen(result) - 1);
+        } else if (i == 0) {
+            snprintf(result, result_size, "%s,%.0f,%.1f,%.1f,",
                      brick_name[best_state.cur_step[i].id], angle, x, y);
         } else {
-            snprintf(buffer, sizeof(buffer), "%s,%.0f,%.1f,%.1f,", 
+            snprintf(buffer, sizeof(buffer), "%s,%.0f,%.1f,%.1f,",
                      brick_name[best_state.cur_step[i].id], angle, x, y);
-            strncat(result, buffer, 5000 - strlen(result) - 1);
+            strncat(result, buffer, result_size - strlen(result) - 1);
         }
     }
     
     char num_buffer[20];
     snprintf(num_buffer, sizeof(num_buffer), "%d", detect_full_rows(best_state.cur_grid_state));
-    strncat(result, num_buffer, 5000 - strlen(result) - 1);
-    
+    strncat(result, num_buffer, result_size - strlen(result) - 1);
+
     return result;
 
+}
+
+
+extern "C" API_SYMBOL char* IDBS(
+    int block1, int block2, int block3, int block4, int block5, int block6, int block7,
+    int order1, int order2, int order3, int order4, int order5, int order6, int order7){
+    return run_idbs(
+        false,
+        block1, block2, block3, block4, block5, block6, block7,
+        order1, order2, order3, order4, order5, order6, order7
+    );
+}
+
+
+extern "C" API_SYMBOL char* IDBSWithCells(
+    int block1, int block2, int block3, int block4, int block5, int block6, int block7,
+    int order1, int order2, int order3, int order4, int order5, int order6, int order7){
+    return run_idbs(
+        true,
+        block1, block2, block3, block4, block5, block6, block7,
+        order1, order2, order3, order4, order5, order6, order7
+    );
 }
 
 

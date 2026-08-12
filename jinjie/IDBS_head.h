@@ -27,3 +27,7 @@
 //函数声明
 extern "C" API_SYMBOL char* IDBS(int block1, int block2, int block3, int block4, int block5, int block6, int block7,
                                        int order1, int order2, int order3, int order4, int order5, int order6, int order7);
+
+// V1 版本化接口：在原有类别、角度和中心之外返回四个运行时托盘占用格。
+extern "C" API_SYMBOL char* IDBSWithCells(int block1, int block2, int block3, int block4, int block5, int block6, int block7,
+                                                int order1, int order2, int order3, int order4, int order5, int order6, int order7);

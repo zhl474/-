@@ -9,6 +9,10 @@ from image_process_lib.task_planner import (
     load_task_layout,
     normalize_rotation_delta,
 )
+from image_process_lib.task_geometry import (
+    build_support_graph,
+    validate_dense_target_sequence,
+)
 
 
 PACKAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -22,6 +26,11 @@ def test_base_layout_is_single_valid_source():
     layout = load_task_layout(os.path.join(PACKAGE_DIR, "config", "task_layout.yaml"))
     assert len(layout) == 34
     assert [item["index"] for item in layout] == list(range(34))
+    cells = [cell for item in layout for cell in item["cells"]]
+    assert len(cells) == 136
+    assert len(set(cells)) == 136
+    graph = build_support_graph(layout)
+    validate_dense_target_sequence(range(34), graph)
 
 
 def test_assignment_is_stateless_across_repeated_calls():

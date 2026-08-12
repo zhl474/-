@@ -15,6 +15,10 @@ from .config import load_execution_config, load_visual_servo_config
 from .ros_clients import RobotClients
 from .servo_csv_logger import DEFAULT_SERVO_CSV_OUTPUT_DIR, ServoCsvLogger
 from .visual_servo import apply_camera_to_sucker_offset, run_offset_visual_servo_alignment
+from image_process_lib.servo_angle_model import (
+    plan_servo_angle_transition,
+    worst_case_servo_reset_seconds,
+)
 
 
 class TaskState(Enum):
@@ -68,16 +72,22 @@ class ServoAnglePlanner:
         )
 
     def plan(self, rotation_delta_deg):
-        rotation_delta_deg = float(rotation_delta_deg)
+        transition = plan_servo_angle_transition(
+            self.last_angle,
+            rotation_delta_deg,
+            self.lower_margin,
+            self.upper_margin,
+        )
         pre_pick_rotation = None
-        target = self.last_angle + rotation_delta_deg
-        if target > 360.0:
-            safe_pick_angle = self.upper_margin - rotation_delta_deg
-            pre_pick_rotation = self._command_rotation(safe_pick_angle)
-        elif target < 0.0:
-            safe_pick_angle = self.lower_margin - rotation_delta_deg
-            pre_pick_rotation = self._command_rotation(safe_pick_angle)
-        return self.last_angle, self.last_angle + rotation_delta_deg, pre_pick_rotation
+        if transition.pre_pick_target_angle_deg is not None:
+            pre_pick_rotation = self._command_rotation(
+                transition.pre_pick_target_angle_deg
+            )
+        return (
+            transition.pick_angle_deg,
+            transition.place_angle_deg,
+            pre_pick_rotation,
+        )
 
     def commit_place_angle(self, place_angle):
         return self._command_rotation(place_angle)
@@ -816,6 +826,16 @@ class TaskRunner:
 
     def prepare(self, advanced=False, place_order=()):
         self._set_state(TaskState.PREPARING)
+        # 复位发生在拍摄和用户确认之前，因此不计入比赛方案成本。
+        initial_angle = float(self.config.initial_motor_angle_deg)
+        self.clients.rotate_tool(initial_angle)
+        reset_wait_seconds = worst_case_servo_reset_seconds(
+            initial_angle,
+            self.config.motor_velocity_deg_per_sec,
+        )
+        # 无位置反馈时必须按 0°/360° 两端中的最坏角差保守等待。
+        time.sleep(reset_wait_seconds)
+        self.angle_planner.last_angle = initial_angle
         shooting_pose = self._validate_motion_pose(self.config.shooting_pose, "高位拍摄位")
         self.clients.move_arm(shooting_pose, self.config.arm_speed, wait_until_stable=True)
         return self.clients.prepare_task(advanced=advanced, place_order=place_order)

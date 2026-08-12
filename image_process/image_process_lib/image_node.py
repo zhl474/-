@@ -1,6 +1,7 @@
 #!/home/zhl/fr3env/fr3env/bin/python
 """图像快照、任务规划和视觉伺服检测的 ROS 服务组合节点。"""
 
+import json
 import math
 import os
 import re
@@ -55,6 +56,14 @@ from image_process_lib.task_planner import (
     assign_blocks_to_targets,
     load_task_layout,
     select_calibration_tray_points,
+)
+from image_process_lib.arm_motion_time import get_default_arm_motion_time_model
+from image_process_lib.task_sequence_optimizer import (
+    TaskSequenceOptimizerConfig,
+    build_task_plan_report,
+    decide_optimizer_mode,
+    optimize_task_sequence,
+    validate_motion_model_speeds,
 )
 
 from image_process.srv import (
@@ -169,10 +178,14 @@ class ImageProcessor:
             )
         ).strip()
         self.experiment_archive_dir = None
-        if self.calibration_mode and experiment_session_id:
-            self.experiment_archive_dir = os.path.join(
-                experiment_archive_root, experiment_session_id
+        self.task_plan_report_dir = None
+        if experiment_session_id:
+            self.task_plan_report_dir = os.path.join(
+                experiment_archive_root,
+                experiment_session_id,
             )
+        if self.calibration_mode and experiment_session_id:
+            self.experiment_archive_dir = self.task_plan_report_dir
             os.makedirs(self.experiment_archive_dir, exist_ok=True)
         model_config = perception_config.get("models", {})
         calibration_config = perception_config.get("calibration", {})
@@ -455,6 +468,9 @@ class ImageProcessor:
             if self.visual_servo_enabled
             else tuple(float(value) for value in camera_to_sucker_offset)
         )
+        self.camera_to_sucker_offset_mm = tuple(
+            float(value) for value in camera_to_sucker_offset
+        )
         self.visual_servo_timing_debug = bool(
             rospy.get_param(
                 "~visual_servo_timing_debug",
@@ -467,10 +483,70 @@ class ImageProcessor:
         motion_config = execution_config.get("motion", {})
         self.minimum_tcp_z_mm = float(motion_config.get("minimum_tcp_z_mm", 165.0))
         self.pick_surface_offset_mm = float(motion_config.get("pick_surface_offset_mm", 0.0))
+        self.pick_approach_clearance_mm = float(
+            motion_config.get("pick_approach_clearance_mm", 0.0)
+        )
+        self.arm_speed = float(motion_config.get("arm_speed", 0.0))
+        self.pick_approach_speed = float(
+            motion_config.get("pick_approach_speed", 0.0)
+        )
         if not np.isfinite(self.minimum_tcp_z_mm) or self.minimum_tcp_z_mm <= 0.0:
             raise ValueError("minimum_tcp_z_mm 必须是大于 0 的有限数值")
         if not np.isfinite(self.pick_surface_offset_mm):
             raise ValueError("pick_surface_offset_mm 必须是有限数值")
+        if (
+            not np.isfinite(self.pick_approach_clearance_mm)
+            or self.pick_approach_clearance_mm <= 0.0
+        ):
+            raise ValueError("pick_approach_clearance_mm 必须是大于 0 的有限数值")
+
+        motor_config = execution_config.get("tool_motor", {})
+        try:
+            self.initial_motor_angle_deg = float(motor_config["initial_angle_deg"])
+            self.motor_velocity_deg_per_sec = float(motor_config["velocity_deg_per_sec"])
+            self.motor_lower_margin_deg = float(motor_config["lower_margin_deg"])
+            self.motor_upper_margin_deg = float(motor_config["upper_margin_deg"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("tool_motor 配置缺失或格式无效") from exc
+
+        optimizer_config = perception_config.get("task_sequence_optimizer", {})
+        if not isinstance(optimizer_config, dict):
+            raise ValueError("task_sequence_optimizer 必须是字典")
+        self.task_sequence_optimizer_mode = str(
+            rospy.get_param(
+                "~task_sequence_optimizer_mode",
+                optimizer_config.get("mode", "shadow"),
+            )
+        ).strip().lower()
+        if self.task_sequence_optimizer_mode not in ("legacy", "shadow", "execute"):
+            raise ValueError(
+                "task_sequence_optimizer.mode 只能是 legacy、shadow 或 execute"
+            )
+
+        def positive_optimizer_int(name, default):
+            value = rospy.get_param(
+                f"~task_sequence_optimizer_{name}",
+                optimizer_config.get(name, default),
+            )
+            if isinstance(value, bool):
+                raise ValueError(f"task_sequence_optimizer.{name} 必须是正整数")
+            try:
+                number = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"task_sequence_optimizer.{name} 必须是正整数"
+                ) from exc
+            if not math.isfinite(number) or not number.is_integer() or number <= 0:
+                raise ValueError(f"task_sequence_optimizer.{name} 必须是正整数")
+            return int(number)
+
+        self.task_sequence_optimizer_beam_width = positive_optimizer_int(
+            "beam_width", 1000
+        )
+        self.task_sequence_optimizer_report_top_candidates = positive_optimizer_int(
+            "report_top_candidates", 20
+        )
+        self.last_task_plan_result = None
 
         localization_config = perception_config.get("high_tcp_localization", {})
         if not isinstance(localization_config, dict):
@@ -1048,7 +1124,20 @@ class ImageProcessor:
     def _build_observed_blocks_for_task(self, blocks, image_shape):
         """正式模式使用部署标定把已确认的方块识别结果转成粗观察位。"""
         observed_blocks = []
-        for block in blocks:
+        category_order = {
+            category: index for index, category in enumerate(BLOCK_CATEGORY_NAMES)
+        }
+        # 人工修正完成后再稳定排序编号，使日志、DP 平分和重复运行完全可复现。
+        ordered_blocks = sorted(
+            blocks,
+            key=lambda block: (
+                category_order[normalize_category_name(block["category"])],
+                float(block["px"]),
+                float(block["py"]),
+                float(block["theta"]),
+            ),
+        )
+        for source_id, block in enumerate(ordered_blocks):
             category = block["category"]
             servo_pose = self.high_tcp_localizer.locate_block(
                 (block["px"], block["py"])
@@ -1069,6 +1158,7 @@ class ImageProcessor:
                     category=category,
                     observation_pose=tuple(servo_pose),
                     detected_angle_deg=float(block["theta"]),
+                    source_id=source_id,
                     pick_surface_z_mm=pick_surface_z_mm,
                     pick_surface_z_valid=True,
                     **diagnostic,
@@ -1116,10 +1206,97 @@ class ImageProcessor:
                     desired_angle_deg=float(item["angle_deg"]),
                     category=normalize_category_name(item["category"]),
                     observation_pose=tuple(servo_pose),
+                    cells=tuple(tuple(cell) for cell in item["cells"]),
                     **diagnostic,
                 )
             )
         return targets
+
+    def _make_task_sequence_optimizer_config(self):
+        """把已校验的执行配置投影为纯规划器配置。"""
+        return TaskSequenceOptimizerConfig(
+            shooting_pose=tuple(self.shooting_angle),
+            camera_to_sucker_offset_mm=self.camera_to_sucker_offset_mm,
+            pick_surface_offset_mm=self.pick_surface_offset_mm,
+            pick_approach_clearance_mm=self.pick_approach_clearance_mm,
+            motor_velocity_deg_per_sec=self.motor_velocity_deg_per_sec,
+            initial_motor_angle_deg=self.initial_motor_angle_deg,
+            motor_lower_margin_deg=self.motor_lower_margin_deg,
+            motor_upper_margin_deg=self.motor_upper_margin_deg,
+            beam_width=self.task_sequence_optimizer_beam_width,
+            report_top_candidates=self.task_sequence_optimizer_report_top_candidates,
+        )
+
+    def _save_task_plan_report(self, result):
+        """尽力写入本轮中文 JSON；失败不得影响 shadow 或 execute 规划结果。"""
+        report_dir = self.task_plan_report_dir
+        if not report_dir:
+            rospy.logwarn("未配置实验批次目录，跳过任务规划报告写入")
+            return
+        report_path = os.path.join(report_dir, "任务规划报告.json")
+        try:
+            os.makedirs(report_dir, exist_ok=True)
+            document = build_task_plan_report(result)
+            with open(report_path, "w", encoding="utf-8") as report_file:
+                json.dump(document, report_file, ensure_ascii=False, indent=2)
+                report_file.write("\n")
+            rospy.loginfo("任务规划报告已写入: %s", report_path)
+        except Exception as exc:
+            rospy.logwarn("任务规划报告写入失败，不影响本轮任务: %s", exc)
+
+    def _plan_formal_tasks(self, observed_blocks, placement_targets):
+        """按 legacy/shadow/execute 规则生成本轮正式任务列表。"""
+        legacy_tasks = assign_blocks_to_targets(
+            observed_blocks,
+            placement_targets,
+            board_angle_deg=self.board_theta,
+        )
+        mode = self.task_sequence_optimizer_mode
+
+        def run_new_optimizer():
+            motion_model = get_default_arm_motion_time_model()
+            validate_motion_model_speeds(
+                motion_model,
+                self.arm_speed,
+                self.pick_approach_speed,
+            )
+            return optimize_task_sequence(
+                observed_blocks,
+                placement_targets,
+                board_angle_deg=self.board_theta,
+                config=self._make_task_sequence_optimizer_config(),
+                motion_model=motion_model,
+                legacy_tasks=legacy_tasks,
+            )
+
+        decision = decide_optimizer_mode(
+            mode,
+            legacy_tasks,
+            self.visual_servo_enabled,
+            run_new_optimizer,
+        )
+        self.last_task_plan_result = decision.plan_result
+        if decision.status == "legacy":
+            return list(decision.tasks), "旧匈牙利规划"
+        if decision.status == "shadow_failed":
+            rospy.logwarn(
+                "V1 shadow 新规划失败，本轮继续执行旧方案: %s",
+                decision.error_message,
+            )
+            return list(decision.tasks), "V1 shadow 失败回退旧匈牙利方案"
+
+        result = decision.plan_result
+        self._save_task_plan_report(result)
+        if decision.status == "shadow":
+            rospy.loginfo(
+                "V1 shadow：旧方案 %.3f s，固定顺序 DP %.3f s，"
+                "Beam %.3f s；本轮仍返回旧方案",
+                result.legacy_plan.simplified_cost_seconds,
+                result.fixed_order_plan.simplified_cost_seconds,
+                result.beam_best_plan.simplified_cost_seconds,
+            )
+            return list(decision.tasks), "V1 shadow（执行旧匈牙利方案）"
+        return list(decision.tasks), "V1 execute 优化规划"
 
     def _placement_specs(self, layout):
         """先计算全部托盘目标像素，供一次批量深度查询使用。"""
@@ -1454,6 +1631,7 @@ class ImageProcessor:
         self.board_grid_points = None
         self.board_grid_image_shape = None
         self.board_grid_image = None
+        self.last_task_plan_result = None
         request_stamp = rospy.Time.now()
         image = self.get_image_snapshot_newer_than(request_stamp)
         if image is None:
@@ -1504,12 +1682,14 @@ class ImageProcessor:
                     image.shape,
                 )
                 placement_targets = self._build_placement_targets(layout, image.shape[:2])
-                self.task_targets = assign_blocks_to_targets(
+                self.task_targets, planner_message = self._plan_formal_tasks(
                     observed_blocks,
                     placement_targets,
-                    board_angle_deg=self.board_theta,
                 )
-                message = f"{layout_message}准备完成，共 {len(self.task_targets)} 个任务"
+                message = (
+                    f"{layout_message}准备完成，共 {len(self.task_targets)} 个任务；"
+                    f"{planner_message}"
+                )
             rospy.loginfo(message)
             return PrepareTaskResponse(
                 success=True,
