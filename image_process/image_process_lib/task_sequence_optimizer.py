@@ -1,6 +1,6 @@
 """固定盘面的合法摆放顺序与实体对应联合优化 V1。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 import heapq
 import math
@@ -23,6 +23,10 @@ from image_process_lib.task_planner import (
     TaskTarget,
     make_task_target,
     normalize_rotation_delta,
+)
+from image_process_lib.task_sequence_optimizer_native import (
+    NativeSearchResult,
+    run_native_task_sequence_search,
 )
 
 
@@ -146,6 +150,11 @@ class BeamSearchStatistics:
     generated_child_count: int
     peak_retained_node_count: int
     final_candidate_count: int
+    backend: str = "python_reference"
+    source_assignment_elapsed_seconds: float = 0.0
+    native_call_elapsed_seconds: float = 0.0
+    candidate_conversion_elapsed_seconds: float = 0.0
+    python_postprocessing_elapsed_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -620,7 +629,7 @@ def run_target_beam_search(
     tables: MotionCostTables,
     beam_width: int,
 ) -> Tuple[Tuple[_BeamNode, ...], BeamSearchStatistics]:
-    """搜索所有满足 OR 支撑的 target 前缀，source 由增量 DP 评分。"""
+    """Python 参考搜索；生产路径使用 C++，本函数保留用于一致性测试。"""
     started_at = time.perf_counter()
     initial_dps = []
     for source_indices in tables.sources_by_category:
@@ -706,6 +715,24 @@ def run_target_beam_search(
         final_candidate_count=len(final_nodes),
     )
     return final_nodes, statistics
+
+
+def run_target_beam_search_native(
+    tables: MotionCostTables,
+    beam_width: int,
+    library_path=None,
+) -> NativeSearchResult:
+    """把只读成本表传给 C++，完成 Beam 和所有最终实体回溯。"""
+    return run_native_task_sequence_search(
+        first_layer_mask=tables.support_graph.first_layer_mask,
+        unlock_masks=tables.support_graph.unlock_masks,
+        target_categories=tables.category_index_by_target,
+        sources_by_category=tables.sources_by_category,
+        source_ids=[int(block.source_id) for block in tables.blocks],
+        edge_cost_seconds=tables.edge_cost_seconds,
+        beam_width=beam_width,
+        library_path=library_path,
+    )
 
 
 def _make_cost_step(
@@ -984,6 +1011,7 @@ def optimize_task_sequence(
     config: TaskSequenceOptimizerConfig,
     motion_model: ArmMotionTimeModel,
     legacy_tasks: Optional[Sequence[TaskTarget]] = None,
+    native_library_path=None,
 ) -> TaskPlanResult:
     """执行 V1 搜索，并保证最终简化成本不劣于固定 target 顺序。"""
     tables = build_motion_cost_tables(
@@ -997,14 +1025,55 @@ def optimize_task_sequence(
     fixed_plan = evaluate_target_sequence(fixed_sequence, tables)
     fixed_replay = replay_servo_plan(fixed_plan, tables, config)
 
-    final_nodes, statistics = run_target_beam_search(tables, int(config.beam_width))
+    native_result = run_target_beam_search_native(
+        tables,
+        int(config.beam_width),
+        library_path=native_library_path,
+    )
+    native_statistics = native_result.statistics
+    statistics = BeamSearchStatistics(
+        elapsed_seconds=native_statistics.beam_search_seconds,
+        expanded_parent_count=native_statistics.expanded_parent_count,
+        generated_child_count=native_statistics.generated_child_count,
+        peak_retained_node_count=native_statistics.peak_retained_node_count,
+        final_candidate_count=native_statistics.final_candidate_count,
+        backend="cpp_native",
+        source_assignment_elapsed_seconds=(
+            native_statistics.source_assignment_seconds
+        ),
+        native_call_elapsed_seconds=native_statistics.native_call_seconds,
+        candidate_conversion_elapsed_seconds=(
+            native_statistics.candidate_conversion_seconds
+        ),
+    )
+    postprocessing_started_at = time.perf_counter()
     beam_candidates = []
-    for node in final_nodes:
-        plan = evaluate_target_sequence(node.target_sequence, tables)
-        if abs(plan.simplified_cost_seconds - node.prefix_score) > _COST_TOLERANCE:
+    for native_candidate in native_result.candidates:
+        plan = _assemble_assignment_plan(
+            native_candidate.target_sequence,
+            native_candidate.source_sequence,
+            tables,
+        )
+        if (
+            abs(
+                plan.simplified_cost_seconds
+                - native_candidate.assignment_score
+            )
+            > _COST_TOLERANCE
+        ):
             raise RuntimeError(
-                "Beam 增量 DP 与最终回溯 DP 成本不一致："
-                f"{node.prefix_score:.12f} != {plan.simplified_cost_seconds:.12f}"
+                "C++ source assignment 与 Python 明细成本不一致："
+                f"{native_candidate.assignment_score:.12f} != "
+                f"{plan.simplified_cost_seconds:.12f}"
+            )
+        if (
+            abs(plan.simplified_cost_seconds - native_candidate.prefix_score)
+            > _COST_TOLERANCE
+        ):
+            raise RuntimeError(
+                "C++ Beam 增量 DP 与最终回溯 DP 成本不一致："
+                f"{native_candidate.prefix_score:.12f} != "
+                f"{plan.simplified_cost_seconds:.12f}"
             )
         beam_candidates.append(
             BeamCandidateResult(
@@ -1061,6 +1130,12 @@ def optimize_task_sequence(
             selected_plan.target_dense_sequence,
             selected_plan.source_indices,
         )
+    )
+    statistics = replace(
+        statistics,
+        python_postprocessing_elapsed_seconds=(
+            time.perf_counter() - postprocessing_started_at
+        ),
     )
     return TaskPlanResult(
         tasks=tasks,
@@ -1223,7 +1298,18 @@ def build_task_plan_report(result: TaskPlanResult) -> dict:
         "简化第一与真实重放第一不同": result.simplified_and_replay_ranking_differ,
         "真实重放第一候选排名": result.true_replay_best_candidate_index + 1,
         "Beam性能": {
+            "搜索后端": result.statistics.backend,
             "搜索耗时秒": result.statistics.elapsed_seconds,
+            "实体回溯耗时秒": (
+                result.statistics.source_assignment_elapsed_seconds
+            ),
+            "C++调用总耗时秒": result.statistics.native_call_elapsed_seconds,
+            "候选跨语言转换耗时秒": (
+                result.statistics.candidate_conversion_elapsed_seconds
+            ),
+            "Python后处理耗时秒": (
+                result.statistics.python_postprocessing_elapsed_seconds
+            ),
             "展开父节点数": result.statistics.expanded_parent_count,
             "生成子节点数": result.statistics.generated_child_count,
             "峰值保留节点数": result.statistics.peak_retained_node_count,

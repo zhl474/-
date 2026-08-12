@@ -8,8 +8,6 @@
   <arg name="tray_pixel_to_tcp_calibration_path"
        default="$(find image_process)/config/tray_pixel_to_tcp_calibration.yaml"/>
 
-  <node pkg="camera" type="camera_node.py" name="camera_node" output="screen"/>
-
   <node pkg="image_process" type="process.py" name="image_process_node" output="screen">
     <param name="calibration_mode" value="false"/>
     <param name="image_topic" value="/camera/image_rect"/>
@@ -23,13 +21,6 @@
     <param name="top_surface_mask_vis_path" value="$(arg debug_output_dir)/方块上表面掩码.jpg"/>
     <param name="high_template_match_debug_path" value="$(arg debug_output_dir)/高位方块模板匹配结果.jpg"/>
     <param name="visual_board_grid_debug_path" value="$(arg debug_output_dir)/托盘格点粗定位.jpg"/>
-  </node>
-
-  <node pkg="control" type="controller.py" name="control_node" output="screen">
-    <rosparam command="load" file="$(find control)/config/controller.yaml"/>
-    <param name="servo_port" value="/dev/servo_motor"/>
-    <param name="servo_baudrate" value="115200"/>
-    <param name="minimum_z" value="165.0"/>
   </node>
 
   <node pkg="competition" type="competition.py" name="competition_node" output="screen">

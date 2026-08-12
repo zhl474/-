@@ -1,5 +1,6 @@
 import itertools
 import json
+from ctypes import POINTER, c_double, c_int32, c_uint64, create_string_buffer
 from types import SimpleNamespace
 
 import numpy as np
@@ -7,6 +8,7 @@ import pytest
 from scipy.optimize import linear_sum_assignment
 
 import image_process_lib.task_planner as task_planner_module
+import image_process_lib.task_sequence_optimizer_native as native_optimizer_module
 from image_process_lib.servo_angle_model import (
     plan_servo_angle_transition,
     worst_case_servo_reset_seconds,
@@ -21,7 +23,11 @@ from image_process_lib.task_sequence_optimizer import (
     evaluate_target_sequence,
     optimize_task_sequence,
     run_target_beam_search,
+    run_target_beam_search_native,
     validate_motion_model_speeds,
+)
+from image_process_lib.task_sequence_optimizer_native import (
+    run_native_task_sequence_search,
 )
 
 
@@ -246,6 +252,209 @@ def test_beam_hot_loop_calls_neither_time_model_nor_hungarian(monkeypatch):
     assert model.calls == 1
 
 
+@pytest.mark.parametrize("seed", range(8))
+def test_cpp_beam_and_assignment_match_python_reference_for_every_candidate(seed):
+    rng = np.random.default_rng(seed)
+    categories = ("T", "line", "T", "line", "T")
+    blocks = [
+        _block(
+            source_id=100 + source_index * 7,
+            category=category,
+            x=float(rng.uniform(-150.0, 150.0)),
+            y=float(rng.uniform(-150.0, 150.0)),
+            angle=float(rng.uniform(-180.0, 180.0)),
+        )
+        for source_index, category in enumerate(categories)
+    ]
+    targets = [
+        _target(
+            index=20 + target_index,
+            category=category,
+            x=float(rng.uniform(-150.0, 150.0)),
+            y=float(rng.uniform(-150.0, 150.0)),
+            cells=_first_layer_cells(target_index + 1),
+            angle=float(rng.uniform(-180.0, 180.0)),
+        )
+        for target_index, category in enumerate(categories)
+    ]
+    tables = build_motion_cost_tables(
+        blocks,
+        targets,
+        11.0,
+        _config(beam_width=17),
+        线性批量时间模型(),
+    )
+
+    python_nodes, python_statistics = run_target_beam_search(tables, 17)
+    python_candidates = []
+    for node in python_nodes:
+        plan = evaluate_target_sequence(node.target_sequence, tables)
+        python_candidates.append((
+            plan.simplified_cost_seconds,
+            plan.target_dense_sequence,
+            plan.source_indices,
+            node.prefix_score,
+        ))
+    python_candidates.sort(key=lambda item: (
+        item[0],
+        item[1],
+        tuple(tables.blocks[index].source_id for index in item[2]),
+    ))
+
+    native_result = run_target_beam_search_native(tables, 17)
+    assert native_result.statistics.expanded_parent_count == (
+        python_statistics.expanded_parent_count
+    )
+    assert native_result.statistics.generated_child_count == (
+        python_statistics.generated_child_count
+    )
+    assert native_result.statistics.peak_retained_node_count == (
+        python_statistics.peak_retained_node_count
+    )
+    assert len(native_result.candidates) == len(python_candidates)
+    for python_candidate, native_candidate in zip(
+        python_candidates,
+        native_result.candidates,
+    ):
+        assert native_candidate.assignment_score == pytest.approx(
+            python_candidate[0], abs=1e-10
+        )
+        assert native_candidate.target_sequence == python_candidate[1]
+        assert native_candidate.source_sequence == python_candidate[2]
+        assert native_candidate.prefix_score == pytest.approx(
+            python_candidate[3], abs=1e-10
+        )
+
+
+def test_cpp_ties_choose_smaller_target_then_smaller_source_id():
+    blocks = [
+        _block(30, "T", 0, 0),
+        _block(10, "T", 0, 0),
+        _block(20, "T", 0, 0),
+    ]
+    targets = [
+        _target(index, "T", 0, 0, _first_layer_cells(index + 1))
+        for index in range(3)
+    ]
+    tables = build_motion_cost_tables(
+        blocks,
+        targets,
+        0.0,
+        _config(beam_width=2),
+        线性批量时间模型(),
+    )
+    # 强制所有可行边完全平分，专门验证两级确定性规则。
+    tables.edge_cost_seconds.setflags(write=True)
+    tables.edge_cost_seconds[:] = 0.0
+    tables.edge_cost_seconds.setflags(write=False)
+
+    result = run_target_beam_search_native(tables, 2)
+
+    assert [item.target_sequence for item in result.candidates] == [
+        (0, 1, 2),
+        (0, 2, 1),
+    ]
+    assert all(item.source_sequence == (0, 1, 2) for item in result.candidates)
+
+
+def test_native_wrapper_rejects_missing_library_and_invalid_inputs(tmp_path):
+    valid = {
+        "first_layer_mask": 1,
+        "unlock_masks": (0,),
+        "target_categories": (0,),
+        "sources_by_category": ((0,), (), (), (), (), (), ()),
+        "source_ids": (1,),
+        "edge_cost_seconds": np.zeros((2, 1, 1), dtype=np.float64),
+        "beam_width": 1,
+    }
+    with pytest.raises(RuntimeError, match="找不到.*动态库"):
+        run_native_task_sequence_search(
+            **valid,
+            library_path=tmp_path / "不存在.so",
+        )
+
+    invalid_cost = dict(valid)
+    invalid_cost["edge_cost_seconds"] = np.full((2, 1, 1), np.nan)
+    with pytest.raises(ValueError, match="有限非负"):
+        run_native_task_sequence_search(**invalid_cost)
+
+    too_many_sources = dict(valid)
+    too_many_sources.update({
+        "sources_by_category": ((0, 1, 2, 3, 4, 5), (), (), (), (), (), ()),
+        "source_ids": tuple(range(6)),
+        "edge_cost_seconds": np.zeros((2, 6, 1)),
+    })
+    with pytest.raises(ValueError, match="超过 5"):
+        run_native_task_sequence_search(**too_many_sources)
+
+    too_wide = dict(valid)
+    too_wide["beam_width"] = 5001
+    with pytest.raises(ValueError, match=r"\[1, 5000\]"):
+        run_native_task_sequence_search(**too_wide)
+
+    with pytest.raises(ValueError, match=r"\[1, 63\]"):
+        run_native_task_sequence_search(
+            first_layer_mask=1,
+            unlock_masks=(0,) * 64,
+            target_categories=(0,) * 64,
+            sources_by_category=(tuple(range(64)), (), (), (), (), (), ()),
+            source_ids=tuple(range(64)),
+            edge_cost_seconds=np.zeros((65, 64, 64)),
+            beam_width=1,
+        )
+
+
+def test_native_c_abi_rejects_wrong_version_and_small_output_capacity():
+    library_path = native_optimizer_module.resolve_native_library_path()
+    library = native_optimizer_module._load_native_library(str(library_path))
+    unlock_masks = np.zeros(1, dtype=np.uint64)
+    target_categories = np.zeros(1, dtype=np.int32)
+    category_source_counts = np.array([1, 0, 0, 0, 0, 0, 0], dtype=np.int32)
+    category_sources = np.full((7, 5), -1, dtype=np.int32)
+    category_sources[0, 0] = 0
+    source_ids = np.array([7], dtype=np.int32)
+    edge_costs = np.zeros((2, 1, 1), dtype=np.float64)
+    output_count = c_int32()
+    output_targets = np.empty((1, 1), dtype=np.int32)
+    output_sources = np.empty((1, 1), dtype=np.int32)
+    output_prefix = np.empty(1, dtype=np.float64)
+    output_assignment = np.empty(1, dtype=np.float64)
+    statistics = native_optimizer_module._NativeStatisticsV1()
+
+    def 调用(abi_version, output_capacity):
+        error = create_string_buffer(256)
+        return_code = library.task_sequence_optimizer_search_v1(
+            abi_version,
+            1,
+            1,
+            1,
+            1,
+            unlock_masks.ctypes.data_as(POINTER(c_uint64)),
+            target_categories.ctypes.data_as(POINTER(c_int32)),
+            category_source_counts.ctypes.data_as(POINTER(c_int32)),
+            category_sources.ctypes.data_as(POINTER(c_int32)),
+            source_ids.ctypes.data_as(POINTER(c_int32)),
+            edge_costs.ctypes.data_as(POINTER(c_double)),
+            output_capacity,
+            output_count,
+            output_targets.ctypes.data_as(POINTER(c_int32)),
+            output_sources.ctypes.data_as(POINTER(c_int32)),
+            output_prefix.ctypes.data_as(POINTER(c_double)),
+            output_assignment.ctypes.data_as(POINTER(c_double)),
+            statistics,
+            error,
+            len(error),
+        )
+        return return_code, error.value.decode("utf-8")
+
+    return_code, error = 调用(999, 1)
+    assert return_code != 0
+    assert "ABI" in error
+    return_code, error = 调用(native_optimizer_module.NATIVE_ABI_VERSION, 0)
+    assert return_code != 0
+    assert "输出候选容量" in error
+
+
 def test_replay_uses_absolute_servo_state_but_does_not_rerank_v1_selection():
     blocks, targets = _small_supported_problem()
     result = optimize_task_sequence(
@@ -270,6 +479,8 @@ def test_replay_uses_absolute_servo_state_but_does_not_rerank_v1_selection():
     report = build_task_plan_report(result)
     json.dumps(report, ensure_ascii=False)
     assert report["V1边界"]["真实舵机重放改变V1选择"] is False
+    assert report["Beam性能"]["搜索后端"] == "cpp_native"
+    assert report["Beam性能"]["C++调用总耗时秒"] >= 0.0
     assert "简化成本逐步明细" in report["最终Beam候选"][0]
     if len(report["最终Beam候选"]) > 1:
         assert "简化成本逐步明细" not in report["最终Beam候选"][1]
