@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "description": "MoveL运动路程-控制器阻塞调用时间标定",
+  "created_at": "2026-08-12T13:31:18",
+  "motion_type": "MoveL",
+  "move_speed_percent": 100.0,
+  "acceleration_percent": 100.0,
+  "time_metric": "move_call_median_s",
+  "short_distance_method": "sqrt_to_origin",
+  "short_distance_exponent": 0.5,
+  "long_distance_method": "anchored_linear_regression",
+  "long_distance_fit_start_mm": 300.0,
+  "source_summary": "tools/arm_stability/路程时间标定结果/20260812_132923_MoveL_100速度_汇总.csv",
+  "distance_time_table": [
+    {"distance_mm": 2.0, "time_seconds": 0.070727670999986},
+    {"distance_mm": 5.0, "time_seconds": 0.10665854000035324},
+    {"distance_mm": 10.0, "time_seconds": 0.14737172099921736},
+    {"distance_mm": 15.0, "time_seconds": 0.1790578669988463},
+    {"distance_mm": 20.0, "time_seconds": 0.22541066399935517},
+    {"distance_mm": 30.0, "time_seconds": 0.2979710489998979},
+    {"distance_mm": 40.0, "time_seconds": 0.3369227450002654},
+    {"distance_mm": 60.0, "time_seconds": 0.40438224599893147},
+    {"distance_mm": 80.0, "time_seconds": 0.4551573040007497},
+    {"distance_mm": 100.0, "time_seconds": 0.5015157729994826},
+    {"distance_mm": 150.0, "time_seconds": 0.593320586000118},
+    {"distance_mm": 200.0, "time_seconds": 0.6686561189999338},
+    {"distance_mm": 250.0, "time_seconds": 0.7199861119988782},
+    {"distance_mm": 300.0, "time_seconds": 0.7830294309987949},
+    {"distance_mm": 350.0, "time_seconds": 0.8440214689999266},
+    {"distance_mm": 400.0, "time_seconds": 0.9044041029992513},
+    {"distance_mm": 450.0, "time_seconds": 0.9785447030008072}
+  ]
+}
