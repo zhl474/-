@@ -3,12 +3,12 @@
   "missing_category": "L_yellow",
   "status": "FEASIBLE",
   "complete": false,
-  "solutions": 56,
-  "raw_geometric_solutions": 66,
-  "elapsed_s": 809.9633160760004,
+  "solutions": 909,
+  "elapsed_s": 26791.396256383003,
   "seed": 8,
   "partition_time": 0.0,
   "max_solutions": 0,
   "output": "layouts_260_A/partitions/gap03_missing_L_yellow.partial.jsonl",
+  "output_bytes": 151414,
   "skipped": false
 }

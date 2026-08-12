@@ -1,14 +1,14 @@
 {
   "gap_row": 5,
   "missing_category": "L_yellow",
-  "status": "FEASIBLE",
+  "status": "UNKNOWN",
   "complete": false,
-  "solutions": 19,
-  "raw_geometric_solutions": 26,
-  "elapsed_s": 390.43261406000056,
+  "solutions": 0,
+  "elapsed_s": 7.944162792999123,
   "seed": 15,
   "partition_time": 0.0,
   "max_solutions": 0,
   "output": "layouts_260_A/partitions/gap05_missing_L_yellow.partial.jsonl",
+  "output_bytes": 0,
   "skipped": false
 }

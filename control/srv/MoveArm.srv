@@ -1,6 +1,8 @@
 float64[6] pose
 int32 speed
 bool wait_until_stable
+bool blend_enabled
+float64 blend_radius_mm
 ---
 bool success
 string message

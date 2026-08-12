@@ -232,6 +232,8 @@ class RosServices:
             pose=[float(value) for value in pose],
             speed=int(speed),
             wait_until_stable=bool(wait_until_stable),
+            blend_enabled=False,
+            blend_radius_mm=0.0,
         )
         response = self._move_arm(request)
         if not response.success:

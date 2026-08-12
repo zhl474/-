@@ -26,8 +26,9 @@ def test_current_execution_and_servo_configs_are_valid():
     visual = load_visual_servo_config()
     assert execution.arm_speed > 0
     assert execution.servo_speed > 0
-    assert execution.pick_approach_clearance_mm == 5.0
-    assert execution.pick_approach_speed == 30
+    assert execution.pick_approach_clearance_mm == 3.0
+    assert execution.pick_approach_speed == 100
+    assert execution.pick_retreat_blend_radius_mm == 5.0
     assert execution.minimum_tcp_z_mm == 165.0
     assert isinstance(execution.calibration_mode, bool)
     assert isinstance(execution.visual_servo_enabled, bool)
@@ -239,6 +240,39 @@ def test_执行配置拒绝非法预抓取间隙(tmp_path, invalid_value):
 
     with pytest.raises(ValueError, match="motion.pick_approach_clearance_mm"):
         load_execution_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    [-1.0, 1000.1, float("inf"), float("nan"), True, "不是数值"],
+)
+def test_执行配置拒绝非法抓后抬升圆滑半径(tmp_path, invalid_value):
+    config_data = yaml.safe_load(
+        Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
+    )
+    config_data["motion"]["pick_retreat_blend_radius_mm"] = invalid_value
+    config_path = tmp_path / "非法抓后抬升圆滑半径.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="motion.pick_retreat_blend_radius_mm"):
+        load_execution_config(config_path)
+
+
+def test_执行配置允许用零关闭抓后抬升圆滑(tmp_path):
+    config_data = yaml.safe_load(
+        Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
+    )
+    config_data["motion"]["pick_retreat_blend_radius_mm"] = 0
+    config_path = tmp_path / "关闭抓后抬升圆滑.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    assert load_execution_config(config_path).pick_retreat_blend_radius_mm == 0.0
 
 
 @pytest.mark.parametrize("invalid_value", [0, -1, 1.5, True, "30"])

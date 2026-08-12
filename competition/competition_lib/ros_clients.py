@@ -84,11 +84,21 @@ class RobotClients:
         request = DetectBoardOffsetRequest(row=float(row), col=float(col))
         return self._board_offset(request)
 
-    def move_arm(self, pose, speed, wait_sec=0.0, wait_until_stable=False):
+    def move_arm(
+        self,
+        pose,
+        speed,
+        wait_sec=0.0,
+        wait_until_stable=False,
+        blend_radius_mm=None,
+    ):
+        blend_enabled = blend_radius_mm is not None
         request = MoveArmRequest(
             pose=[float(value) for value in pose],
             speed=int(speed),
             wait_until_stable=bool(wait_until_stable),
+            blend_enabled=blend_enabled,
+            blend_radius_mm=(float(blend_radius_mm) if blend_enabled else 0.0),
         )
         response = self._require_success(self._move_arm(request), "机械臂运动")
         if wait_sec > 0:

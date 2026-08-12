@@ -24,6 +24,7 @@ class ExecutionConfig:
     pick_surface_offset_mm: float
     pick_approach_clearance_mm: float
     pick_approach_speed: int
+    pick_retreat_blend_radius_mm: float
     minimum_tcp_z_mm: float
     timing_debug: bool
     block_error_threshold_px: float
@@ -140,6 +141,10 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
             motion["pick_approach_speed"],
             "motion.pick_approach_speed",
         ),
+        pick_retreat_blend_radius_mm=_nonnegative_finite_float(
+            motion["pick_retreat_blend_radius_mm"],
+            "motion.pick_retreat_blend_radius_mm",
+        ),
         minimum_tcp_z_mm=float(motion["minimum_tcp_z_mm"]),
         timing_debug=bool(servo.get("timing_debug", False)),
         block_error_threshold_px=block_error_threshold_px,
@@ -162,7 +167,7 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
     numeric_values = [
         config.arm_speed, config.pick_speed, config.servo_speed,
         config.pick_surface_offset_mm, config.pick_approach_clearance_mm,
-        config.pick_approach_speed,
+        config.pick_approach_speed, config.pick_retreat_blend_radius_mm,
         config.minimum_tcp_z_mm,
         config.block_error_threshold_px, config.tray_error_threshold_px,
         config.min_step_mm, config.max_step_mm, config.max_iter,
@@ -180,6 +185,8 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         raise ValueError("执行配置包含无效数值")
     if not 0 <= config.min_step_mm <= config.max_step_mm:
         raise ValueError("视觉伺服步长范围无效")
+    if config.pick_retreat_blend_radius_mm > 1000.0:
+        raise ValueError("motion.pick_retreat_blend_radius_mm 必须小于等于 1000 mm")
     if min(config.max_iter, config.success_stable_frames, config.max_missed_frames) <= 0:
         raise ValueError("视觉伺服迭代、稳定帧和丢失帧限制必须大于 0")
     if config.motor_velocity_deg_per_sec <= 0:

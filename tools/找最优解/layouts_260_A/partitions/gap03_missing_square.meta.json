@@ -1,14 +1,14 @@
 {
   "gap_row": 3,
   "missing_category": "square",
-  "status": "FEASIBLE",
+  "status": "UNKNOWN",
   "complete": false,
-  "solutions": 19,
-  "raw_geometric_solutions": 30,
-  "elapsed_s": 390.4946803290004,
+  "solutions": 0,
+  "elapsed_s": 7.359947901997657,
   "seed": 13,
   "partition_time": 0.0,
   "max_solutions": 0,
   "output": "layouts_260_A/partitions/gap03_missing_square.partial.jsonl",
+  "output_bytes": 0,
   "skipped": false
 }

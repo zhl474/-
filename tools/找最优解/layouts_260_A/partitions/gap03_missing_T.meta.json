@@ -1,14 +1,14 @@
 {
   "gap_row": 3,
   "missing_category": "T",
-  "status": "FEASIBLE",
+  "status": "UNKNOWN",
   "complete": false,
-  "solutions": 28,
-  "raw_geometric_solutions": 36,
-  "elapsed_s": 390.58026868699926,
+  "solutions": 0,
+  "elapsed_s": 7.811850238998886,
   "seed": 12,
   "partition_time": 0.0,
   "max_solutions": 0,
   "output": "layouts_260_A/partitions/gap03_missing_T.partial.jsonl",
+  "output_bytes": 0,
   "skipped": false
 }

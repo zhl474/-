@@ -4,11 +4,11 @@
   "status": "UNKNOWN",
   "complete": false,
   "solutions": 0,
-  "raw_geometric_solutions": 0,
-  "elapsed_s": 0.5658066219984903,
+  "elapsed_s": 3.391253929003142,
   "seed": 26,
   "partition_time": 0.0,
   "max_solutions": 0,
   "output": "layouts_260_A/partitions/gap07_missing_T.partial.jsonl",
+  "output_bytes": 0,
   "skipped": false
 }

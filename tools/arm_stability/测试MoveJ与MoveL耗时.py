@@ -12,13 +12,13 @@ from akai_fr import AkaiFr
 MOTION_TYPE = "MoveJ"
 
 # 固定测试起点 A 和终点 B：[X, Y, Z, Rx, Ry, Rz]，单位分别为 mm 和 °。
-POINT_A = [-337.4151306152343, 0.0, 200.0, -180.0, 0.0, 90.0]
-POINT_B = [-337.4151306152343, 200.0, 200.0, -180.0, 0.0, 90.0]
+POINT_A = [-337.4151306152343, -100.0, 330.0, -180.0, 0.0, 90.0]
+POINT_B = [-337.4151306152343, 200.0, 330.0, -180.0, 0.0, 90.0]
 
 # 首次必须用 20% 验证 MoveJ 完整轨迹，确认安全后再改成 100% 做正式对比。
-MOVE_SPEED = 20
+MOVE_SPEED = 100
 # 每次测试前使用 MoveL 回到 A 点，该动作不计入测试时间。
-PREPOSITION_SPEED = 20
+PREPOSITION_SPEED = 50
 # 全局加速度百分比；当前 SDK 的合法范围为 1～100。
 ACCELERATION_SCALE = 100
 

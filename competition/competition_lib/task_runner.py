@@ -563,6 +563,19 @@ class TaskRunner:
             retreat_z_mm = place_observation_pose[2]
             retreat_label = "吸取后托盘高度抬升位"
 
+        retreat_blend_radius_mm = None
+        if not self.config.calibration_mode and target_type == "pick_place":
+            configured_blend_radius_mm = self.config.pick_retreat_blend_radius_mm
+            if configured_blend_radius_mm > 0.0:
+                lift_distance_mm = retreat_z_mm - pick_z_mm
+                if configured_blend_radius_mm >= lift_distance_mm:
+                    raise RuntimeError(
+                        "抓后抬升圆滑半径必须小于竖直抬升距离："
+                        f"半径={configured_blend_radius_mm:.2f} mm，"
+                        f"抬升距离={lift_distance_mm:.2f} mm"
+                    )
+                retreat_blend_radius_mm = configured_blend_radius_mm
+
         # 闭环最终 XY 尚未得到，先用粗定位 XY 校验本次全部运动高度。
         for height, label in (
             (pre_pick_z_mm, "预抓取位"),
@@ -684,6 +697,7 @@ class TaskRunner:
             retreat_pose,
             self.config.arm_speed,
             wait_until_stable=False,
+            blend_radius_mm=retreat_blend_radius_mm,
         )
         place_rotation = self._timed_call(
             "摆放角度舵机指令",

@@ -3,12 +3,12 @@
   "missing_category": "square",
   "status": "FEASIBLE",
   "complete": false,
-  "solutions": 28,
-  "raw_geometric_solutions": 68,
-  "elapsed_s": 809.9630018379994,
+  "solutions": 664,
+  "elapsed_s": 26791.398208212002,
   "seed": 6,
   "partition_time": 0.0,
   "max_solutions": 0,
   "output": "layouts_260_A/partitions/gap01_missing_square.partial.jsonl",
+  "output_bytes": 109406,
   "skipped": false
 }

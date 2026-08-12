@@ -61,6 +61,20 @@ def test_move_arm_forwards_stability_wait_flag(monkeypatch):
     client.move_arm([1, 2, 3, 4, 5, 6], 40, wait_until_stable=True)
 
     assert [request.wait_until_stable for request in requests] == [False, True]
+    assert [request.blend_enabled for request in requests] == [False, False]
+    assert [request.blend_radius_mm for request in requests] == [0.0, 0.0]
+
+
+def test_move_arm_forwards_blend_radius(monkeypatch):
+    module = _load_ros_clients(monkeypatch)
+    client = object.__new__(module.RobotClients)
+    requests = []
+    client._move_arm = lambda request: requests.append(request) or types.SimpleNamespace(success=True)
+
+    client.move_arm([1, 2, 3, 4, 5, 6], 40, blend_radius_mm=5.0)
+
+    assert requests[0].blend_enabled is True
+    assert requests[0].blend_radius_mm == 5.0
 
 
 def test_get_actual_pose_calls_read_only_control_service(monkeypatch):

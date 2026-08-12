@@ -4,11 +4,11 @@
   "status": "UNKNOWN",
   "complete": false,
   "solutions": 0,
-  "raw_geometric_solutions": 0,
-  "elapsed_s": 0.5659578899976623,
+  "elapsed_s": 3.465202917002898,
   "seed": 27,
   "partition_time": 0.0,
   "max_solutions": 0,
   "output": "layouts_260_A/partitions/gap07_missing_square.partial.jsonl",
+  "output_bytes": 0,
   "skipped": false
 }

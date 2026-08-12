@@ -290,6 +290,110 @@ def test_move_arm_skips_stability_wait_when_not_requested(monkeypatch):
     assert log_calls == []
 
 
+def test_move_arm_passes_blocking_radius_for_normal_motion(monkeypatch):
+    module = _load_controller(monkeypatch)
+    move_kwargs = []
+    node = object.__new__(module.ControlNode)
+    node.minimum_z = 165.0
+    node.arm = types.SimpleNamespace(
+        set_speed=lambda _speed: None,
+        arm=types.SimpleNamespace(
+            MoveL=lambda _pose, **kwargs: move_kwargs.append(kwargs) or 0
+        ),
+    )
+    request = types.SimpleNamespace(
+        pose=[0, 0, 200, 0, 0, 0],
+        speed=40,
+        wait_until_stable=False,
+        blend_enabled=False,
+        blend_radius_mm=0.0,
+    )
+
+    response = node.move_arm(request)
+
+    assert response.success is True
+    assert move_kwargs[0]["blendR"] == -1.0
+    assert response.message == "机械臂运动完成"
+
+
+def test_move_arm_submits_nonblocking_blended_motion(monkeypatch):
+    module = _load_controller(monkeypatch)
+    move_kwargs = []
+    node = object.__new__(module.ControlNode)
+    node.minimum_z = 165.0
+    node.arm = types.SimpleNamespace(
+        set_speed=lambda _speed: None,
+        arm=types.SimpleNamespace(
+            MoveL=lambda _pose, **kwargs: move_kwargs.append(kwargs) or 0
+        ),
+    )
+    request = types.SimpleNamespace(
+        pose=[0, 0, 200, 0, 0, 0],
+        speed=40,
+        wait_until_stable=False,
+        blend_enabled=True,
+        blend_radius_mm=5.0,
+    )
+
+    response = node.move_arm(request)
+
+    assert response.success is True
+    assert move_kwargs[0]["blendR"] == 5.0
+    assert response.message == "机械臂圆滑过渡运动已提交"
+
+
+@pytest.mark.parametrize(
+    "invalid_radius",
+    [0.0, -1.0, 1000.1, float("inf"), float("nan")],
+)
+def test_move_arm_rejects_invalid_enabled_blend_radius(monkeypatch, invalid_radius):
+    module = _load_controller(monkeypatch)
+    calls = []
+    node = object.__new__(module.ControlNode)
+    node.minimum_z = 165.0
+    node.arm = types.SimpleNamespace(
+        set_speed=lambda _speed: calls.append("set_speed"),
+        arm=types.SimpleNamespace(MoveL=lambda *_args, **_kwargs: calls.append("MoveL")),
+    )
+    request = types.SimpleNamespace(
+        pose=[0, 0, 200, 0, 0, 0],
+        speed=40,
+        wait_until_stable=False,
+        blend_enabled=True,
+        blend_radius_mm=invalid_radius,
+    )
+
+    response = node.move_arm(request)
+
+    assert response.success is False
+    assert "圆滑半径" in response.message
+    assert calls == []
+
+
+def test_move_arm_rejects_waiting_at_blended_waypoint(monkeypatch):
+    module = _load_controller(monkeypatch)
+    calls = []
+    node = object.__new__(module.ControlNode)
+    node.minimum_z = 165.0
+    node.arm = types.SimpleNamespace(
+        set_speed=lambda _speed: calls.append("set_speed"),
+        arm=types.SimpleNamespace(MoveL=lambda *_args, **_kwargs: calls.append("MoveL")),
+    )
+    request = types.SimpleNamespace(
+        pose=[0, 0, 200, 0, 0, 0],
+        speed=40,
+        wait_until_stable=True,
+        blend_enabled=True,
+        blend_radius_mm=5.0,
+    )
+
+    response = node.move_arm(request)
+
+    assert response.success is False
+    assert "不能同时等待" in response.message
+    assert calls == []
+
+
 @pytest.mark.parametrize(
     ("state", "expected_calls", "expected_message"),
     [

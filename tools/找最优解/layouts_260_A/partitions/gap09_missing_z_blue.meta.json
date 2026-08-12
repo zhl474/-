@@ -4,11 +4,11 @@
   "status": "UNKNOWN",
   "complete": false,
   "solutions": 0,
-  "raw_geometric_solutions": 0,
-  "elapsed_s": 0.5453077759993903,
+  "elapsed_s": 3.0151742449961603,
   "seed": 32,
   "partition_time": 0.0,
   "max_solutions": 0,
   "output": "layouts_260_A/partitions/gap09_missing_z_blue.partial.jsonl",
+  "output_bytes": 0,
   "skipped": false
 }

@@ -162,11 +162,33 @@ class ControlNode:
 
     def move_arm(self, request):
         pose = [float(value) for value in request.pose]
+        blend_enabled = bool(getattr(request, "blend_enabled", False))
+        blend_radius_mm = float(getattr(request, "blend_radius_mm", 0.0))
         z_was_clamped = False
         if len(pose) != 6 or not self._finite(pose):
             return MoveArmResponse(success=False, message="机械臂位姿必须包含 6 个有限数值")
         if request.speed <= 0:
             return MoveArmResponse(success=False, message="机械臂速度必须大于 0")
+        if (
+            not math.isfinite(blend_radius_mm)
+            or blend_radius_mm < 0.0
+            or blend_radius_mm > 1000.0
+        ):
+            return MoveArmResponse(
+                success=False,
+                message="圆滑半径必须是 0 到 1000 mm 之间的有限数值",
+            )
+        if blend_enabled and blend_radius_mm == 0.0:
+            return MoveArmResponse(
+                success=False,
+                message="启用圆滑过渡时，圆滑半径必须大于 0 mm",
+            )
+        if blend_enabled and request.wait_until_stable:
+            return MoveArmResponse(
+                success=False,
+                message="圆滑过渡点不会精确到位，不能同时等待该点停稳",
+            )
+        sdk_blend_radius_mm = blend_radius_mm if blend_enabled else -1.0
         if pose[2] < self.minimum_z:
             requested_z = pose[2]
             pose[2] = self.minimum_z
@@ -181,7 +203,13 @@ class ControlNode:
         try:
             self.arm.set_speed(int(request.speed))
             motion_started_at = time.monotonic()
-            result = self.arm.arm.MoveL(pose, tool=0, user=0, vel=int(request.speed))
+            result = self.arm.arm.MoveL(
+                pose,
+                tool=0,
+                user=0,
+                vel=int(request.speed),
+                blendR=sdk_blend_radius_mm,
+            )
             if (isinstance(result, bool) and not result) or (
                 not isinstance(result, bool) and result != 0
             ):
@@ -199,13 +227,16 @@ class ControlNode:
                         (motion_seconds + stabilization_seconds) * 1000.0,
                     )
             if z_was_clamped:
+                motion_status = "已提交圆滑过渡运动" if blend_enabled else "已完成运动"
                 return MoveArmResponse(
                     success=True,
                     message=(
                         f"目标 Z={requested_z:.2f} mm 低于安全下限 {self.minimum_z:.2f} mm，"
-                        f"已自动调整为 {pose[2]:.2f} mm 并完成运动"
+                        f"已自动调整为 {pose[2]:.2f} mm，{motion_status}"
                     ),
                 )
+            if blend_enabled:
+                return MoveArmResponse(success=True, message="机械臂圆滑过渡运动已提交")
             return MoveArmResponse(success=True, message="机械臂运动完成")
         except Exception as exc:
             rospy.logerr("机械臂运动异常: %s", exc)
