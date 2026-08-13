@@ -9,8 +9,22 @@ models:
 # 固定盘面最短摆放方案 V1。shadow 计算并记录新方案，但仍执行旧匈牙利方案。
 task_sequence_optimizer:
   mode: legacy           # legacy / shadow / execute
-  beam_width: 50000
+  beam_width: 5000
   report_top_candidates: 20
+
+# 普通 260 分任务的 V5 动态盘面选择。shadow 完整计算并记录，但仍执行固定 YAML。
+dynamic_board_selection:
+  mode: disabled                 # disabled / shadow / execute
+  library_path: image_process/config/v5_board_library_v1.npz
+  coarse_top_k: 1000
+  final_candidate_k: 100
+  keep_coarse_boundary_ties: true
+  comparison_beam_width: 1000
+  comparison_returned_candidates: 10
+  confirmation_beam_width: 5000
+  confirmation_returned_candidates: 20
+  soft_time_budget_sec: 10.0
+  failure_prompt_timeout_sec: 60.0
 
 # 高位方块 Seg/模板匹配完成后，在像素转 TCP、深度采样和任务规划前人工修正 Mask。
 # GUI 始终运行在独立无 ROS 子进程中；false 时完全沿用原自动识别流程。

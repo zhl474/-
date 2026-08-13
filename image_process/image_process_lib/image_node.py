@@ -58,6 +58,23 @@ from image_process_lib.task_planner import (
     select_calibration_tray_points,
 )
 from image_process_lib.arm_motion_time import get_default_arm_motion_time_model
+from image_process_lib.board_candidate_selector import (
+    BoardCandidateSelector,
+    BoardCandidateSelectorConfig,
+)
+from image_process_lib.dynamic_board_report import (
+    build_dynamic_board_selection_report,
+)
+from image_process_lib.dynamic_board_runtime import (
+    atomic_write_json,
+    prompt_dynamic_selection_failure,
+    sha256_file,
+)
+from image_process_lib.final_board_selector import (
+    DynamicBoardSelectionError,
+    FinalBoardSelector,
+    FinalBoardSelectorConfig,
+)
 from image_process_lib.task_sequence_optimizer import (
     TaskSequenceOptimizerConfig,
     build_task_plan_report,
@@ -65,6 +82,7 @@ from image_process_lib.task_sequence_optimizer import (
     optimize_task_sequence,
     validate_motion_model_speeds,
 )
+from image_process_lib.v5_board_library import load_v5_board_library
 
 from image_process.srv import (
     DetectBlockOffset,
@@ -90,6 +108,11 @@ SEGMENTATION_MODEL_PATH = os.path.join(COMPETITION_DIR, "model", "best_seg.engin
 JINJIE_LIB_PATH = os.path.join(SRC_DIR, "jinjie", "jinjie_libtetris.so")
 TASK_LAYOUT_PATH = os.path.join(PACKAGE_DIR, "config", "task_layout.yaml")
 PERCEPTION_CONFIG_PATH = os.path.join(PACKAGE_DIR, "config", "perception.yaml")
+DEFAULT_V5_BOARD_LIBRARY_PATH = os.path.join(
+    PACKAGE_DIR,
+    "config",
+    "v5_board_library_v1.npz",
+)
 DEFAULT_BLOCK_CALIBRATION_PATH = os.path.join(
     PACKAGE_DIR,
     "config",
@@ -250,6 +273,8 @@ class ImageProcessor:
             ),
             DEFAULT_TRAY_CALIBRATION_PATH,
         )
+        self.block_calibration_path = block_calibration_path
+        self.tray_calibration_path = tray_calibration_path
         hand_eye_matrix_path = src_path(
             calibration_config.get("hand_eye_matrix"),
             os.path.join(SRC_DIR, "camera", "config", "T_wrist2camera.npy"),
@@ -547,6 +572,166 @@ class ImageProcessor:
             "report_top_candidates", 20
         )
         self.last_task_plan_result = None
+
+        dynamic_config = perception_config.get("dynamic_board_selection", {})
+        if not isinstance(dynamic_config, dict):
+            raise ValueError("dynamic_board_selection 必须是字典")
+        self.dynamic_board_selection_mode = str(rospy.get_param(
+            "~dynamic_board_selection_mode",
+            dynamic_config.get("mode", "shadow"),
+        )).strip().lower()
+        if self.dynamic_board_selection_mode not in ("disabled", "shadow", "execute"):
+            raise ValueError(
+                "dynamic_board_selection.mode 只能是 disabled、shadow 或 execute"
+            )
+
+        def positive_dynamic_int(name, default):
+            value = rospy.get_param(
+                f"~dynamic_board_selection_{name}",
+                dynamic_config.get(name, default),
+            )
+            if isinstance(value, bool):
+                raise ValueError(f"dynamic_board_selection.{name} 必须是正整数")
+            try:
+                number = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"dynamic_board_selection.{name} 必须是正整数"
+                ) from exc
+            if not math.isfinite(number) or not number.is_integer() or number <= 0.0:
+                raise ValueError(f"dynamic_board_selection.{name} 必须是正整数")
+            return int(number)
+
+        self.dynamic_board_coarse_top_k = positive_dynamic_int("coarse_top_k", 300)
+        self.dynamic_board_final_candidate_k = positive_dynamic_int(
+            "final_candidate_k", 20
+        )
+        keep_boundary_ties = rospy.get_param(
+            "~dynamic_board_selection_keep_coarse_boundary_ties",
+            dynamic_config.get("keep_coarse_boundary_ties", True),
+        )
+        if not isinstance(keep_boundary_ties, bool):
+            raise ValueError(
+                "dynamic_board_selection.keep_coarse_boundary_ties 必须是布尔值"
+            )
+        self.dynamic_board_keep_coarse_boundary_ties = keep_boundary_ties
+        self.dynamic_board_comparison_beam_width = positive_dynamic_int(
+            "comparison_beam_width", 1000
+        )
+        self.dynamic_board_comparison_returned_candidates = positive_dynamic_int(
+            "comparison_returned_candidates", 1
+        )
+        self.dynamic_board_confirmation_beam_width = positive_dynamic_int(
+            "confirmation_beam_width", 50000
+        )
+        self.dynamic_board_confirmation_returned_candidates = positive_dynamic_int(
+            "confirmation_returned_candidates", 20
+        )
+
+        def finite_dynamic_seconds(name, default, allow_zero):
+            value = rospy.get_param(
+                f"~dynamic_board_selection_{name}",
+                dynamic_config.get(name, default),
+            )
+            try:
+                seconds = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"dynamic_board_selection.{name} 必须是有限秒数"
+                ) from exc
+            if not math.isfinite(seconds) or seconds < 0.0 or (
+                not allow_zero and seconds == 0.0
+            ):
+                qualifier = "非负" if allow_zero else "大于 0"
+                raise ValueError(
+                    f"dynamic_board_selection.{name} 必须是{qualifier}有限秒数"
+                )
+            return seconds
+
+        self.dynamic_board_soft_time_budget_sec = finite_dynamic_seconds(
+            "soft_time_budget_sec", 10.0, True
+        )
+        self.dynamic_board_failure_prompt_timeout_sec = finite_dynamic_seconds(
+            "failure_prompt_timeout_sec", 60.0, False
+        )
+        raw_library_path = rospy.get_param(
+            "~dynamic_board_selection_library_path",
+            dynamic_config.get("library_path", DEFAULT_V5_BOARD_LIBRARY_PATH),
+        )
+        self.dynamic_board_library_path = src_path(
+            raw_library_path,
+            DEFAULT_V5_BOARD_LIBRARY_PATH,
+        )
+        self.dynamic_board_runtime_config = {
+            "mode": self.dynamic_board_selection_mode,
+            "library_path": self.dynamic_board_library_path,
+            "coarse_top_k": self.dynamic_board_coarse_top_k,
+            "final_candidate_k": self.dynamic_board_final_candidate_k,
+            "keep_coarse_boundary_ties": self.dynamic_board_keep_coarse_boundary_ties,
+            "comparison_beam_width": self.dynamic_board_comparison_beam_width,
+            "comparison_returned_candidates": (
+                self.dynamic_board_comparison_returned_candidates
+            ),
+            "confirmation_beam_width": self.dynamic_board_confirmation_beam_width,
+            "confirmation_returned_candidates": (
+                self.dynamic_board_confirmation_returned_candidates
+            ),
+            "soft_time_budget_sec": self.dynamic_board_soft_time_budget_sec,
+            "failure_prompt_timeout_sec": self.dynamic_board_failure_prompt_timeout_sec,
+        }
+        self.dynamic_board_library = None
+        self.dynamic_board_candidate_selector = None
+        self.dynamic_final_board_selector = None
+        self.last_dynamic_board_decision = None
+        self.last_dynamic_board_report_path = None
+        if (
+            not self.calibration_mode
+            and self.dynamic_board_selection_mode == "execute"
+            and self.visual_servo_enabled
+        ):
+            raise ValueError(
+                "动态盘面 execute 要求 execution.yaml 中 servo.enabled=false"
+            )
+        if (
+            not self.calibration_mode
+            and self.dynamic_board_selection_mode != "disabled"
+        ):
+            self.dynamic_board_library = load_v5_board_library(
+                self.dynamic_board_library_path
+            )
+            self.dynamic_board_candidate_selector = BoardCandidateSelector(
+                self.dynamic_board_library,
+                BoardCandidateSelectorConfig(
+                    coarse_top_k=self.dynamic_board_coarse_top_k,
+                    final_candidate_k=self.dynamic_board_final_candidate_k,
+                    keep_coarse_boundary_ties=(
+                        self.dynamic_board_keep_coarse_boundary_ties
+                    ),
+                ),
+            )
+            self.dynamic_final_board_selector = FinalBoardSelector(
+                self.dynamic_board_library,
+                FinalBoardSelectorConfig(
+                    comparison_beam_width=(
+                        self.dynamic_board_comparison_beam_width
+                    ),
+                    comparison_returned_candidates=(
+                        self.dynamic_board_comparison_returned_candidates
+                    ),
+                    confirmation_beam_width=(
+                        self.dynamic_board_confirmation_beam_width
+                    ),
+                    confirmation_returned_candidates=(
+                        self.dynamic_board_confirmation_returned_candidates
+                    ),
+                    soft_time_budget_sec=self.dynamic_board_soft_time_budget_sec,
+                ),
+            )
+            rospy.loginfo(
+                "V5 动态盘面库已加载：%d 张，SHA256=%s",
+                self.dynamic_board_library.board_count,
+                self.dynamic_board_library.source_sha256,
+            )
 
         localization_config = perception_config.get("high_tcp_localization", {})
         if not isinstance(localization_config, dict):
@@ -1212,6 +1397,285 @@ class ImageProcessor:
             )
         return targets
 
+    @staticmethod
+    def _dynamic_center_key(row, col):
+        """V5 行列均是整数或 .5，可直接作为稳定缓存键。"""
+        return float(row), float(col)
+
+    def _build_dynamic_target_center_cache(self, placement_ids, image_shape):
+        """按行列去重执行“格点插值→托盘 TCP”，并构造 PID XY 查表。"""
+        library = self.dynamic_board_library
+        if library is None:
+            raise RuntimeError("V5 动态盘面库未加载")
+        placement_xy = np.full((library.placement_count, 2), np.nan, dtype=np.float64)
+        cache_by_center = {}
+        records_by_center = {}
+        for pid_value in sorted(set(int(value) for value in placement_ids)):
+            pid = int(pid_value)
+            if pid < 0 or pid >= library.placement_count:
+                raise ValueError(f"动态盘面 PID 越界：{pid}")
+            row = float(library.placement_row[pid])
+            col = float(library.placement_col[pid])
+            key = self._dynamic_center_key(row, col)
+            cached = cache_by_center.get(key)
+            if cached is None:
+                target_point = interpolate_grid_point(
+                    self.board_grid_points,
+                    row,
+                    col,
+                )
+                pixel_xy = (float(target_point[0]), float(target_point[1]))
+                servo_pose = tuple(
+                    float(value)
+                    for value in self.high_tcp_localizer.locate_tray(pixel_xy)
+                )
+                diagnostic = self.make_high_localization_diagnostic(
+                    pixel_xy[0],
+                    pixel_xy[1],
+                    image_shape,
+                )
+                cached = {
+                    "row": row,
+                    "col": col,
+                    "pixel_xy": pixel_xy,
+                    "observation_pose": servo_pose,
+                    "diagnostic": diagnostic,
+                }
+                cache_by_center[key] = cached
+                records_by_center[key] = {
+                    "行": row,
+                    "列": col,
+                    "目标中心像素XY": list(pixel_xy),
+                    "TCP观察位姿": list(servo_pose),
+                    "高位定位诊断": diagnostic,
+                    "placement_PID": [],
+                }
+            records_by_center[key]["placement_PID"].append(pid)
+            placement_xy[pid] = cached["observation_pose"][:2]
+        records = tuple(
+            records_by_center[key]
+            for key in sorted(records_by_center)
+        )
+        return placement_xy, cache_by_center, records
+
+    def _build_dynamic_placement_targets(self, placement_ids, cache_by_center):
+        """只为 relaxed 前 top-k 盘面构造完整 PlacementTarget。"""
+        library = self.dynamic_board_library
+        targets = {}
+        for pid_value in sorted(set(int(value) for value in placement_ids)):
+            pid = int(pid_value)
+            row = float(library.placement_row[pid])
+            col = float(library.placement_col[pid])
+            key = self._dynamic_center_key(row, col)
+            if key not in cache_by_center:
+                raise RuntimeError(f"PID {pid} 缺少目标中心 TCP 缓存")
+            cached = cache_by_center[key]
+            targets[pid] = PlacementTarget(
+                index=pid,
+                row=row,
+                col=col,
+                desired_angle_deg=float(
+                    library.placement_yaw_clockwise_deg[pid]
+                ),
+                category=library.category_names[
+                    int(library.placement_category[pid])
+                ],
+                observation_pose=cached["observation_pose"],
+                cells=tuple(
+                    tuple(int(value) for value in cell)
+                    for cell in library.placement_cells[pid]
+                ),
+                **cached["diagnostic"],
+            )
+        return targets
+
+    def _run_dynamic_board_selection(self, observed_blocks, image_shape):
+        """完整执行粗筛、relaxed、20 盘比较和唯一盘面确认。"""
+        if (
+            self.dynamic_board_candidate_selector is None
+            or self.dynamic_final_board_selector is None
+        ):
+            raise RuntimeError("动态盘面选择器未初始化")
+        state = {
+            "tray_center_pixel_xy": None,
+            "coarse_result": None,
+            "relaxed_result": None,
+            "target_center_cache": (),
+            "decision": None,
+        }
+        self._current_dynamic_board_run = state
+        tray_center = interpolate_grid_point(
+            self.board_grid_points,
+            row=7.5,
+            col=5.5,
+        )
+        tray_center = (float(tray_center[0]), float(tray_center[1]))
+        state["tray_center_pixel_xy"] = tray_center
+        coarse_result = self.dynamic_board_candidate_selector.select_coarse(
+            observed_blocks,
+            tray_center,
+        )
+        state["coarse_result"] = coarse_result
+        required_pids = self.dynamic_board_candidate_selector.required_placement_ids(
+            coarse_result
+        )
+        placement_xy, center_cache, center_records = (
+            self._build_dynamic_target_center_cache(required_pids, image_shape)
+        )
+        state["target_center_cache"] = center_records
+        relaxed_result = self.dynamic_board_candidate_selector.select_relaxed(
+            coarse_result,
+            observed_blocks,
+            placement_xy,
+            self.board_theta,
+        )
+        state["relaxed_result"] = relaxed_result
+        final_pids = {
+            int(pid)
+            for candidate in relaxed_result.candidates
+            for pid in self.dynamic_board_library.board_target_pid[
+                candidate.board_index
+            ].flat
+            if int(pid) >= 0
+        }
+        placement_targets_by_pid = self._build_dynamic_placement_targets(
+            final_pids,
+            center_cache,
+        )
+        motion_model = get_default_arm_motion_time_model()
+        validate_motion_model_speeds(
+            motion_model,
+            self.arm_speed,
+            self.pick_approach_speed,
+        )
+        self.dynamic_motion_model_source_path = getattr(
+            motion_model,
+            "source_path",
+            None,
+        )
+        decision = self.dynamic_final_board_selector.select(
+            relaxed_result,
+            observed_blocks,
+            placement_targets_by_pid,
+            self.board_theta,
+            self._make_task_sequence_optimizer_config(),
+            motion_model,
+        )
+        state["decision"] = decision
+        self.last_dynamic_board_decision = decision
+        for attempt in decision.comparison_attempts:
+            if attempt.succeeded:
+                rospy.loginfo(
+                    "V5比较 %s：简化=%.6f s，舵机重放=%.6f s，耗时=%.3f s",
+                    attempt.board_id,
+                    attempt.simplified_cost_seconds,
+                    attempt.servo_replay_total_seconds,
+                    attempt.elapsed_seconds,
+                )
+            else:
+                rospy.logwarn(
+                    "V5比较 %s 失败：%s",
+                    attempt.board_id,
+                    attempt.error_message,
+                )
+        rospy.loginfo(
+            "V5唯一盘面=%s，指纹=%s，总耗时=%.3f s",
+            decision.board_id,
+            decision.decision_fingerprint,
+            decision.total_elapsed_seconds,
+        )
+        if decision.soft_time_budget_exceeded:
+            rospy.logwarn(
+                "V5动态盘面选择耗时 %.3f s，超过软预算 %.3f s；"
+                "结果不受影响",
+                decision.total_elapsed_seconds,
+                self.dynamic_board_soft_time_budget_sec,
+            )
+        return state
+
+    def _save_dynamic_board_report(
+        self,
+        observed_blocks,
+        image_shape,
+        outcome,
+        error_message="",
+        human_failure_choice="",
+        actual_planner_message="",
+        comparison_attempts=(),
+    ):
+        """尽力原子写入动态报告；报告失败不改变已选任务。"""
+        report_dir = self.task_plan_report_dir
+        if not report_dir:
+            rospy.logwarn("未配置实验批次目录，跳过动态盘面报告写入")
+            return
+        state = getattr(self, "_current_dynamic_board_run", {}) or {}
+        try:
+            tray_center = state.get("tray_center_pixel_xy")
+            if tray_center is None:
+                point = interpolate_grid_point(
+                    self.board_grid_points,
+                    row=7.5,
+                    col=5.5,
+                )
+                tray_center = (float(point[0]), float(point[1]))
+            hashes = {
+                "方块像素到TCP": sha256_file(self.block_calibration_path),
+                "托盘像素到TCP": sha256_file(self.tray_calibration_path),
+                "机械臂运动时间": sha256_file(
+                    getattr(self, "dynamic_motion_model_source_path", None)
+                ),
+            }
+            optimizer_config = self._make_task_sequence_optimizer_config()
+            runtime_config = dict(self.dynamic_board_runtime_config)
+            runtime_config["task_sequence_optimizer"] = {
+                "shooting_pose": list(optimizer_config.shooting_pose),
+                "camera_to_sucker_offset_mm": list(
+                    optimizer_config.camera_to_sucker_offset_mm
+                ),
+                "pick_surface_offset_mm": optimizer_config.pick_surface_offset_mm,
+                "pick_approach_clearance_mm": (
+                    optimizer_config.pick_approach_clearance_mm
+                ),
+                "motor_velocity_deg_per_sec": (
+                    optimizer_config.motor_velocity_deg_per_sec
+                ),
+                "initial_motor_angle_deg": optimizer_config.initial_motor_angle_deg,
+                "motor_lower_margin_deg": optimizer_config.motor_lower_margin_deg,
+                "motor_upper_margin_deg": optimizer_config.motor_upper_margin_deg,
+            }
+            runtime_config["motion_model_path"] = str(
+                getattr(self, "dynamic_motion_model_source_path", "") or ""
+            )
+            runtime_config["arm_speed"] = self.arm_speed
+            runtime_config["pick_approach_speed"] = self.pick_approach_speed
+            decision = state.get("decision")
+            document = build_dynamic_board_selection_report(
+                mode=self.dynamic_board_selection_mode,
+                outcome=outcome,
+                observed_blocks=observed_blocks,
+                board_grid_points=self.board_grid_points,
+                tray_center_pixel_xy=tray_center,
+                board_angle_deg=self.board_theta,
+                image_shape=image_shape,
+                target_center_cache=state.get("target_center_cache", ()),
+                library=self.dynamic_board_library,
+                runtime_config=runtime_config,
+                calibration_sha256=hashes,
+                coarse_result=state.get("coarse_result"),
+                relaxed_result=state.get("relaxed_result"),
+                decision=decision,
+                comparison_attempts=comparison_attempts,
+                error_message=error_message,
+                human_failure_choice=human_failure_choice,
+                actual_planner_message=actual_planner_message,
+            )
+            report_path = os.path.join(report_dir, "动态盘面选择报告.json")
+            atomic_write_json(report_path, document)
+            self.last_dynamic_board_report_path = report_path
+            rospy.loginfo("动态盘面选择报告已写入: %s", report_path)
+        except Exception as exc:
+            rospy.logwarn("动态盘面选择报告写入失败，不影响本轮任务: %s", exc)
+
     def _make_task_sequence_optimizer_config(self):
         """把已校验的执行配置投影为纯规划器配置。"""
         return TaskSequenceOptimizerConfig(
@@ -1632,6 +2096,9 @@ class ImageProcessor:
         self.board_grid_image_shape = None
         self.board_grid_image = None
         self.last_task_plan_result = None
+        self.last_dynamic_board_decision = None
+        self.last_dynamic_board_report_path = None
+        self._current_dynamic_board_run = {}
         request_stamp = rospy.Time.now()
         image = self.get_image_snapshot_newer_than(request_stamp)
         if image is None:
@@ -1665,7 +2132,22 @@ class ImageProcessor:
                 raw_blocks, raw_debug_image, geometry = self._detect_blocks_automatic(image)
                 preliminary_blocks, cube_counts = self._summarize_detected_blocks(raw_blocks)
                 layout, layout_message = self._load_layout_for_request(request, cube_counts)
-                self._validate_high_task_safety(preliminary_blocks, layout, "初步")
+                dynamic_execute_requested = (
+                    not request.advanced
+                    and getattr(
+                        self,
+                        "dynamic_board_selection_mode",
+                        "disabled",
+                    ) == "execute"
+                )
+                # execute 的目标由筛选后的 PID 决定；此时只预检 source。
+                # 若后续人工回退，会对固定 YAML 重做完整安全检查。
+                initial_safety_layout = [] if dynamic_execute_requested else layout
+                self._validate_high_task_safety(
+                    preliminary_blocks,
+                    initial_safety_layout,
+                    "初步",
+                )
 
                 final_blocks, final_debug_image = self._edit_and_rematch_blocks(
                     image,
@@ -1675,17 +2157,170 @@ class ImageProcessor:
                 )
                 self._save_high_block_debug_images(final_blocks, final_debug_image)
                 final_blocks, _final_counts = self._summarize_detected_blocks(final_blocks)
-                self._validate_high_task_safety(final_blocks, layout, "最终")
+                self._validate_high_task_safety(
+                    final_blocks,
+                    initial_safety_layout,
+                    "最终",
+                )
 
                 observed_blocks = self._build_observed_blocks_for_task(
                     final_blocks,
                     image.shape,
                 )
-                placement_targets = self._build_placement_targets(layout, image.shape[:2])
-                self.task_targets, planner_message = self._plan_formal_tasks(
-                    observed_blocks,
-                    placement_targets,
+                dynamic_mode = (
+                    getattr(self, "dynamic_board_selection_mode", "disabled")
+                    if not request.advanced
+                    else "disabled"
                 )
+                dynamic_state = None
+                dynamic_error = None
+                if dynamic_mode != "disabled":
+                    try:
+                        dynamic_state = self._run_dynamic_board_selection(
+                            observed_blocks,
+                            image.shape[:2],
+                        )
+                    except Exception as exc:
+                        dynamic_error = exc
+                        rospy.logwarn("V5 动态盘面选择失败: %s", exc)
+
+                if dynamic_mode == "execute" and dynamic_state is not None:
+                    decision = dynamic_state["decision"]
+                    self.task_targets = list(decision.tasks)
+                    layout_message = f"V5 动态盘面 {decision.board_id}"
+                    planner_message = (
+                        "动态 execute 确认路径，指纹="
+                        f"{decision.decision_fingerprint}"
+                    )
+                    self._save_dynamic_board_report(
+                        observed_blocks,
+                        image.shape[:2],
+                        outcome="execute成功，执行动态盘面",
+                        actual_planner_message=planner_message,
+                    )
+                elif dynamic_mode == "execute":
+                    attempts = getattr(dynamic_error, "attempts", ())
+                    failure_choice = prompt_dynamic_selection_failure(
+                        str(dynamic_error),
+                        getattr(
+                            self,
+                            "dynamic_board_failure_prompt_timeout_sec",
+                            60.0,
+                        ),
+                    )
+                    if failure_choice != "fixed_yaml":
+                        self._save_dynamic_board_report(
+                            observed_blocks,
+                            image.shape[:2],
+                            outcome="execute失败，停止本轮",
+                            error_message=str(dynamic_error),
+                            human_failure_choice="stop",
+                            comparison_attempts=attempts,
+                        )
+                        raise DynamicBoardSelectionError(
+                            "V5 动态盘面选择失败，本轮已停止："
+                            f"{dynamic_error}",
+                            attempts,
+                        )
+                    try:
+                        # 人工选择回退后重做固定盘面安全检查，不沿用旧结论。
+                        self._validate_high_task_safety(
+                            final_blocks,
+                            layout,
+                            "回退",
+                        )
+                        placement_targets = self._build_placement_targets(
+                            layout,
+                            image.shape[:2],
+                        )
+                        self.task_targets, fixed_message = self._plan_formal_tasks(
+                            observed_blocks,
+                            placement_targets,
+                        )
+                    except Exception as fallback_exc:
+                        self._save_dynamic_board_report(
+                            observed_blocks,
+                            image.shape[:2],
+                            outcome="execute失败，固定YAML回退也失败",
+                            error_message=(
+                                f"动态失败：{dynamic_error}；"
+                                f"固定YAML回退失败：{fallback_exc}"
+                            ),
+                            human_failure_choice="fixed_yaml",
+                            comparison_attempts=attempts,
+                        )
+                        raise
+                    planner_message = f"动态 execute 失败，人工回退；{fixed_message}"
+                    self._save_dynamic_board_report(
+                        observed_blocks,
+                        image.shape[:2],
+                        outcome="execute失败，执行固定YAML回退",
+                        error_message=str(dynamic_error),
+                        human_failure_choice="fixed_yaml",
+                        actual_planner_message=planner_message,
+                        comparison_attempts=attempts,
+                    )
+                else:
+                    # disabled、shadow 和进阶任务均使用原固定规划链路。
+                    try:
+                        placement_targets = self._build_placement_targets(
+                            layout,
+                            image.shape[:2],
+                        )
+                        self.task_targets, planner_message = self._plan_formal_tasks(
+                            observed_blocks,
+                            placement_targets,
+                        )
+                    except Exception as fixed_exc:
+                        if dynamic_mode == "shadow":
+                            dynamic_text = (
+                                "动态成功"
+                                if dynamic_state is not None
+                                else f"动态失败：{dynamic_error}"
+                            )
+                            self._save_dynamic_board_report(
+                                observed_blocks,
+                                image.shape[:2],
+                                outcome="shadow完成，但固定YAML规划失败",
+                                error_message=(
+                                    f"{dynamic_text}；固定YAML失败：{fixed_exc}"
+                                ),
+                                comparison_attempts=getattr(
+                                    dynamic_error,
+                                    "attempts",
+                                    (),
+                                ),
+                            )
+                        raise
+                    if dynamic_mode == "shadow":
+                        if dynamic_state is not None:
+                            decision = dynamic_state["decision"]
+                            planner_message = (
+                                f"{planner_message}；V5 shadow 选出 "
+                                f"{decision.board_id}（未执行）"
+                            )
+                            self._save_dynamic_board_report(
+                                observed_blocks,
+                                image.shape[:2],
+                                outcome="shadow成功，执行固定YAML",
+                                actual_planner_message=planner_message,
+                            )
+                        else:
+                            planner_message = (
+                                f"{planner_message}；V5 shadow 失败，已自动忽略"
+                            )
+                            self._save_dynamic_board_report(
+                                observed_blocks,
+                                image.shape[:2],
+                                outcome="shadow失败，执行固定YAML",
+                                error_message=str(dynamic_error),
+                                actual_planner_message=planner_message,
+                                comparison_attempts=getattr(
+                                    dynamic_error,
+                                    "attempts",
+                                    (),
+                                ),
+                            )
                 message = (
                     f"{layout_message}准备完成，共 {len(self.task_targets)} 个任务；"
                     f"{planner_message}"

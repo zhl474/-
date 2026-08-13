@@ -1,6 +1,7 @@
 import pytest
 
 from image_process_lib.task_geometry import (
+    build_stable_legal_target_sequence,
     build_support_graph,
     validate_dense_target_sequence,
 )
@@ -51,3 +52,16 @@ def test摆放顺序会拒绝未解锁和重复目标():
         validate_dense_target_sequence((2, 0, 1), graph)
     with pytest.raises(ValueError, match="重复"):
         validate_dense_target_sequence((0, 0, 1), graph)
+
+
+def test稳定合法顺序每轮选已解锁的最小目标ID():
+    layout = _or_support_layout()
+    layout[0]["index"] = 30
+    layout[1]["index"] = 10
+    layout[2]["index"] = 20
+
+    sequence = build_stable_legal_target_sequence(layout)
+
+    assert sequence == (1, 2, 0)
+    graph = build_support_graph(layout)
+    validate_dense_target_sequence(sequence, graph)

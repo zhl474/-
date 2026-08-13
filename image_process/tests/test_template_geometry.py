@@ -812,6 +812,44 @@ def test_runtime_initialization_never_creates_depth_client(monkeypatch, tmp_path
     assert subscriber_calls[0][0][0] == "/camera/image_rect"
     assert processor.stable_world_points_client is None
     assert processor.high_tcp_localizer is not None
+    assert processor.dynamic_board_selection_mode == "shadow"
+    assert processor.dynamic_board_library.board_count == 8460
+    assert processor.dynamic_board_library.placement_count == 2021
+
+
+def test_dynamic_execute_initialization_rejects_enabled_visual_servo(
+    monkeypatch,
+    tmp_path,
+):
+    module = _load_process_module_with_stubs(
+        monkeypatch,
+        "process_dynamic_execute_servo_guard",
+    )
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    execution_data = yaml.safe_load(
+        open(image_node_module.EXECUTION_CONFIG_PATH, "r", encoding="utf-8")
+    )
+    execution_data["servo"]["enabled"] = True
+    execution_path = tmp_path / "execution.yaml"
+    execution_path.write_text(
+        yaml.safe_dump(execution_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(image_node_module, "EXECUTION_CONFIG_PATH", str(execution_path))
+    original_get_param = image_node_module.rospy.get_param
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "get_param",
+        lambda name, default=None: (
+            "execute"
+            if name == "~dynamic_board_selection_mode"
+            else original_get_param(name, default)
+        ),
+    )
+    _stub_image_processor_runtime(monkeypatch, image_node_module)
+
+    with pytest.raises(ValueError, match="动态盘面 execute.*servo.enabled=false"):
+        module.ImageProcessor()
 
 
 def test_formal_launch_files_explicitly_use_rectified_image_topic():
@@ -2518,3 +2556,138 @@ def test_task_target_service_returns_calibration_target_type(monkeypatch):
     error_response = processor.get_task_target(types.SimpleNamespace(index=0))
     assert error_response.success is False
     assert error_response.target_type == ""
+
+
+def _make_dynamic_routing_processor(module, mode):
+    """构造只验证 shadow/execute/进阶分流的轻量正式节点。"""
+    processor = object.__new__(module.ImageProcessor)
+    processor.calibration_mode = False
+    processor.fresh_image_timeout_sec = 0.5
+    processor.dynamic_board_selection_mode = mode
+    processor.dynamic_board_failure_prompt_timeout_sec = 60.0
+    processor.task_targets = []
+    processor.board_grid_points = None
+    processor.board_grid_image_shape = None
+    processor.board_grid_image = None
+    processor.get_image_snapshot_newer_than = lambda _stamp: np.zeros(
+        (20, 30, 3), dtype=np.uint8
+    )
+    processor._detect_board_for_task = lambda _image: None
+    raw_blocks = [{"category": "T", "px": 1.0, "py": 2.0, "theta": 3.0}]
+    processor._detect_blocks_automatic = lambda _image: (
+        raw_blocks,
+        np.zeros((20, 30, 3), dtype=np.uint8),
+        {},
+    )
+    processor._load_layout_for_request = lambda *_args: ([{
+        "index": 0,
+        "row": 1.0,
+        "col": 1.0,
+        "category": "T",
+        "angle_deg": 0.0,
+    }], "固定测试布局")
+    processor._validate_high_task_safety = lambda *_args: None
+    processor._edit_and_rematch_blocks = lambda *_args: (
+        raw_blocks,
+        np.zeros((20, 30, 3), dtype=np.uint8),
+    )
+    processor._save_high_block_debug_images = lambda *_args: None
+    processor._build_observed_blocks_for_task = lambda *_args: [object()]
+    processor._build_placement_targets = lambda *_args: ["固定目标"]
+    processor._plan_formal_tasks = lambda *_args: (["固定任务"], "固定规划")
+    processor.dynamic_reports = []
+    processor._save_dynamic_board_report = lambda *_args, **kwargs: (
+        processor.dynamic_reports.append(kwargs)
+    )
+    decision = types.SimpleNamespace(
+        tasks=("动态任务",),
+        board_id="v5_g00001_l00",
+        decision_fingerprint="a" * 64,
+    )
+    processor._run_dynamic_board_selection = lambda *_args: {"decision": decision}
+    return processor
+
+
+def test_dynamic_shadow_keeps_fixed_yaml_tasks_and_records_dynamic_result(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_dynamic_shadow_route")
+    processor = _make_dynamic_routing_processor(module, "shadow")
+
+    response = processor._prepare_task_locked(types.SimpleNamespace(advanced=False))
+
+    assert response.success is True
+    assert processor.task_targets == ["固定任务"]
+    assert "V5 shadow 选出" in response.message
+    assert processor.dynamic_reports[0]["outcome"] == "shadow成功，执行固定YAML"
+
+
+def test_dynamic_execute_returns_confirmed_dynamic_tasks_without_building_fixed_targets(
+    monkeypatch,
+):
+    module = _load_process_module_with_stubs(monkeypatch, "process_dynamic_execute_route")
+    processor = _make_dynamic_routing_processor(module, "execute")
+    processor._build_placement_targets = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("execute 成功后不应构造固定目标")
+    )
+    processor._plan_formal_tasks = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("execute 成功后不应进入固定规划")
+    )
+
+    response = processor._prepare_task_locked(types.SimpleNamespace(advanced=False))
+
+    assert response.success is True
+    assert processor.task_targets == ["动态任务"]
+    assert "V5 动态盘面" in response.message
+    assert processor.dynamic_reports[0]["outcome"] == "execute成功，执行动态盘面"
+
+
+def test_advanced_task_bypasses_dynamic_selection_even_in_execute_mode(monkeypatch):
+    module = _load_process_module_with_stubs(monkeypatch, "process_dynamic_advanced_bypass")
+    processor = _make_dynamic_routing_processor(module, "execute")
+    processor._run_dynamic_board_selection = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("进阶任务不应调用动态盘面选择")
+    )
+
+    response = processor._prepare_task_locked(types.SimpleNamespace(advanced=True))
+
+    assert response.success is True
+    assert processor.task_targets == ["固定任务"]
+    assert processor.dynamic_reports == []
+
+
+@pytest.mark.parametrize(
+    ("failure_choice", "expected_success", "expected_tasks"),
+    [
+        ("fixed_yaml", True, ["固定任务"]),
+        ("stop", False, []),
+    ],
+)
+def test_dynamic_execute_failure_terminal_choice_routes_safely(
+    monkeypatch,
+    failure_choice,
+    expected_success,
+    expected_tasks,
+):
+    module = _load_process_module_with_stubs(
+        monkeypatch,
+        f"process_dynamic_failure_{failure_choice}",
+    )
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    processor = _make_dynamic_routing_processor(module, "execute")
+    processor._run_dynamic_board_selection = lambda *_args: (_ for _ in ()).throw(
+        image_node_module.DynamicBoardSelectionError("注入的动态失败")
+    )
+    monkeypatch.setattr(
+        image_node_module,
+        "prompt_dynamic_selection_failure",
+        lambda *_args, **_kwargs: failure_choice,
+    )
+
+    response = processor._prepare_task_locked(types.SimpleNamespace(advanced=False))
+
+    assert response.success is expected_success
+    assert processor.task_targets == expected_tasks
+    if failure_choice == "fixed_yaml":
+        assert processor.dynamic_reports[-1]["human_failure_choice"] == "fixed_yaml"
+    else:
+        assert "已停止" in response.message
+        assert processor.dynamic_reports[-1]["human_failure_choice"] == "stop"

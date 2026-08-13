@@ -357,6 +357,49 @@ def test_cpp_ties_choose_smaller_target_then_smaller_source_id():
     assert all(item.source_sequence == (0, 1, 2) for item in result.candidates)
 
 
+@pytest.mark.parametrize("returned_limit", [1, 20])
+def test_native_return_limit_keeps_search_width_and_same_best_candidates(
+    returned_limit,
+):
+    blocks = [
+        _block(100 + index, "T", index * 15.0, index * 7.0)
+        for index in range(5)
+    ]
+    targets = [
+        _target(
+            index,
+            "T",
+            index * 9.0,
+            index * 11.0,
+            _first_layer_cells(index + 1),
+        )
+        for index in range(5)
+    ]
+    tables = build_motion_cost_tables(
+        blocks,
+        targets,
+        0.0,
+        _config(beam_width=30),
+        线性批量时间模型(),
+    )
+
+    full_result = run_target_beam_search_native(tables, 30)
+    limited_result = run_target_beam_search_native(
+        tables,
+        30,
+        returned_candidate_limit=returned_limit,
+    )
+
+    assert limited_result.candidates == full_result.candidates[:returned_limit]
+    assert limited_result.statistics.final_candidate_count == (
+        full_result.statistics.final_candidate_count
+    )
+    assert limited_result.statistics.returned_candidate_count == returned_limit
+    assert full_result.statistics.returned_candidate_count == len(
+        full_result.candidates
+    )
+
+
 def test_native_wrapper_rejects_missing_library_and_invalid_inputs(tmp_path):
     valid = {
         "first_layer_mask": 1,
@@ -392,6 +435,11 @@ def test_native_wrapper_rejects_missing_library_and_invalid_inputs(tmp_path):
     with pytest.raises(ValueError, match=r"\[1, 50000\]"):
         run_native_task_sequence_search(**too_wide)
 
+    too_many_returned = dict(valid)
+    too_many_returned["returned_candidate_limit"] = 2
+    with pytest.raises(ValueError, match="不能大于 beam_width"):
+        run_native_task_sequence_search(**too_many_returned)
+
     with pytest.raises(ValueError, match=r"\[1, 63\]"):
         run_native_task_sequence_search(
             first_layer_mask=1,
@@ -419,15 +467,15 @@ def test_native_c_abi_rejects_wrong_version_and_small_output_capacity():
     output_sources = np.empty((1, 1), dtype=np.int32)
     output_prefix = np.empty(1, dtype=np.float64)
     output_assignment = np.empty(1, dtype=np.float64)
-    statistics = native_optimizer_module._NativeStatisticsV1()
+    statistics = native_optimizer_module._NativeStatisticsV2()
 
-    def 调用(abi_version, output_capacity):
+    def 调用(abi_version, output_capacity, beam_width=1):
         error = create_string_buffer(256)
-        return_code = library.task_sequence_optimizer_search_v1(
+        return_code = library.task_sequence_optimizer_search_v2(
             abi_version,
             1,
             1,
-            1,
+            beam_width,
             1,
             unlock_masks.ctypes.data_as(POINTER(c_uint64)),
             target_categories.ctypes.data_as(POINTER(c_int32)),
@@ -453,6 +501,14 @@ def test_native_c_abi_rejects_wrong_version_and_small_output_capacity():
     return_code, error = 调用(native_optimizer_module.NATIVE_ABI_VERSION, 0)
     assert return_code != 0
     assert "输出候选容量" in error
+    return_code, error = 调用(
+        native_optimizer_module.NATIVE_ABI_VERSION,
+        1,
+        beam_width=2,
+    )
+    assert return_code == 0, error
+    assert statistics.final_candidate_count == 1
+    assert statistics.returned_candidate_count == 1
 
 
 def test_replay_uses_absolute_servo_state_but_does_not_rerank_v1_selection():

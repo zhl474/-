@@ -27,12 +27,9 @@ V5_CATEGORY_ORDER = (
     "line",
 )
 PACKAGE_DIRECTORY = Path(__file__).resolve().parents[1]
-SOURCE_DIRECTORY = Path(__file__).resolve().parents[2]
 OFFICIAL_LIBRARY_PATH = (
-    SOURCE_DIRECTORY
-    / "tools"
-    / "找最优解"
-    / "layouts_260_v5_final"
+    PACKAGE_DIRECTORY
+    / "config"
     / "v5_board_library_v1.npz"
 )
 
@@ -148,6 +145,8 @@ def test_conversion_reorders_categories_derives_clockwise_angles_and_sorts(tmp_p
     assert summary.signature_count == 2
     assert summary.placement_count == 35
     assert library.category_names == BLOCK_CATEGORY_NAMES
+    assert library.source_path == output_path.resolve()
+    assert len(library.source_sha256) == 64
     assert library.board_global_id.tolist() == [11, 12]
     assert np.sum(library.board_target_pid >= 0, axis=(1, 2)).tolist() == [34, 34]
     for placement in placements:
@@ -187,6 +186,11 @@ def test_current_library_counts_and_task_layout_angle_equivalence():
     assert library.board_count == 8460
     assert len(np.unique(library.board_global_id)) == 7000
     assert library.placement_count == 2021
+    unique_centers = {
+        (float(row), float(col))
+        for row, col in zip(library.placement_row, library.placement_col)
+    }
+    assert len(unique_centers) == 365
 
     targets = load_task_layout(str(PACKAGE_DIRECTORY / "config" / "task_layout.yaml"))
     for target in targets:

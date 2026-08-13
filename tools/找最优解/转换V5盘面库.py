@@ -13,11 +13,11 @@ import time
 # 可直接修改的参数
 # =========================
 脚本目录 = Path(__file__).resolve().parent
-输入目录 = 脚本目录 / "layouts_260_v5_final"
-输出文件 = 输入目录 / "v5_board_library_v1.npz"
-
-
 项目根目录 = 脚本目录.parents[1]
+输入目录 = 脚本目录 / "layouts_260_v5_final"
+输出文件 = 项目根目录 / "image_process" / "config" / "v5_board_library_v1.npz"
+
+
 sys.path.insert(0, str(项目根目录 / "image_process"))
 
 from image_process_lib.v5_board_library import convert_v5_board_library  # noqa: E402

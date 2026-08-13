@@ -1,5 +1,5 @@
 schema_version: 2
-generation_id: 20260810T125431.561874Z
+generation_id: 20260810T125956.902729Z
 calibration_type: pixel_to_tcp_position
 calibration_subject: tray
 description: 高位像素到 TCP XY 模型与独立 TCP Z 平面标定结果

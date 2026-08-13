@@ -17,7 +17,7 @@ MIN_ANGLE_DEG = 0.0
 MAX_ANGLE_DEG = 360.0
 
 # 每次发送角度后等待的时间，需大于舵机完成转动所需的时间
-MOVE_WAIT_SECONDS = 3.0
+MOVE_WAIT_SECONDS = 2.0
 
 # 0 表示无限循环；大于 0 时表示往返的次数
 REPEAT_COUNT = 0

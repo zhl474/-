@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -67,6 +68,8 @@ class V5BoardLibrary:
     placement_yaw_clockwise_deg: np.ndarray
     placement_region_mask: np.ndarray
     placement_cells: np.ndarray
+    source_path: Path | None = None
+    source_sha256: str = ""
 
     @property
     def board_count(self) -> int:
@@ -489,6 +492,8 @@ def convert_v5_board_library(
             np.savez(temporary_file, **arrays)
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
+        # NamedTemporaryFile 默认是 0600，部署配置文件需要可被 ROS 运行用户读取。
+        os.chmod(temporary_path, 0o644)
         os.replace(temporary_path, output_path)
         temporary_path = None
     finally:
@@ -688,10 +693,30 @@ def _validate_loaded_arrays(arrays: Mapping[str, np.ndarray]) -> V5BoardLibrary:
 
 def load_v5_board_library(npz_path: Path | str) -> V5BoardLibrary:
     """一次性加载并完整校验 V5 盘面库，严禁 pickle。"""
-    npz_path = Path(npz_path)
+    npz_path = Path(npz_path).expanduser()
     try:
-        with np.load(npz_path, allow_pickle=False) as archive:
-            arrays = {name: np.array(archive[name], copy=True) for name in archive.files}
+        digest = hashlib.sha256()
+        with npz_path.open("rb") as input_file:
+            while True:
+                chunk = input_file.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            input_file.seek(0)
+            with np.load(input_file, allow_pickle=False) as archive:
+                arrays = {
+                    name: np.array(archive[name], copy=True)
+                    for name in archive.files
+                }
     except (OSError, ValueError, KeyError) as exc:
         raise ValueError(f"无法加载 V5 盘面库 {npz_path}: {exc}") from exc
-    return _validate_loaded_arrays(arrays)
+    validated = _validate_loaded_arrays(arrays)
+    return V5BoardLibrary(
+        **{
+            field_name: getattr(validated, field_name)
+            for field_name in validated.__dataclass_fields__
+            if field_name not in ("source_path", "source_sha256")
+        },
+        source_path=npz_path.resolve(),
+        source_sha256=digest.hexdigest(),
+    )

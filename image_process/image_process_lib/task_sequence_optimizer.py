@@ -49,6 +49,7 @@ class TaskSequenceOptimizerConfig:
     motor_upper_margin_deg: float
     beam_width: int = 1000
     report_top_candidates: int = 20
+    returned_candidate_limit: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,7 @@ class BeamSearchStatistics:
     generated_child_count: int
     peak_retained_node_count: int
     final_candidate_count: int
+    returned_candidate_count: int = 0
     backend: str = "python_reference"
     source_assignment_elapsed_seconds: float = 0.0
     native_call_elapsed_seconds: float = 0.0
@@ -327,6 +329,15 @@ def _validate_optimizer_config(config: TaskSequenceOptimizerConfig) -> Tuple[np.
         or int(config.report_top_candidates) <= 0
     ):
         raise ValueError("report_top_candidates 必须是正整数")
+    if config.returned_candidate_limit is not None:
+        if (
+            isinstance(config.returned_candidate_limit, bool)
+            or int(config.returned_candidate_limit) != config.returned_candidate_limit
+            or int(config.returned_candidate_limit) <= 0
+        ):
+            raise ValueError("returned_candidate_limit 必须是正整数或 None")
+        if int(config.returned_candidate_limit) > int(config.beam_width):
+            raise ValueError("returned_candidate_limit 不能大于 beam_width")
     return start_xyz, offset
 
 
@@ -713,6 +724,7 @@ def run_target_beam_search(
         generated_child_count=generated_child_count,
         peak_retained_node_count=peak_retained,
         final_candidate_count=len(final_nodes),
+        returned_candidate_count=len(final_nodes),
     )
     return final_nodes, statistics
 
@@ -720,6 +732,7 @@ def run_target_beam_search(
 def run_target_beam_search_native(
     tables: MotionCostTables,
     beam_width: int,
+    returned_candidate_limit: Optional[int] = None,
     library_path=None,
 ) -> NativeSearchResult:
     """把只读成本表传给 C++，完成 Beam 和所有最终实体回溯。"""
@@ -731,6 +744,7 @@ def run_target_beam_search_native(
         source_ids=[int(block.source_id) for block in tables.blocks],
         edge_cost_seconds=tables.edge_cost_seconds,
         beam_width=beam_width,
+        returned_candidate_limit=returned_candidate_limit,
         library_path=library_path,
     )
 
@@ -1028,6 +1042,7 @@ def optimize_task_sequence(
     native_result = run_target_beam_search_native(
         tables,
         int(config.beam_width),
+        returned_candidate_limit=config.returned_candidate_limit,
         library_path=native_library_path,
     )
     native_statistics = native_result.statistics
@@ -1037,6 +1052,7 @@ def optimize_task_sequence(
         generated_child_count=native_statistics.generated_child_count,
         peak_retained_node_count=native_statistics.peak_retained_node_count,
         final_candidate_count=native_statistics.final_candidate_count,
+        returned_candidate_count=native_statistics.returned_candidate_count,
         backend="cpp_native",
         source_assignment_elapsed_seconds=(
             native_statistics.source_assignment_seconds
@@ -1313,7 +1329,10 @@ def build_task_plan_report(result: TaskPlanResult) -> dict:
             "展开父节点数": result.statistics.expanded_parent_count,
             "生成子节点数": result.statistics.generated_child_count,
             "峰值保留节点数": result.statistics.peak_retained_node_count,
+            # 保留 V1 旧字段，方便已有离线脚本继续读取。
             "最终候选数": result.statistics.final_candidate_count,
+            "最终Beam保留数": result.statistics.final_candidate_count,
+            "实际返回数": result.statistics.returned_candidate_count,
         },
         "最终Beam候选": candidates,
     }

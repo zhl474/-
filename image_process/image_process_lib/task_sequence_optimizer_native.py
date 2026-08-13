@@ -24,7 +24,7 @@ from typing import Optional, Sequence, Tuple
 import numpy as np
 
 
-NATIVE_ABI_VERSION = 1
+NATIVE_ABI_VERSION = 2
 CATEGORY_COUNT = 7
 MAX_SOURCES_PER_CATEGORY = 5
 MAX_TARGET_COUNT = 63
@@ -34,12 +34,13 @@ LIBRARY_BASENAME = "libtask_sequence_optimizer_native.so"
 LIBRARY_ENVIRONMENT_VARIABLE = "TASK_SEQUENCE_OPTIMIZER_NATIVE_LIB"
 
 
-class _NativeStatisticsV1(Structure):
+class _NativeStatisticsV2(Structure):
     _fields_ = [
         ("expanded_parent_count", c_uint64),
         ("generated_child_count", c_uint64),
         ("peak_retained_node_count", c_uint64),
         ("final_candidate_count", c_uint64),
+        ("returned_candidate_count", c_uint64),
         ("beam_search_seconds", c_double),
         ("source_assignment_seconds", c_double),
     ]
@@ -59,6 +60,7 @@ class NativeSearchStatistics:
     generated_child_count: int
     peak_retained_node_count: int
     final_candidate_count: int
+    returned_candidate_count: int
     beam_search_seconds: float
     source_assignment_seconds: float
     native_call_seconds: float
@@ -128,7 +130,7 @@ def _load_native_library(resolved_path_text: str):
             "C++ 任务顺序优化器 ABI 版本不一致："
             f"Python={NATIVE_ABI_VERSION}，动态库={actual_version}"
         )
-    library.task_sequence_optimizer_search_v1.argtypes = [
+    library.task_sequence_optimizer_search_v2.argtypes = [
         c_uint32,
         c_int32,
         c_int32,
@@ -146,11 +148,11 @@ def _load_native_library(resolved_path_text: str):
         POINTER(c_int32),
         POINTER(c_double),
         POINTER(c_double),
-        POINTER(_NativeStatisticsV1),
+        POINTER(_NativeStatisticsV2),
         POINTER(c_char),
         c_size_t,
     ]
-    library.task_sequence_optimizer_search_v1.restype = c_int32
+    library.task_sequence_optimizer_search_v2.restype = c_int32
     return library
 
 
@@ -204,14 +206,24 @@ def run_native_task_sequence_search(
     source_ids: Sequence[int],
     edge_cost_seconds,
     beam_width: int,
+    returned_candidate_limit: Optional[int] = None,
     library_path: Optional[os.PathLike] = None,
 ) -> NativeSearchResult:
-    """调用 C++ 完成 Beam 和所有最终候选的 source assignment。"""
+    """调用 C++ 完成 Beam，并只回溯需要返回的前 N 条候选。"""
     target_count = len(target_categories)
     source_count = len(source_ids)
     beam_width = _validate_positive_integer(beam_width, "beam_width")
     if beam_width > MAX_BEAM_WIDTH:
         raise ValueError("beam_width 必须位于 [1, 50000]")
+    if returned_candidate_limit is None:
+        output_capacity = beam_width
+    else:
+        output_capacity = _validate_positive_integer(
+            returned_candidate_limit,
+            "returned_candidate_limit",
+        )
+        if output_capacity > beam_width:
+            raise ValueError("returned_candidate_limit 不能大于 beam_width")
     if not 1 <= target_count <= MAX_TARGET_COUNT:
         raise ValueError("target 数量必须位于 [1, 63]")
     if source_count < target_count:
@@ -332,16 +344,16 @@ def run_native_task_sequence_search(
 
     resolved_path = resolve_native_library_path(library_path)
     library = _load_native_library(str(resolved_path))
-    output_targets = np.empty((beam_width, target_count), dtype=np.int32)
-    output_sources = np.empty((beam_width, target_count), dtype=np.int32)
-    output_prefix_scores = np.empty(beam_width, dtype=np.float64)
-    output_assignment_scores = np.empty(beam_width, dtype=np.float64)
+    output_targets = np.empty((output_capacity, target_count), dtype=np.int32)
+    output_sources = np.empty((output_capacity, target_count), dtype=np.int32)
+    output_prefix_scores = np.empty(output_capacity, dtype=np.float64)
+    output_assignment_scores = np.empty(output_capacity, dtype=np.float64)
     output_count = c_int32(0)
-    native_statistics = _NativeStatisticsV1()
+    native_statistics = _NativeStatisticsV2()
     error_buffer = create_string_buffer(2048)
 
     native_call_started_at = time.perf_counter()
-    return_code = library.task_sequence_optimizer_search_v1(
+    return_code = library.task_sequence_optimizer_search_v2(
         NATIVE_ABI_VERSION,
         target_count,
         source_count,
@@ -353,7 +365,7 @@ def run_native_task_sequence_search(
         category_sources.ctypes.data_as(POINTER(c_int32)),
         source_id_array.ctypes.data_as(POINTER(c_int32)),
         edge_cost_array.ctypes.data_as(POINTER(c_double)),
-        beam_width,
+        output_capacity,
         output_count,
         output_targets.ctypes.data_as(POINTER(c_int32)),
         output_sources.ctypes.data_as(POINTER(c_int32)),
@@ -370,12 +382,14 @@ def run_native_task_sequence_search(
             f"C++ 任务顺序优化失败（错误码 {return_code}）：{message}"
         )
     candidate_count = int(output_count.value)
-    if not 1 <= candidate_count <= beam_width:
+    if not 1 <= candidate_count <= output_capacity:
         raise RuntimeError(
             f"C++ 任务顺序优化返回候选数无效：{candidate_count}"
         )
-    if int(native_statistics.final_candidate_count) != candidate_count:
-        raise RuntimeError("C++ 搜索统计中的候选数与实际输出不一致")
+    if int(native_statistics.returned_candidate_count) != candidate_count:
+        raise RuntimeError("C++ 搜索统计中的返回数与实际输出不一致")
+    if int(native_statistics.final_candidate_count) < candidate_count:
+        raise RuntimeError("C++ 搜索保留数小于实际返回数")
 
     conversion_started_at = time.perf_counter()
     candidates = tuple(
@@ -393,6 +407,7 @@ def run_native_task_sequence_search(
         generated_child_count=int(native_statistics.generated_child_count),
         peak_retained_node_count=int(native_statistics.peak_retained_node_count),
         final_candidate_count=int(native_statistics.final_candidate_count),
+        returned_candidate_count=int(native_statistics.returned_candidate_count),
         beam_search_seconds=float(native_statistics.beam_search_seconds),
         source_assignment_seconds=float(native_statistics.source_assignment_seconds),
         native_call_seconds=native_call_seconds,

@@ -202,3 +202,35 @@ def validate_dense_target_sequence(
         if not support_graph.is_available(int(dense_index), placed):
             raise ValueError(f"第 {step} 步目标 {dense_index} 尚未获得支撑")
         placed |= bit
+
+
+def build_stable_legal_target_sequence(targets: Sequence) -> Tuple[int, ...]:
+    """生成稳定的合法稠密下标序列。
+
+    每一步在已解锁且未摆放的目标中选最小 target ID，使没有
+    ``order_hint`` 的 V5 盘面也能为固定顺序对照项提供可重现输入。
+    """
+    graph = build_support_graph(targets)
+    placed = 0
+    sequence = []
+    while len(sequence) < len(graph.target_ids):
+        available = [
+            dense_index
+            for dense_index, target_id in enumerate(graph.target_ids)
+            if not placed & (1 << dense_index)
+            and graph.is_available(dense_index, placed)
+        ]
+        if not available:
+            raise RuntimeError("构造稳定合法顺序时没有已解锁目标")
+        selected = min(
+            available,
+            key=lambda dense_index: (
+                graph.target_ids[dense_index],
+                dense_index,
+            ),
+        )
+        sequence.append(selected)
+        placed |= 1 << selected
+    result = tuple(sequence)
+    validate_dense_target_sequence(result, graph)
+    return result

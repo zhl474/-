@@ -229,7 +229,7 @@ void retain_candidate(
 
 std::vector<BeamNode> run_beam_search(
     const SearchInput& input,
-    TaskSequenceNativeStatisticsV1* statistics
+    TaskSequenceNativeStatisticsV2* statistics
 ) {
     BeamNode root;
     root.available_mask = input.first_layer_mask;
@@ -504,7 +504,7 @@ void validate_input(
     const int32_t* output_source_sequences,
     const double* output_prefix_scores,
     const double* output_assignment_scores,
-    const TaskSequenceNativeStatisticsV1* output_statistics
+    const TaskSequenceNativeStatisticsV2* output_statistics
 ) {
     if (input.target_count <= 0 || input.target_count > kMaxTargetCount) {
         throw std::invalid_argument("target_count 必须位于 [1, 63]");
@@ -515,8 +515,9 @@ void validate_input(
     if (input.beam_width <= 0 || input.beam_width > kMaxBeamWidth) {
         throw std::invalid_argument("beam_width 必须位于 [1, 50000]");
     }
-    if (output_candidate_capacity < input.beam_width) {
-        throw std::invalid_argument("输出候选容量必须大于等于 beam_width");
+    if (output_candidate_capacity <= 0
+        || output_candidate_capacity > input.beam_width) {
+        throw std::invalid_argument("输出候选容量必须位于 [1, beam_width]");
     }
     if (input.unlock_masks == nullptr
         || input.target_categories == nullptr
@@ -593,7 +594,7 @@ extern "C" TASK_SEQUENCE_API uint32_t task_sequence_optimizer_abi_version(void) 
 }
 
 
-extern "C" TASK_SEQUENCE_API int task_sequence_optimizer_search_v1(
+extern "C" TASK_SEQUENCE_API int task_sequence_optimizer_search_v2(
     uint32_t abi_version,
     int32_t target_count,
     int32_t source_count,
@@ -611,7 +612,7 @@ extern "C" TASK_SEQUENCE_API int task_sequence_optimizer_search_v1(
     int32_t* output_source_sequences,
     double* output_prefix_scores,
     double* output_assignment_scores,
-    TaskSequenceNativeStatisticsV1* output_statistics,
+    TaskSequenceNativeStatisticsV2* output_statistics,
     char* error_buffer,
     size_t error_buffer_size
 ) {
@@ -642,7 +643,7 @@ extern "C" TASK_SEQUENCE_API int task_sequence_optimizer_search_v1(
             output_statistics
         );
         *output_candidate_count = 0;
-        *output_statistics = TaskSequenceNativeStatisticsV1{};
+        *output_statistics = TaskSequenceNativeStatisticsV2{};
         if (error_buffer != nullptr && error_buffer_size > 0) {
             error_buffer[0] = '\0';
         }
@@ -659,9 +660,17 @@ extern "C" TASK_SEQUENCE_API int task_sequence_optimizer_search_v1(
 
         const auto assignment_started_at = std::chrono::steady_clock::now();
         std::vector<FinalCandidate> final_candidates;
-        final_candidates.reserve(final_nodes.size());
-        for (const BeamNode& node : final_nodes) {
-            final_candidates.push_back(reconstruct_assignment(input, node));
+        const int returned_candidate_count = std::min<int>(
+            output_candidate_capacity,
+            final_nodes.size()
+        );
+        final_candidates.reserve(returned_candidate_count);
+        // final_nodes 已按成本和目标序列稳定排序，只回溯前 N 条。
+        for (int index = 0; index < returned_candidate_count; ++index) {
+            final_candidates.push_back(reconstruct_assignment(
+                input,
+                final_nodes[index]
+            ));
         }
         std::sort(
             final_candidates.begin(),
@@ -676,6 +685,7 @@ extern "C" TASK_SEQUENCE_API int task_sequence_optimizer_search_v1(
                 assignment_finished_at - assignment_started_at
             ).count()
         );
+        output_statistics->returned_candidate_count = final_candidates.size();
 
         const int candidate_count = static_cast<int>(final_candidates.size());
         for (int candidate_index = 0;
