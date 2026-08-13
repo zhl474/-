@@ -1,0 +1,26 @@
+{
+  "version": 5,
+  "global_id": 11236,
+  "rank": 6943,
+  "target_left_counts": [
+    2,
+    4,
+    1,
+    1,
+    1,
+    3,
+    5
+  ],
+  "target_left_by_category": {
+    "L_yellow": 2,
+    "L_blue": 4,
+    "z_green": 1,
+    "z_blue": 1,
+    "T": 1,
+    "square": 3,
+    "line": 5
+  },
+  "weight": 62500,
+  "probability": 1.3773899326878355e-05,
+  "layouts": []
+}

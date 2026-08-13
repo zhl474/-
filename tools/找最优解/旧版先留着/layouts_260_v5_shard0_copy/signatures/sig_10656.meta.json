@@ -1,0 +1,37 @@
+{
+  "version": 5,
+  "global_id": 10656,
+  "rank": 3192,
+  "target_left_counts": [
+    2,
+    3,
+    2,
+    3,
+    5,
+    1,
+    1
+  ],
+  "target_left_by_category": {
+    "L_yellow": 2,
+    "L_blue": 3,
+    "z_green": 2,
+    "z_blue": 3,
+    "T": 5,
+    "square": 1,
+    "line": 1
+  },
+  "weight": 250000,
+  "probability": 5.509559730751342e-05,
+  "status": "QUOTA_REACHED",
+  "complete": true,
+  "layouts": 1,
+  "requested_layouts": 1,
+  "covered": true,
+  "elapsed_s": 47.112804556000356,
+  "solve_calls": 1,
+  "illegal_geometries_rejected": 0,
+  "task_time": 120.0,
+  "cp_workers": 1,
+  "seed": 10783319,
+  "skipped": false
+}

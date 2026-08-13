@@ -1,0 +1,20 @@
+{
+  "version": 5,
+  "program_version": "5.1",
+  "progress_mode": "in_memory_incremental",
+  "shard_count": 1,
+  "shard_index": 0,
+  "selected_total": 7000,
+  "done_total": 7000,
+  "remaining": 0,
+  "progress_pct": 100.0,
+  "covered_signatures": 7000,
+  "layouts_total": 8460,
+  "elapsed_run_s": 0.0,
+  "new_done_this_run": 0,
+  "throughput_tasks_per_s": 0.0,
+  "eta_s": null,
+  "selected_probability_mass_global": 0.9513494526081611,
+  "covered_probability_mass_global": 0.9513494526081611,
+  "running": []
+}

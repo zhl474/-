@@ -1,0 +1,13 @@
+V5.1：V5求解逻辑 + 内存增量进度统计；运行中不再全目录扫描。
+候选 placement 数量：2021
+理论左右 signature：24017（sum(left)=17）
+top-N 在 shard 前理论概率覆盖：95.135%
+当前 shard：3505 signatures, shard=0/2
+每 signature 目标布局数 K=1; 外层 jobs=14; CP workers=1
+单 signature 本次时间：60s; heartbeat=30s
+[SCAN] 启动时扫描已有结果……
+启动前：done=1411/3505, covered=2330, layouts=2874, pending=2094
+[GLOBAL] [###########-----------------] done=1411/3505 (40.26%) covered=2330 layouts=2874 running=0/14 remaining=2094 elapsed=00:00:00 rate=0.00 sig/min ETA=?
+[COVERAGE] selected_mass(global)=47.579% covered_mass(global contribution)=37.254%
+--status-only：不启动求解；当前导出 layouts=2874
+library: /home/zhl/SingleArmTetris/SingleArmTetris/src/tools/找最优解/layouts_260_v5_shard0/library_shard00of02.jsonl
