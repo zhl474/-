@@ -28,6 +28,8 @@ class HighTcpSafetyAssessment:
     pixel_xy: tuple[float, float]
     predicted_tcp_xyz: tuple[float, float, float]
     safety_tcp_xyz: tuple[float, float, float]
+    safety_min_xyz: tuple[float, float, float]
+    safety_max_xyz: tuple[float, float, float]
     violated_axes: tuple[str, ...]
 
     @property
@@ -201,6 +203,8 @@ class HighPixelToTcpLocalizer:
             pixel_xy=(float(pixel_xy[0]), float(pixel_xy[1])),
             predicted_tcp_xyz=tuple(float(value) for value in tcp_xyz),
             safety_tcp_xyz=tuple(float(value) for value in safety_tcp_xyz),
+            safety_min_xyz=tuple(float(value) for value in self._tcp_min_xyz),
+            safety_max_xyz=tuple(float(value) for value in self._tcp_max_xyz),
             violated_axes=violated_axes,
         )
 

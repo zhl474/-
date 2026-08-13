@@ -164,6 +164,7 @@ class ProcessSupervisor:
         command = [
             "roslaunch", "competition", "perception.launch",
             f"calibration_mode:={calibration}",
+            "interaction_mode:=web",
             f"debug_output_dir:={self.debug_output_dir}",
             f"servo_csv_output_dir:={self.servo_csv_output_dir}",
         ]

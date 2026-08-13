@@ -2,6 +2,10 @@
 
 import io
 import json
+import threading
+import time
+
+import pytest
 
 from image_process_lib.dynamic_board_report import (
     deserialize_board_grid,
@@ -9,6 +13,9 @@ from image_process_lib.dynamic_board_report import (
     serialize_observed_block,
 )
 from image_process_lib.dynamic_board_runtime import (
+    OperatorPromptBroker,
+    OperatorPromptChoiceError,
+    OperatorPromptConflict,
     atomic_write_json,
     prompt_dynamic_selection_failure,
     sha256_file,
@@ -22,6 +29,89 @@ class _FakeTty(io.StringIO):
 
     def fileno(self):
         return 123
+
+
+def _wait_for_prompt(broker):
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        prompt = broker.snapshot()
+        if prompt["pending"]:
+            return prompt
+        time.sleep(0.001)
+    raise AssertionError("人工选择提示未在预期时间内出现")
+
+
+@pytest.mark.parametrize(
+    "choice",
+    ["stop", "fixed_yaml", "continue_dynamic"],
+)
+def test_web_prompt_broker_accepts_exactly_one_allowed_choice(choice):
+    broker = OperatorPromptBroker(id_factory=lambda: "prompt-1")
+    result = []
+    thread = threading.Thread(
+        target=lambda: result.append(
+            broker.request_dynamic_failure(
+                "速度不一致",
+                60.0,
+                allow_continue=True,
+            )
+        )
+    )
+    thread.start()
+    prompt = _wait_for_prompt(broker)
+
+    assert prompt["prompt_id"] == "prompt-1"
+    assert prompt["allow_continue_dynamic"] is True
+    assert broker.respond("prompt-1", choice) == choice
+    thread.join(timeout=1.0)
+
+    assert result == [choice]
+    assert broker.snapshot()["pending"] is False
+    with pytest.raises(OperatorPromptConflict):
+        broker.respond("prompt-1", choice)
+
+
+def test_web_prompt_broker_rejects_invalid_and_stale_answers():
+    broker = OperatorPromptBroker(id_factory=lambda: "prompt-2")
+    result = []
+    thread = threading.Thread(
+        target=lambda: result.append(
+            broker.request_dynamic_failure("普通失败", 60.0)
+        )
+    )
+    thread.start()
+    _wait_for_prompt(broker)
+
+    with pytest.raises(OperatorPromptChoiceError):
+        broker.respond("prompt-2", "continue_dynamic")
+    with pytest.raises(OperatorPromptConflict):
+        broker.respond("old-prompt", "stop")
+    broker.cancel()
+    thread.join(timeout=1.0)
+
+    assert result == ["stop"]
+
+
+def test_web_prompt_broker_timeout_and_close_both_stop_safely():
+    ticks = iter((0.0, 61.0))
+    timed_out = OperatorPromptBroker(
+        monotonic=lambda: next(ticks),
+        id_factory=lambda: "timeout",
+    )
+    assert timed_out.request_dynamic_failure("超时", 60.0) == "stop"
+
+    broker = OperatorPromptBroker(id_factory=lambda: "closing")
+    result = []
+    thread = threading.Thread(
+        target=lambda: result.append(
+            broker.request_dynamic_failure("节点退出", 60.0)
+        )
+    )
+    thread.start()
+    _wait_for_prompt(broker)
+    broker.close()
+    thread.join(timeout=1.0)
+    assert result == ["stop"]
 
 
 def test_non_tty_eof_and_timeout_all_stop_safely():

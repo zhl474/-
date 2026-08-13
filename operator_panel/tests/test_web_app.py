@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from operator_panel_lib.config_manager import ConfigError
+from operator_panel_lib.coordinator import OperationRejected
 from operator_panel_lib.event_bus import EventBus
 from operator_panel_lib.web_app import create_app
 
@@ -58,6 +59,8 @@ class FakeCoordinator:
     def stop_runtime(self): return self._accepted("stop_runtime")
     def prepare_task(self, **kwargs): return self._accepted("prepare_task", **kwargs)
     def confirm_task(self): return {"confirmed": True}
+    def respond_interaction(self, *args, **kwargs): return self._accepted("interaction", *args, **kwargs)
+    def discard_task(self): return {"discarded": True}
     def execute_task(self): return self._accepted("execute_task")
     def emergency_stop(self): return self._accepted("emergency_stop")
     def clear_stop(self): return self._accepted("clear_stop")
@@ -105,6 +108,18 @@ def test首页和状态接口只接受本机Host(web):
     assert client.get("/api/state", base_url="http://evil.example").status_code == 403
 
 
+def test首页使用简洁的五个页面标题(web):
+    client, _coordinator, _bus, _tmp = web
+    html = client.get("/", **url("/")).get_data(as_text=True)
+
+    for title in ("运行控制台", "手动控制", "参数中心", "只读配置与标定", "运行日志"):
+        assert f'<h1 class="page-title">{title}</h1>' in html
+    assert 'id="image-zoom-dialog"' in html
+    assert 'id="task-interaction-dialog"' in html
+    assert "从识别到抓放，一条清晰的操作链" not in html
+    assert "把常用工具动作放在伸手可及的位置" not in html
+
+
 def test所有写接口要求本机Origin和页面令牌(web):
     client, _coordinator, _bus, _tmp = web
     assert client.post("/api/process/hardware/start", json={}, **url("x")).status_code == 403
@@ -120,6 +135,57 @@ def test所有写接口要求本机Origin和页面令牌(web):
     assert response.get_json()["operation_id"] == "start_hardware"
 
 
+def test人工选择接口完整转发提示编号和二次确认(web):
+    client, coordinator, _bus, _tmp = web
+    response = client.post(
+        "/api/task/interaction/respond",
+        json={
+            "prompt_id": "prompt-1",
+            "choice": "continue_dynamic",
+            "confirm_speed_mismatch": True,
+        },
+        headers=write_headers(),
+        **url("x"),
+    )
+
+    assert response.status_code == 200
+    name, args, kwargs = coordinator.calls[-1]
+    assert name == "interaction"
+    assert args == ("prompt-1", "continue_dynamic")
+    assert kwargs == {"confirm_speed_mismatch": True}
+
+
+def test人工选择非法选项返回400且过期提示返回409(web):
+    client, coordinator, _bus, _tmp = web
+
+    def reject_invalid(*_args, **_kwargs):
+        raise ValueError("当前提示不允许此选项")
+
+    coordinator.respond_interaction = reject_invalid
+    invalid = client.post(
+        "/api/task/interaction/respond",
+        json={"prompt_id": "prompt-1", "choice": "任意输入"},
+        headers=write_headers(),
+        **url("x"),
+    )
+
+    def reject_stale(*_args, **_kwargs):
+        raise OperationRejected("人工选择提示已过期")
+
+    coordinator.respond_interaction = reject_stale
+    stale = client.post(
+        "/api/task/interaction/respond",
+        json={"prompt_id": "old-prompt", "choice": "stop"},
+        headers=write_headers(),
+        **url("x"),
+    )
+
+    assert invalid.status_code == 400
+    assert invalid.get_json()["code"] == "invalid_request"
+    assert stale.status_code == 409
+    assert stale.get_json()["code"] == "operation_rejected"
+
+
 @pytest.mark.parametrize(
     "path,payload",
     [
@@ -128,6 +194,8 @@ def test所有写接口要求本机Origin和页面令牌(web):
         ("/api/process/runtime/stop", {}),
         ("/api/task/prepare", {"advanced": False}),
         ("/api/task/confirm", {}),
+        ("/api/task/interaction/respond", {"prompt_id": "p", "choice": "stop"}),
+        ("/api/task/discard", {}),
         ("/api/task/start", {}),
         ("/api/task/abort", {}),
         ("/api/control/stop", {}),

@@ -1,5 +1,6 @@
 <launch>
   <arg name="debug_output_dir" default="/home/zhl/桌面"/>
+  <arg name="interaction_mode" default="terminal"/>
   <arg name="servo_csv_output_dir" default="/home/zhl/桌面/标定数据"/>
   <arg name="experiment_archive_root" default="$(arg servo_csv_output_dir)/实验日志"/>
   <arg name="experiment_session_id" default="$(anon visual_servo_experiment)"/>
@@ -11,6 +12,7 @@
   <!-- 复用网页控制台使用的纯感知 launch，保留原终端标定入口。 -->
   <include file="$(find competition)/launch/perception.launch">
     <arg name="calibration_mode" value="true"/>
+    <arg name="interaction_mode" value="$(arg interaction_mode)"/>
     <arg name="debug_output_dir" value="$(arg debug_output_dir)"/>
     <arg name="servo_csv_output_dir" value="$(arg servo_csv_output_dir)"/>
     <arg name="experiment_archive_root" value="$(arg experiment_archive_root)"/>

@@ -893,7 +893,9 @@ def test_high_safety_prepare_failure_prints_summary_without_coarse_prefix(
     module = _load_task_runner(monkeypatch)
     message = (
         "高位初步安全检查失败：\n"
-        "- 方块 2（T）：预测实际 TCP [-525.100, 80.300, 190.200]，X 越界\n"
+        "- 方块 2（T）：像素坐标 [10.000, 20.000] px，预测实际 TCP "
+        "[-525.100, 80.300, 190.200] mm，X=-525.100 mm 越界"
+        "（当前限位 [-520.224, -148.170] mm）\n"
         "本轮未打开 Mask 编辑器"
     )
 

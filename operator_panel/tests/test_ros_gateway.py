@@ -1,3 +1,4 @@
+import sys
 import types
 
 import numpy as np
@@ -45,3 +46,67 @@ def test日志级别按ROS等级转换():
     assert event["level"] == "error"
     assert event["source"] == "/control_node"
     assert event["message"] == "运动异常"
+
+
+def test人工选择ROS服务读取与回答(monkeypatch):
+    service_module = types.ModuleType("image_process.srv")
+
+    class GetRequest:
+        pass
+
+    class RespondRequest:
+        def __init__(self, prompt_id="", choice=""):
+            self.prompt_id = prompt_id
+            self.choice = choice
+
+    service_module.GetOperatorPrompt = type("GetOperatorPrompt", (), {})
+    service_module.GetOperatorPromptRequest = GetRequest
+    service_module.RespondOperatorPrompt = type("RespondOperatorPrompt", (), {})
+    service_module.RespondOperatorPromptRequest = RespondRequest
+    package_module = types.ModuleType("image_process")
+    package_module.srv = service_module
+    monkeypatch.setitem(sys.modules, "image_process", package_module)
+    monkeypatch.setitem(sys.modules, "image_process.srv", service_module)
+
+    calls = []
+    prompt_response = types.SimpleNamespace(
+        pending=True,
+        prompt_id="prompt-1",
+        prompt_type="dynamic_board_failure",
+        message="速度不一致",
+        allow_fixed_yaml=True,
+        allow_continue_dynamic=True,
+        remaining_seconds=59.2,
+    )
+    answer_response = types.SimpleNamespace(
+        success=True,
+        code="accepted",
+        message="已接受",
+    )
+
+    class FakeRospy:
+        @staticmethod
+        def wait_for_service(name, timeout):
+            calls.append(("wait", name, timeout))
+
+        @staticmethod
+        def ServiceProxy(name, _service, persistent=False):
+            def invoke(request):
+                calls.append(("call", name, request))
+                return prompt_response if name.endswith("get_operator_prompt") else answer_response
+            return invoke
+
+    gateway = RosGateway(EventBus())
+    gateway._rospy = FakeRospy()
+
+    prompt = gateway.get_operator_prompt()
+    gateway._operator_prompt = dict(prompt)
+    answer = gateway.respond_operator_prompt("prompt-1", "fixed_yaml")
+
+    assert prompt["pending"] is True
+    assert prompt["remaining_seconds"] == 59.2
+    assert answer["success"] is True
+    assert gateway.operator_prompt_snapshot()["pending"] is False
+    request = [item[2] for item in calls if item[0] == "call"][-1]
+    assert request.prompt_id == "prompt-1"
+    assert request.choice == "fixed_yaml"

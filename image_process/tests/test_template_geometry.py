@@ -715,8 +715,12 @@ def _load_process_module_with_stubs(monkeypatch, module_name):
         "DetectBoardOffsetResponse",
         "GetTaskTarget",
         "GetTaskTargetResponse",
+        "GetOperatorPrompt",
+        "GetOperatorPromptResponse",
         "PrepareTask",
         "PrepareTaskResponse",
+        "RespondOperatorPrompt",
+        "RespondOperatorPromptResponse",
     ):
         setattr(image_process.srv, name, type(name, (ServiceStub,), {}))
 
@@ -1438,8 +1442,11 @@ def test_competition_module_imports_with_service_stubs(monkeypatch):
     control = _install_module_stub(monkeypatch, "control")
     control.srv = _install_module_stub(monkeypatch, "control.srv")
     for name in (
+        "ClearArmStop", "ClearArmStopRequest",
         "GetActualPose", "GetActualPoseRequest",
+        "GetControlStatus", "GetControlStatusRequest",
         "MoveArm", "MoveArmRequest", "RotateTool", "RotateToolRequest", "SetSuction", "SetSuctionRequest",
+        "StopArm", "StopArmRequest",
     ):
         setattr(control.srv, name, type(name, (), {}))
 
@@ -1821,16 +1828,22 @@ def test_high_safety_check_collects_all_block_and_tray_violations(monkeypatch):
         ("block", (10.0, 20.0)): types.SimpleNamespace(
             safe=False,
             safety_tcp_xyz=(-525.1, 80.3, 190.2),
+            safety_min_xyz=(-520.224, -263.279, 165.0),
+            safety_max_xyz=(-148.17, 315.925, float("inf")),
             violated_axes=("X",),
         ),
         ("block", (30.0, 40.0)): types.SimpleNamespace(
             safe=False,
             safety_tcp_xyz=(-180.2, 321.8, 189.7),
+            safety_min_xyz=(-520.224, -263.279, 165.0),
+            safety_max_xyz=(-148.17, 315.925, float("inf")),
             violated_axes=("Y",),
         ),
         ("tray", (50.0, 60.0)): types.SimpleNamespace(
             safe=False,
             safety_tcp_xyz=(-530.0, 320.0, 200.0),
+            safety_min_xyz=(-520.224, -263.279, 165.0),
+            safety_max_xyz=(-148.17, 315.925, float("inf")),
             violated_axes=("X", "Y"),
         ),
     }
@@ -1841,9 +1854,16 @@ def test_high_safety_check_collects_all_block_and_tray_violations(monkeypatch):
     violations = processor._collect_high_tcp_safety_violations(blocks, layout)
 
     assert violations == [
-        "方块 1（T）：预测实际 TCP [-525.100, 80.300, 190.200]，X 越界",
-        "方块 2（square）：预测实际 TCP [-180.200, 321.800, 189.700]，Y 越界",
-        "托盘目标 6：预测实际 TCP [-530.000, 320.000, 200.000]，X、Y 越界",
+        "方块 1（T）：像素坐标 [10.000, 20.000] px，预测实际 TCP "
+        "[-525.100, 80.300, 190.200] mm，X=-525.100 mm 越界"
+        "（当前限位 [-520.224, -148.170] mm）",
+        "方块 2（square）：像素坐标 [30.000, 40.000] px，预测实际 TCP "
+        "[-180.200, 321.800, 189.700] mm，Y=321.800 mm 越界"
+        "（当前限位 [-263.279, 315.925] mm）",
+        "托盘目标 6：像素坐标 [50.000, 60.000] px，预测实际 TCP "
+        "[-530.000, 320.000, 200.000] mm，X=-530.000 mm 越界"
+        "（当前限位 [-520.224, -148.170] mm）、Y=320.000 mm 越界"
+        "（当前限位 [-263.279, 315.925] mm）",
     ]
 
 
@@ -1862,6 +1882,8 @@ def test_high_safety_check_continues_after_single_prediction_failure(monkeypatch
         return types.SimpleNamespace(
             safe=False,
             safety_tcp_xyz=(-300.0, 320.0, 200.0),
+            safety_min_xyz=(-520.224, -263.279, 165.0),
+            safety_max_xyz=(-148.17, 315.925, float("inf")),
             violated_axes=("Y",),
         )
 
@@ -1870,8 +1892,10 @@ def test_high_safety_check_continues_after_single_prediction_failure(monkeypatch
     violations = processor._collect_high_tcp_safety_violations(blocks, [])
 
     assert violations == [
-        "方块 1（T）：TCP 预测失败：模型输入无效",
-        "方块 2（square）：预测实际 TCP [-300.000, 320.000, 200.000]，Y 越界",
+        "方块 1（T）：像素坐标 [10.000, 20.000] px，TCP 预测失败：模型输入无效",
+        "方块 2（square）：像素坐标 [30.000, 40.000] px，预测实际 TCP "
+        "[-300.000, 320.000, 200.000] mm，Y=320.000 mm 越界"
+        "（当前限位 [-263.279, 315.925] mm）",
     ]
 
 
@@ -1898,6 +1922,8 @@ def test_formal_precheck_failure_does_not_open_mask_editor(monkeypatch):
             return types.SimpleNamespace(
                 safe=False,
                 safety_tcp_xyz=(-525.1, 80.3, 190.2),
+                safety_min_xyz=(-520.224, -263.279, 165.0),
+                safety_max_xyz=(-148.17, 315.925, float("inf")),
                 violated_axes=("X",),
             )
         return types.SimpleNamespace(
@@ -1917,7 +1943,9 @@ def test_formal_precheck_failure_does_not_open_mask_editor(monkeypatch):
     assert response.task_count == 0
     assert response.message == (
         "高位初步安全检查失败：\n"
-        "- 方块 1（T）：预测实际 TCP [-525.100, 80.300, 190.200]，X 越界\n"
+        "- 方块 1（T）：像素坐标 [10.000, 20.000] px，预测实际 TCP "
+        "[-525.100, 80.300, 190.200] mm，X=-525.100 mm 越界"
+        "（当前限位 [-520.224, -148.170] mm）\n"
         "本轮未打开 Mask 编辑器"
     )
     assert processor.task_targets == []
@@ -1952,6 +1980,8 @@ def test_formal_final_check_uses_edited_center_and_reports_all(monkeypatch):
             return types.SimpleNamespace(
                 safe=False,
                 safety_tcp_xyz=(-180.2, 321.8, 189.7),
+                safety_min_xyz=(-520.224, -263.279, 165.0),
+                safety_max_xyz=(-148.17, 315.925, float("inf")),
                 violated_axes=("Y",),
             )
         return types.SimpleNamespace(
@@ -1971,7 +2001,9 @@ def test_formal_final_check_uses_edited_center_and_reports_all(monkeypatch):
     assert response.success is False
     assert response.message == (
         "高位最终安全检查失败：\n"
-        "- 方块 1（T）：预测实际 TCP [-180.200, 321.800, 189.700]，Y 越界\n"
+        "- 方块 1（T）：像素坐标 [70.000, 80.000] px，预测实际 TCP "
+        "[-180.200, 321.800, 189.700] mm，Y=321.800 mm 越界"
+        "（当前限位 [-263.279, 315.925] mm）\n"
         "请重新识别或重新编辑 Mask"
     )
 
@@ -2640,6 +2672,86 @@ def _make_dynamic_routing_processor(module, mode):
     )
     processor._run_dynamic_board_selection = lambda *_args: {"decision": decision}
     return processor
+
+
+def test_web_interaction_mode_uses_prompt_broker_without_reading_terminal(monkeypatch):
+    module = _load_process_module_with_stubs(
+        monkeypatch,
+        "process_dynamic_web_prompt",
+    )
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    processor = object.__new__(module.ImageProcessor)
+    processor.interaction_mode = "web"
+    processor.dynamic_board_failure_prompt_timeout_sec = 60.0
+    calls = []
+    processor.operator_prompt_broker = types.SimpleNamespace(
+        request_dynamic_failure=lambda *args, **kwargs: (
+            calls.append((args, kwargs)) or "fixed_yaml"
+        )
+    )
+    monkeypatch.setattr(
+        image_node_module,
+        "prompt_dynamic_selection_failure",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("网页模式不应读取终端")
+        ),
+    )
+
+    choice = processor.choose_dynamic_selection_failure(
+        "注入失败",
+        allow_continue=True,
+    )
+
+    assert choice == "fixed_yaml"
+    assert calls == [(("注入失败", 60.0), {"allow_continue": True})]
+
+
+def test_operator_prompt_services_return_snapshot_and_error_codes(monkeypatch):
+    module = _load_process_module_with_stubs(
+        monkeypatch,
+        "process_operator_prompt_services",
+    )
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    processor = object.__new__(module.ImageProcessor)
+    snapshot = {
+        "pending": True,
+        "prompt_id": "p1",
+        "prompt_type": "dynamic_board_failure",
+        "message": "失败原因",
+        "allow_fixed_yaml": True,
+        "allow_continue_dynamic": False,
+        "remaining_seconds": 30.0,
+    }
+
+    class Broker:
+        def snapshot(self):
+            return snapshot
+
+        def respond(self, _prompt_id, choice):
+            if choice == "bad":
+                raise image_node_module.OperatorPromptChoiceError("非法选项")
+            if choice == "stale":
+                raise image_node_module.OperatorPromptConflict("提示过期")
+            return choice
+
+    processor.operator_prompt_broker = Broker()
+
+    result = processor.get_operator_prompt_service(object())
+    invalid = processor.respond_operator_prompt_service(
+        types.SimpleNamespace(prompt_id="p1", choice="bad")
+    )
+    stale = processor.respond_operator_prompt_service(
+        types.SimpleNamespace(prompt_id="p1", choice="stale")
+    )
+    accepted = processor.respond_operator_prompt_service(
+        types.SimpleNamespace(prompt_id="p1", choice="stop")
+    )
+
+    assert result.pending is True
+    assert result.prompt_id == "p1"
+    assert invalid.code == "invalid_choice"
+    assert stale.code == "conflict"
+    assert accepted.success is True
 
 
 def test_dynamic_shadow_keeps_fixed_yaml_tasks_and_records_dynamic_result(monkeypatch):

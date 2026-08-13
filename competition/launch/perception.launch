@@ -1,6 +1,8 @@
 <launch>
   <!-- 仅启动感知节点，供网页控制台按正式/标定模式切换。 -->
   <arg name="calibration_mode" default="false"/>
+  <!-- terminal 保留旧命令行交互；网页控制台显式传 web。 -->
+  <arg name="interaction_mode" default="terminal"/>
   <arg name="debug_output_dir" default="/home/zhl/桌面"/>
   <arg name="servo_csv_output_dir" default="/home/zhl/桌面/标定数据"/>
   <arg name="experiment_archive_root" default="$(arg servo_csv_output_dir)/实验日志"/>
@@ -12,6 +14,7 @@
 
   <node pkg="image_process" type="process.py" name="image_process_node" output="screen">
     <param name="calibration_mode" value="$(arg calibration_mode)"/>
+    <param name="interaction_mode" value="$(arg interaction_mode)"/>
     <param name="image_topic" value="/camera/image_rect"/>
     <param name="experiment_session_id" value="$(arg experiment_session_id)"/>
     <param name="experiment_archive_root" value="$(arg experiment_archive_root)"/>

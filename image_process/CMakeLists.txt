@@ -31,6 +31,8 @@ add_service_files(FILES
   GetTaskTarget.srv
   DetectBlockOffset.srv
   DetectBoardOffset.srv
+  GetOperatorPrompt.srv
+  RespondOperatorPrompt.srv
 )
 generate_messages()
 

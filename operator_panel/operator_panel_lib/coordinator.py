@@ -107,12 +107,58 @@ class OperationCoordinator:
                 "pending_restart": [],
                 "files": self.config_manager.list_configs(),
             },
+            "interaction": self._empty_interaction(),
             "operation": {"active": None, "latest": None, "stop": None},
         }
 
     @staticmethod
     def _now():
         return datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+    @staticmethod
+    def _empty_interaction():
+        return {
+            "pending": False,
+            "prompt_id": "",
+            "type": "",
+            "title": "",
+            "message": "",
+            "choices": [],
+            "remaining_seconds": 0,
+        }
+
+    @classmethod
+    def _interaction_from_prompt(cls, prompt):
+        if not isinstance(prompt, dict) or not prompt.get("pending"):
+            return cls._empty_interaction()
+        choices = [
+            {"id": "stop", "label": "停止本轮", "tone": "danger"},
+        ]
+        if prompt.get("allow_fixed_yaml"):
+            choices.append({
+                "id": "fixed_yaml",
+                "label": "回退固定 task_layout.yaml",
+                "tone": "secondary",
+            })
+        if prompt.get("allow_continue_dynamic"):
+            choices.append({
+                "id": "continue_dynamic",
+                "label": "忽略速度不一致并继续动态盘面",
+                "tone": "warning",
+                "requires_confirmation": True,
+            })
+        return {
+            "pending": True,
+            "prompt_id": str(prompt.get("prompt_id", "")),
+            "type": str(prompt.get("prompt_type", "")),
+            "title": "V5 动态盘面需要选择",
+            "message": str(prompt.get("message", "")),
+            "choices": choices,
+            "remaining_seconds": max(
+                0,
+                int(math.ceil(float(prompt.get("remaining_seconds", 0.0)))),
+            ),
+        }
 
     def _new_operation(self, kind):
         return {
@@ -143,7 +189,10 @@ class OperationCoordinator:
             pass
         try:
             health = self.ros.health_snapshot()
-            state["health"].update({key: value for key, value in health.items() if key != "control"})
+            state["health"].update({
+                key: value for key, value in health.items()
+                if key not in {"control", "operator_prompt"}
+            })
             control = health.get("control", {})
             if control:
                 state["hardware"].update({
@@ -155,6 +204,9 @@ class OperationCoordinator:
                     "motion_state_known": bool(control.get("motion_state_known", False)),
                     "motion_done": bool(control.get("motion_done", False)),
                 })
+            prompt = health.get("operator_prompt")
+            if prompt is not None:
+                state["interaction"] = self._interaction_from_prompt(prompt)
         except Exception:
             pass
         state["metadata"] = {
@@ -165,7 +217,11 @@ class OperationCoordinator:
 
     def on_ros_health(self, health):
         with self._lock:
-            self._state["health"].update({key: value for key, value in health.items() if key != "control"})
+            interaction = deepcopy(self._state["interaction"])
+            self._state["health"].update({
+                key: value for key, value in health.items()
+                if key not in {"control", "operator_prompt"}
+            })
             control = health.get("control", {})
             if control:
                 self._state["hardware"].update({
@@ -177,6 +233,17 @@ class OperationCoordinator:
                     "motion_state_known": bool(control.get("motion_state_known", False)),
                     "motion_done": bool(control.get("motion_done", False)),
                 })
+            prompt = health.get("operator_prompt")
+            if prompt is not None:
+                interaction = self._interaction_from_prompt(prompt)
+                self._state["interaction"] = interaction
+                if (
+                    interaction["pending"]
+                    and self._state["task"]["state"] == "准备识别"
+                ):
+                    self._state["task"]["phase"] = "等待人工选择"
+        if interaction.get("pending"):
+            self.event_bus.publish("interaction", deepcopy(interaction))
         self._publish_state()
 
     def on_process_state(self, process_state):
@@ -185,6 +252,8 @@ class OperationCoordinator:
             runtime = process_state.get("runtime", {})
             if not runtime.get("running") and self._state["task"]["state"] in {"等待确认", "可以执行"}:
                 self._invalidate_recognition_locked("感知进程已停止，识别结果已失效")
+            if not runtime.get("running"):
+                self._state["interaction"] = self._empty_interaction()
         self._publish_state()
 
     def _log(self, level, message, source="控制台"):
@@ -543,6 +612,83 @@ class OperationCoordinator:
         self._publish_state()
         return {"confirmed": True}
 
+    def respond_interaction(
+        self,
+        prompt_id,
+        choice,
+        confirm_speed_mismatch=False,
+    ):
+        """回答阻塞中的感知提示；该通道不占用常规操作队列。"""
+        normalized_id = str(prompt_id or "")
+        normalized_choice = str(choice or "")
+        if normalized_choice not in {"stop", "fixed_yaml", "continue_dynamic"}:
+            raise ValueError("人工选择只能是停止、固定盘面或继续动态盘面")
+        with self._lock:
+            interaction = deepcopy(self._state["interaction"])
+        if not interaction.get("pending"):
+            # 健康轮询可能刚好还未写入本地状态，最后读取一次网关缓存。
+            try:
+                interaction = self._interaction_from_prompt(
+                    self.ros.operator_prompt_snapshot()
+                )
+            except Exception:
+                interaction = self._empty_interaction()
+        if not interaction.get("pending"):
+            raise OperationRejected("当前没有等待回答的人工选择")
+        if normalized_id != interaction.get("prompt_id"):
+            raise OperationRejected("人工选择提示已过期，请刷新页面状态")
+        allowed = {item["id"] for item in interaction.get("choices", [])}
+        if normalized_choice not in allowed:
+            raise ValueError("当前提示不允许此选项")
+        if (
+            normalized_choice == "continue_dynamic"
+            and not bool(confirm_speed_mismatch)
+        ):
+            raise OperationRejected(
+                "忽略速度差异继续动态盘面前必须完成二次确认"
+            )
+        response = self.ros.respond_operator_prompt(
+            normalized_id,
+            normalized_choice,
+        )
+        if not response.get("success"):
+            if response.get("code") == "invalid_choice":
+                raise ValueError(response.get("message") or "当前提示不允许此选项")
+            raise OperationRejected(
+                response.get("message") or "人工选择已经失效"
+            )
+        with self._lock:
+            self._state["interaction"] = self._empty_interaction()
+            if self._state["task"]["state"] == "准备识别":
+                self._state["task"]["phase"] = "正在处理人工选择"
+        self._log("warning", f"已提交人工选择：{normalized_choice}", source="人工选择")
+        self._publish_state()
+        return {
+            "accepted": True,
+            "choice": normalized_choice,
+            "message": str(response.get("message", "")),
+        }
+
+    def discard_task(self):
+        """只丢弃本轮识别数据，不发出任何硬件命令。"""
+        with self._lock:
+            if self._active_operation is not None:
+                raise OperationBusy(
+                    f"正在执行 {self._active_operation['kind']}，暂不能结束本轮"
+                )
+            task = self._state["task"]
+            if task["state"] not in {"等待确认", "可以执行", "失败"}:
+                raise OperationRejected("当前没有可以结束的识别轮次")
+            self._invalidate_recognition_locked("本轮已结束，可以重新识别")
+            self._abort_token = None
+            task.update({
+                "state": "空闲",
+                "phase": "本轮已结束",
+                "error": "",
+            })
+        self._publish_state()
+        return {"discarded": True}
+
     def execute_task(self):
         with self._lock:
             task = self._state["task"]
@@ -637,6 +783,12 @@ class OperationCoordinator:
             try:
                 # 控制服务先设置 stop_latched，再通过独立 XML-RPC 调用 StopMotion。
                 response = self.ros.stop_arm()
+                try:
+                    cancel_prompt = getattr(self.ros, "cancel_operator_prompt", None)
+                    if cancel_prompt is not None:
+                        cancel_prompt(timeout=1.0)
+                except Exception as prompt_exc:
+                    self._log("warning", f"停止本轮人工选择失败：{prompt_exc}")
                 runtime_stopped = self.supervisor.stop_runtime()
                 if not runtime_stopped:
                     runtime = self.supervisor.snapshot().get("runtime", {})

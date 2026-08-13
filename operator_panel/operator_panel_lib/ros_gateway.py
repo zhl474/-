@@ -24,6 +24,8 @@ class RosGateway:
         "/perception/get_task_target",
         "/perception/block_offset",
         "/perception/board_offset",
+        "/perception/get_operator_prompt",
+        "/perception/respond_operator_prompt",
     }
 
     def __init__(self, event_bus, preview_fps=2.0, jpeg_quality=78, state_callback=None):
@@ -49,6 +51,7 @@ class RosGateway:
             "servo_target_angle_deg": 0.0,
             "message": "控制服务未连接",
         }
+        self._operator_prompt = self._empty_operator_prompt()
         self._stop_event = threading.Event()
         self._subscribers = []
         self._started = False
@@ -84,6 +87,18 @@ class RosGateway:
     @staticmethod
     def _now():
         return datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+    @staticmethod
+    def _empty_operator_prompt():
+        return {
+            "pending": False,
+            "prompt_id": "",
+            "prompt_type": "",
+            "message": "",
+            "allow_fixed_yaml": False,
+            "allow_continue_dynamic": False,
+            "remaining_seconds": 0.0,
+        }
 
     def _on_image(self, message):
         now = time.monotonic()
@@ -153,6 +168,19 @@ class RosGateway:
                     "servo_target_angle_deg": 0.0,
                     "message": "控制服务未连接",
                 }
+        if "/perception/get_operator_prompt" in services:
+            try:
+                prompt = self.get_operator_prompt(timeout=0.8)
+            except Exception as exc:
+                self.event_bus.publish("log", {
+                    "source": "人工选择", "level": "warning",
+                    "message": f"读取待处理提示失败：{exc}",
+                })
+                prompt = self._empty_operator_prompt()
+        else:
+            prompt = self._empty_operator_prompt()
+        with self._lock:
+            self._operator_prompt = prompt
 
     def _health_loop(self):
         last_snapshot = None
@@ -196,6 +224,7 @@ class RosGateway:
                 "control_services_ready": self.CONTROL_SERVICES.issubset(self._services),
                 "perception_services_ready": self.PERCEPTION_SERVICES.issubset(self._services),
                 "control": deepcopy(self._control_status),
+                "operator_prompt": deepcopy(self._operator_prompt),
             }
 
     def image_bytes(self):
@@ -269,6 +298,70 @@ class RosGateway:
             "servo_target_angle_deg": float(response.servo_target_angle_deg),
             "message": str(response.message),
         }
+
+    def get_operator_prompt(self, timeout=2.0):
+        """读取感知节点当前等待网页回答的固定选项提示。"""
+        from image_process.srv import GetOperatorPrompt, GetOperatorPromptRequest
+
+        self._wait_service("/perception/get_operator_prompt", timeout)
+        proxy = self._rospy.ServiceProxy(
+            "/perception/get_operator_prompt",
+            GetOperatorPrompt,
+            persistent=False,
+        )
+        response = proxy(GetOperatorPromptRequest())
+        return {
+            "pending": bool(response.pending),
+            "prompt_id": str(response.prompt_id),
+            "prompt_type": str(response.prompt_type),
+            "message": str(response.message),
+            "allow_fixed_yaml": bool(response.allow_fixed_yaml),
+            "allow_continue_dynamic": bool(response.allow_continue_dynamic),
+            "remaining_seconds": max(0.0, float(response.remaining_seconds)),
+        }
+
+    def operator_prompt_snapshot(self):
+        with self._lock:
+            return deepcopy(self._operator_prompt)
+
+    def respond_operator_prompt(self, prompt_id, choice, timeout=2.0):
+        """向感知节点提交经过控制台校验的人工选择。"""
+        from image_process.srv import (
+            RespondOperatorPrompt,
+            RespondOperatorPromptRequest,
+        )
+
+        self._wait_service("/perception/respond_operator_prompt", timeout)
+        proxy = self._rospy.ServiceProxy(
+            "/perception/respond_operator_prompt",
+            RespondOperatorPrompt,
+            persistent=False,
+        )
+        response = proxy(RespondOperatorPromptRequest(
+            prompt_id=str(prompt_id),
+            choice=str(choice),
+        ))
+        result = {
+            "success": bool(response.success),
+            "code": str(response.code),
+            "message": str(response.message),
+        }
+        if result["success"]:
+            with self._lock:
+                self._operator_prompt = self._empty_operator_prompt()
+        return result
+
+    def cancel_operator_prompt(self, timeout=1.0):
+        """若存在网页提示，则按安全默认值停止本轮。"""
+        prompt = self.operator_prompt_snapshot()
+        if not prompt.get("pending"):
+            return False
+        response = self.respond_operator_prompt(
+            prompt.get("prompt_id", ""),
+            "stop",
+            timeout=timeout,
+        )
+        return bool(response.get("success"))
 
     def set_suction(self, state, timeout=5.0):
         from control.srv import SetSuction, SetSuctionRequest

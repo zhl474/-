@@ -1,0 +1,8 @@
+---
+bool pending
+string prompt_id
+string prompt_type
+string message
+bool allow_fixed_yaml
+bool allow_continue_dynamic
+float64 remaining_seconds

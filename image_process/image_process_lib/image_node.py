@@ -66,6 +66,9 @@ from image_process_lib.dynamic_board_report import (
     build_dynamic_board_selection_report,
 )
 from image_process_lib.dynamic_board_runtime import (
+    OperatorPromptBroker,
+    OperatorPromptChoiceError,
+    OperatorPromptConflict,
     atomic_write_json,
     prompt_dynamic_selection_failure,
     sha256_file,
@@ -92,8 +95,12 @@ from image_process.srv import (
     DetectBoardOffsetResponse,
     GetTaskTarget,
     GetTaskTargetResponse,
+    GetOperatorPrompt,
+    GetOperatorPromptResponse,
     PrepareTask,
     PrepareTaskResponse,
+    RespondOperatorPrompt,
+    RespondOperatorPromptResponse,
 )
 from camera.srv import GetStableWorldPoints
 
@@ -188,6 +195,12 @@ class ImageProcessor:
         if not isinstance(calibration_mode_value, bool):
             raise ValueError("calibration_mode 必须是布尔值 true 或 false")
         self.calibration_mode = calibration_mode_value
+        self.interaction_mode = str(
+            rospy.get_param("~interaction_mode", "terminal")
+        ).strip().lower()
+        if self.interaction_mode not in ("terminal", "web"):
+            raise ValueError("interaction_mode 只能是 terminal 或 web")
+        self.operator_prompt_broker = OperatorPromptBroker()
         experiment_session_id = str(
             rospy.get_param("~experiment_session_id", "") or ""
         ).strip()
@@ -874,6 +887,16 @@ class ImageProcessor:
         self.board_offset_service = rospy.Service(
             "/perception/board_offset", DetectBoardOffset, self.detect_board_offset_service
         )
+        self.get_operator_prompt_service_handle = rospy.Service(
+            "/perception/get_operator_prompt",
+            GetOperatorPrompt,
+            self.get_operator_prompt_service,
+        )
+        self.respond_operator_prompt_service_handle = rospy.Service(
+            "/perception/respond_operator_prompt",
+            RespondOperatorPrompt,
+            self.respond_operator_prompt_service,
+        )
         rospy.on_shutdown(self.close_runtime_resources)
         rospy.loginfo("图像处理节点订阅去畸变彩图: %s", self.image_topic)
         rospy.loginfo("图像处理服务已启动")
@@ -895,8 +918,61 @@ class ImageProcessor:
 
     def close_runtime_resources(self):
         """节点退出时统一关闭 GUI 子进程和调试视频。"""
+        prompt_broker = getattr(self, "operator_prompt_broker", None)
+        if prompt_broker is not None:
+            prompt_broker.close()
         self.terminate_high_mask_editor_process()
         self.close_debug_video_recorders()
+
+    def get_operator_prompt_service(self, _request):
+        """向网页控制台返回当前待处理的固定选项提示。"""
+        prompt = self.operator_prompt_broker.snapshot()
+        return GetOperatorPromptResponse(**prompt)
+
+    def respond_operator_prompt_service(self, request):
+        """接受网页对当前提示的回答，拒绝任意或过期内容。"""
+        try:
+            choice = self.operator_prompt_broker.respond(
+                request.prompt_id,
+                request.choice,
+            )
+            return RespondOperatorPromptResponse(
+                success=True,
+                code="accepted",
+                message=f"已接受人工选择：{choice}",
+            )
+        except OperatorPromptChoiceError as exc:
+            return RespondOperatorPromptResponse(
+                success=False,
+                code="invalid_choice",
+                message=str(exc),
+            )
+        except OperatorPromptConflict as exc:
+            return RespondOperatorPromptResponse(
+                success=False,
+                code="conflict",
+                message=str(exc),
+            )
+
+    def choose_dynamic_selection_failure(self, reason, allow_continue=False):
+        """按启动入口选择网页按钮或原终端字符交互。"""
+        timeout = getattr(
+            self,
+            "dynamic_board_failure_prompt_timeout_sec",
+            60.0,
+        )
+        if getattr(self, "interaction_mode", "terminal") == "web":
+            rospy.logwarn("V5 动态盘面等待网页人工选择：%s", reason)
+            return self.operator_prompt_broker.request_dynamic_failure(
+                reason,
+                timeout,
+                allow_continue=allow_continue,
+            )
+        return prompt_dynamic_selection_failure(
+            reason,
+            timeout,
+            allow_continue=allow_continue,
+        )
 
     def close_debug_video_recorders(self):
         """节点退出时释放视频文件句柄，避免最后几帧没有写入文件。"""
@@ -1854,6 +1930,28 @@ class ImageProcessor:
         """使用现场易读的固定三位小数格式显示 TCP XYZ。"""
         return "[" + ", ".join(f"{float(value):.3f}" for value in tcp_xyz) + "]"
 
+    @staticmethod
+    def _format_pixel_xy(pixel_xy):
+        """使用固定三位小数显示检测或编辑后的高位像素中心。"""
+        return "[" + ", ".join(f"{float(value):.3f}" for value in pixel_xy) + "]"
+
+    @staticmethod
+    def _format_high_tcp_axis_violations(assessment):
+        """逐轴显示越界值和本次评估实际使用的安全限位。"""
+        axis_indices = {"X": 0, "Y": 1, "Z": 2}
+        details = []
+        for axis_name in assessment.violated_axes:
+            axis_index = axis_indices[axis_name]
+            value = float(assessment.safety_tcp_xyz[axis_index])
+            minimum = float(assessment.safety_min_xyz[axis_index])
+            maximum = float(assessment.safety_max_xyz[axis_index])
+            maximum_text = f"{maximum:.3f}" if np.isfinite(maximum) else "+∞"
+            details.append(
+                f"{axis_name}={value:.3f} mm 越界"
+                f"（当前限位 [{minimum:.3f}, {maximum_text}] mm）"
+            )
+        return "、".join(details)
+
     def _collect_high_tcp_safety_violations(self, blocks, layout):
         """检查完整正式任务的方块和托盘目标，并返回全部问题。"""
         candidates = []
@@ -1872,16 +1970,22 @@ class ImageProcessor:
 
         violations = []
         for label, subject, pixel_xy in candidates:
+            pixel_text = self._format_pixel_xy(pixel_xy)
             try:
                 assessment = self.high_tcp_localizer.assess(subject, pixel_xy)
             except Exception as exc:
-                violations.append(f"{label}：TCP 预测失败：{exc}")
+                violations.append(
+                    f"{label}：像素坐标 {pixel_text} px，TCP 预测失败：{exc}"
+                )
                 continue
             if assessment.safe:
                 continue
-            axis_text = "、".join(assessment.violated_axes)
             tcp_text = self._format_tcp_xyz(assessment.safety_tcp_xyz)
-            violations.append(f"{label}：预测实际 TCP {tcp_text}，{axis_text} 越界")
+            axis_text = self._format_high_tcp_axis_violations(assessment)
+            violations.append(
+                f"{label}：像素坐标 {pixel_text} px，"
+                f"预测实际 TCP {tcp_text} mm，{axis_text}"
+            )
         return violations
 
     def _validate_high_task_safety(self, blocks, layout, stage):
@@ -2284,13 +2388,8 @@ class ImageProcessor:
                         "confirmation_attempts",
                         (),
                     )
-                    failure_choice = prompt_dynamic_selection_failure(
+                    failure_choice = self.choose_dynamic_selection_failure(
                         str(dynamic_error),
-                        getattr(
-                            self,
-                            "dynamic_board_failure_prompt_timeout_sec",
-                            60.0,
-                        ),
                         allow_continue=isinstance(
                             dynamic_error,
                             MotionModelSpeedMismatchError,

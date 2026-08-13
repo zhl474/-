@@ -22,6 +22,12 @@ const app = {
   logs: [],
   logRenderScheduled: false,
   seenOperations: new Set(),
+  interactionDialogKey: '',
+  interactionDialogKind: '',
+  interactionSubmitting: false,
+  interactionSuppressed: new Set(),
+  promptDeadline: 0,
+  promptDeadlineId: '',
 };
 
 const configEditor = new ConfigEditor($('#config-editor'), (changes) => {
@@ -95,6 +101,257 @@ function stateClass(state) {
   return '';
 }
 
+function currentPreparePayload() {
+  const advanced = $('input[name="task-level"]:checked').value === 'advanced';
+  return { advanced, place_order: advanced ? app.order : [] };
+}
+
+async function submitPrepare({ confirmRetry = false } = {}) {
+  if (confirmRetry && ['等待确认', '可以执行'].includes(app.state?.task?.state)) {
+    const confirmed = await confirmAction(
+      '重新识别？',
+      '当前识别结果将失效，机械臂会重新回到高位拍摄位。',
+    );
+    if (!confirmed) return null;
+  }
+  return command('/api/task/prepare', currentPreparePayload(), '识别任务已提交');
+}
+
+function rememberInteractionChoice(key) {
+  if (!key) return;
+  app.interactionSuppressed.add(key);
+  if (app.interactionSuppressed.size > 100) {
+    app.interactionSuppressed.delete(app.interactionSuppressed.values().next().value);
+  }
+}
+
+function closeTaskInteraction({ suppress = false } = {}) {
+  const dialog = $('#task-interaction-dialog');
+  if (suppress) rememberInteractionChoice(app.interactionDialogKey);
+  if (dialog.open) dialog.close();
+  app.interactionDialogKey = '';
+  app.interactionDialogKind = '';
+  app.interactionSubmitting = false;
+}
+
+function setInteractionButtonsDisabled(disabled) {
+  $$('#task-interaction-actions button').forEach((button) => { button.disabled = disabled; });
+}
+
+function appendInteractionButton(label, style, handler) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `button ${style}`;
+  button.textContent = label;
+  button.addEventListener('click', handler);
+  $('#task-interaction-actions').append(button);
+  return button;
+}
+
+function openImageZoom(image, titleText) {
+  const source = image?.currentSrc || image?.src;
+  if (!source || !image?.hasAttribute('src')) {
+    toast('调试图尚未生成', '可以稍后点击页面中的“刷新”重试', 'warning');
+    return false;
+  }
+  $('#image-zoom-preview').src = source;
+  $('#image-zoom-title').textContent = titleText;
+  const dialog = $('#image-zoom-dialog');
+  if (!dialog.open) dialog.showModal();
+  return true;
+}
+
+function openTaskInteraction(key, kind, title, message) {
+  const dialog = $('#task-interaction-dialog');
+  if (app.interactionSuppressed.has(key)) return false;
+  if (dialog.open && app.interactionDialogKey === key) return true;
+  if ($('#image-zoom-dialog').open) $('#image-zoom-dialog').close();
+  if (dialog.open) dialog.close();
+  app.interactionDialogKey = key;
+  app.interactionDialogKind = kind;
+  app.interactionSubmitting = false;
+  $('#task-interaction-title').textContent = title;
+  $('#task-interaction-message').textContent = message;
+  $('#task-interaction-actions').replaceChildren();
+  $('#task-interaction-warning').hidden = true;
+  $('#task-interaction-warning').textContent = '';
+  $('#task-interaction-summary').replaceChildren();
+  $('#task-interaction-summary').hidden = true;
+  $('#task-interaction-countdown').hidden = true;
+  $('#task-interaction-stop-motion').disabled = false;
+  dialog.showModal();
+  return true;
+}
+
+async function answerDynamicPrompt(choice, button) {
+  if (app.interactionSubmitting) return;
+  let confirmed = false;
+  if (choice === 'continue_dynamic') {
+    if (button.dataset.confirmed !== 'true') {
+      const warning = $('#task-interaction-warning');
+      warning.hidden = false;
+      warning.textContent = '实际机械臂仍按当前配置速度运行，但盘面预测时间不再代表真实秒数。请再次点击按钮确认继续。';
+      button.dataset.confirmed = 'true';
+      button.textContent = '再次确认：忽略差异并继续';
+      return;
+    }
+    confirmed = true;
+  }
+  app.interactionSubmitting = true;
+  setInteractionButtonsDisabled(true);
+  try {
+    await api('/api/task/interaction/respond', {
+      method: 'POST',
+      json: {
+        prompt_id: app.state?.interaction?.prompt_id,
+        choice,
+        confirm_speed_mismatch: confirmed,
+      },
+    });
+    toast('选择已提交', choice === 'stop' ? '正在安全结束本轮' : '正在继续处理识别结果');
+    closeTaskInteraction({ suppress: true });
+  } catch (error) {
+    app.interactionSubmitting = false;
+    setInteractionButtonsDisabled(false);
+    toast('选择未提交', formatError(error), 'error', 6500);
+    refreshState();
+  }
+}
+
+function renderDynamicPrompt(interaction) {
+  const key = `prompt:${interaction.prompt_id}`;
+  const alreadyOpen = $('#task-interaction-dialog').open
+    && app.interactionDialogKey === key;
+  if (!openTaskInteraction(
+    key,
+    'dynamic',
+    interaction.title || 'V5 动态盘面需要选择',
+    interaction.message || '动态盘面选择失败。',
+  )) return;
+  if (app.promptDeadlineId !== interaction.prompt_id) {
+    app.promptDeadlineId = interaction.prompt_id;
+    app.promptDeadline = Date.now() + Number(interaction.remaining_seconds || 0) * 1000;
+  } else {
+    app.promptDeadline = Math.min(
+      app.promptDeadline,
+      Date.now() + Number(interaction.remaining_seconds || 0) * 1000,
+    );
+  }
+  const countdown = $('#task-interaction-countdown');
+  countdown.hidden = false;
+  if (alreadyOpen) {
+    updateInteractionCountdown();
+    return;
+  }
+  interaction.choices.forEach((choice) => {
+    const styles = { danger: 'danger', secondary: 'secondary', warning: 'warning' };
+    const button = appendInteractionButton(
+      choice.label,
+      styles[choice.tone] || 'ghost',
+      () => answerDynamicPrompt(choice.id, button),
+    );
+  });
+  appendInteractionButton(
+    '查看识别调试图',
+    'ghost',
+    () => openImageZoom($('#debug-image'), '识别调试图'),
+  );
+  updateInteractionCountdown();
+}
+
+function addRecognitionSummary(task) {
+  const summary = $('#task-interaction-summary');
+  const rows = [
+    ['任务总数', task.task_count || 0],
+    ['方块', task.block_count || 0],
+    ['托盘点', task.tray_count || 0],
+  ];
+  rows.forEach(([label, value]) => {
+    const item = document.createElement('div');
+    const small = document.createElement('small'); small.textContent = label;
+    const strong = document.createElement('strong'); strong.textContent = value;
+    item.append(small, strong); summary.append(item);
+  });
+  summary.hidden = false;
+}
+
+async function handleRecognitionChoice(choice) {
+  if (app.interactionSubmitting) return;
+  app.interactionSubmitting = true;
+  setInteractionButtonsDisabled(true);
+  try {
+    if (choice === 'retry') {
+      await submitPrepare();
+    } else if (choice === 'discard') {
+      await api('/api/task/discard', { method: 'POST', json: {} });
+      toast('本轮已结束', '硬件和感知保持运行，可以再次识别');
+    } else if (choice === 'confirm') {
+      await api('/api/task/confirm', { method: 'POST', json: {} });
+      toast('识别结果已确认', '请检查现场后点击“开始执行”');
+    }
+    closeTaskInteraction({ suppress: true });
+    refreshState();
+  } catch (error) {
+    app.interactionSubmitting = false;
+    setInteractionButtonsDisabled(false);
+    toast('操作未执行', formatError(error), 'error', 6500);
+    refreshState();
+  }
+}
+
+function renderRecognitionChoice(state) {
+  const task = state.task || {};
+  const latest = state.operation?.latest || {};
+  if (state.operation?.active) return false;
+  const success = task.state === '等待确认' && task.recognition_valid;
+  const failed = task.state === '失败' && latest.kind === '识别与规划';
+  if (!success && !failed) return false;
+  const key = `recognition:${latest.operation_id || task.message}:${task.state}`;
+  const modeLabel = task.mode === 'calibration' ? '标定采集' : '抓放任务';
+  const title = success ? `${modeLabel}识别完成` : `${modeLabel}识别未完成`;
+  const message = task.error || task.message || (success ? '请确认识别结果。' : '请调整现场后重试。');
+  if ($('#task-interaction-dialog').open && app.interactionDialogKey === key) return true;
+  if (!openTaskInteraction(key, 'recognition', title, message)) return true;
+  addRecognitionSummary(task);
+  appendInteractionButton(
+    '查看识别调试图',
+    'ghost',
+    () => openImageZoom($('#debug-image'), '识别调试图'),
+  );
+  appendInteractionButton(
+    success ? '重新识别' : '调整后重新识别',
+    'secondary',
+    () => handleRecognitionChoice('retry'),
+  );
+  appendInteractionButton('结束本轮', 'ghost', () => handleRecognitionChoice('discard'));
+  if (success) {
+    appendInteractionButton('确认结果', 'primary', () => handleRecognitionChoice('confirm'));
+  }
+  return true;
+}
+
+function renderTaskInteraction(state) {
+  const interaction = state.interaction || {};
+  if (interaction.pending) {
+    renderDynamicPrompt(interaction);
+    return;
+  }
+  if (renderRecognitionChoice(state)) return;
+  if ($('#task-interaction-dialog').open && !app.interactionSubmitting) {
+    closeTaskInteraction();
+  }
+}
+
+function updateInteractionCountdown() {
+  if (app.interactionDialogKind !== 'dynamic' || !$('#task-interaction-dialog').open) return;
+  const remaining = Math.max(0, Math.ceil((app.promptDeadline - Date.now()) / 1000));
+  const countdown = $('#task-interaction-countdown');
+  countdown.textContent = remaining > 0
+    ? `${remaining} 秒后自动停止本轮`
+    : '正在自动停止本轮…';
+  if (remaining <= 0) setInteractionButtonsDisabled(true);
+}
+
 function renderState(state) {
   app.state = state;
   const health = state.health || {};
@@ -158,6 +415,8 @@ function renderState(state) {
   $('#task-prepare').disabled = busy || stopped || !health.control_services_ready || !health.perception_services_ready || task.state === '执行中';
   $('#task-confirm').disabled = busy || task.state !== '等待确认' || !task.recognition_valid;
   $('#task-start').disabled = busy || stopped || task.state !== '可以执行' || !task.confirmed;
+  $('#task-prepare').textContent = ['等待确认', '可以执行', '失败'].includes(task.state) ? '重新识别' : '开始识别';
+  $('#task-start').classList.toggle('attention', !$('#task-start').disabled && task.state === '可以执行');
   $('#clear-stop').disabled = busy || !stopped;
 
   const manualEnabled = !busy && !stopped && health.control_services_ready && health.camera_frame_fresh && !['准备识别', '执行中'].includes(task.state);
@@ -177,6 +436,7 @@ function renderState(state) {
 
   if (health.last_frame_at) $('#camera-time').textContent = health.last_frame_at.replace('T', ' ').slice(0, 23);
   renderConfigFileStates();
+  renderTaskInteraction(state);
 }
 
 function renderOperation(operation) {
@@ -190,6 +450,7 @@ function renderOperation(operation) {
   const key = `${operation.operation_id}:${operation.status}`;
   if (app.seenOperations.has(key)) return;
   app.seenOperations.add(key);
+  if (operation.kind === '识别与规划') refreshDebugImages();
   indicator.className = `operation-indicator ${operation.status === 'success' ? 'idle' : 'error'}`;
   $('span', indicator).textContent = operation.status === 'success' ? `${operation.kind}完成` : `${operation.kind}未完成`;
   if (operation.status === 'success') {
@@ -198,7 +459,6 @@ function renderOperation(operation) {
     } else {
       toast(`${operation.kind}完成`, operation.result?.message || '状态已更新');
     }
-    if (['识别与规划'].includes(operation.kind)) refreshDebugImages();
     if (['保存配置', '恢复配置历史', '恢复配置预设'].includes(operation.kind)) {
       refreshConfigAfterWrite();
     }
@@ -225,6 +485,11 @@ function startEvents() {
     renderState(app.state);
   });
   source.addEventListener('operation', (event) => renderOperation(JSON.parse(event.data)));
+  source.addEventListener('interaction', (event) => {
+    if (!app.state) return;
+    app.state.interaction = JSON.parse(event.data);
+    renderTaskInteraction(app.state);
+  });
   source.addEventListener('log', (event) => appendLog(JSON.parse(event.data)));
   source.addEventListener('image', (event) => {
     const data = JSON.parse(event.data);
@@ -244,6 +509,35 @@ function updateImage(element, imageId, marker = Date.now()) {
 
 function refreshDebugImages() {
   updateImage($('#debug-image'), app.selectedDebugImage);
+}
+
+function bindImageZoom() {
+  const dialog = $('#image-zoom-dialog');
+  const preview = $('#image-zoom-preview');
+
+  $$('#camera-image, #debug-image').forEach((image) => {
+    image.title = '双击放大';
+    image.tabIndex = 0;
+    image.addEventListener('dblclick', () => openImageZoom(
+      image,
+      image.id === 'debug-image'
+        ? `识别调试图 · ${$('.debug-tabs button.active')?.textContent || ''}`
+        : '相机预览',
+    ));
+    image.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') openImageZoom(
+        image,
+        image.id === 'debug-image' ? '识别调试图' : '相机预览',
+      );
+    });
+  });
+
+  $('#image-zoom-close').addEventListener('click', () => dialog.close());
+  preview.addEventListener('dblclick', () => dialog.close());
+  dialog.addEventListener('click', (event) => {
+    if (event.target === dialog) dialog.close();
+  });
+  dialog.addEventListener('close', () => preview.removeAttribute('src'));
 }
 
 function renderOrder() {
@@ -304,13 +598,7 @@ function bindConsole() {
     $('#advanced-order-panel').hidden = input.value !== 'advanced' || !input.checked;
   }));
   $('#reset-order').addEventListener('click', () => { app.order = [0, 1, 2, 3, 4, 5, 6]; renderOrder(); });
-  $('#task-prepare').addEventListener('click', async () => {
-    const advanced = $('input[name="task-level"]:checked').value === 'advanced';
-    if (['等待确认', '可以执行'].includes(app.state?.task?.state)) {
-      if (!await confirmAction('重新识别？', '当前识别结果将失效，机械臂会重新回到高位拍摄位。')) return;
-    }
-    command('/api/task/prepare', { advanced, place_order: advanced ? app.order : [] }, '识别任务已提交');
-  });
+  $('#task-prepare').addEventListener('click', () => submitPrepare({ confirmRetry: true }));
   $('#task-confirm').addEventListener('click', () => command('/api/task/confirm', {}, '识别结果已确认'));
   $('#task-start').addEventListener('click', async () => {
     const count = app.state?.task?.task_count || 0;
@@ -329,7 +617,10 @@ function bindConsole() {
 async function triggerStop() {
   try {
     await command('/api/control/stop', {}, '停止请求已通过高优先级通道提交');
-  } catch (_) { /* 错误已经显示。 */ }
+    return true;
+  } catch (_) {
+    return false; // 错误已经显示。
+  }
 }
 
 function bindManual() {
@@ -695,7 +986,8 @@ function renderLayout(item) {
   const board = document.createElement('div'); board.className = 'board-preview';
   const occupied = new Map();
   item.data.targets.forEach((target) => target.cells.forEach(([col, row]) => occupied.set(`${col}:${row}`, target.category)));
-  for (let row = 1; row <= 14; row += 1) for (let col = 1; col <= 10; col += 1) {
+  // 盘面按机械臂前方的观察方向显示：底部行在上，顶部行在下。
+  for (let row = 14; row >= 1; row -= 1) for (let col = 1; col <= 10; col += 1) {
     const cell = document.createElement('span'); cell.className = 'board-cell';
     const category = occupied.get(`${col}:${row}`);
     if (category) { cell.classList.add('filled'); cell.dataset.category = category; cell.title = `${col}, ${row} · ${category}`; }
@@ -811,6 +1103,36 @@ function bindExit() {
   });
 }
 
+function bindTaskInteraction() {
+  const dialog = $('#task-interaction-dialog');
+  dialog.addEventListener('cancel', (event) => event.preventDefault());
+  window.addEventListener('pagehide', () => {
+    const interaction = app.state?.interaction;
+    if (!interaction?.pending || !interaction.prompt_id) return;
+    // 页面被关闭或刷新时只结束本轮识别，不发 StopMotion，也不改变吸盘状态。
+    // keepalive 让请求可在页面卸载后继续发送；断网或浏览器崩溃仍由 60 秒超时兜底。
+    api('/api/task/interaction/respond', {
+      method: 'POST',
+      keepalive: true,
+      json: { prompt_id: interaction.prompt_id, choice: 'stop' },
+    }).catch(() => {});
+  });
+  $('#task-interaction-stop-motion').addEventListener('click', async () => {
+    if (app.interactionSubmitting) return;
+    app.interactionSubmitting = true;
+    setInteractionButtonsDisabled(true);
+    $('#task-interaction-stop-motion').disabled = true;
+    if (await triggerStop()) {
+      closeTaskInteraction({ suppress: true });
+    } else {
+      app.interactionSubmitting = false;
+      setInteractionButtonsDisabled(false);
+      $('#task-interaction-stop-motion').disabled = false;
+    }
+  });
+  window.setInterval(updateInteractionCountdown, 250);
+}
+
 async function initialize() {
   bindNavigation();
   bindConsole();
@@ -819,6 +1141,8 @@ async function initialize() {
   bindReadOnly();
   bindLogs();
   bindExit();
+  bindImageZoom();
+  bindTaskInteraction();
   renderOrder();
   await Promise.all([refreshState(), loadExecutionConfig()]);
   startEvents();

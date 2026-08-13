@@ -43,6 +43,7 @@ def test只会构造固定硬件和感知launch命令():
     assert commands[0] == ["roslaunch", "competition", "hardware.launch"]
     assert commands[1][:3] == ["roslaunch", "competition", "perception.launch"]
     assert "calibration_mode:=true" in commands[1]
+    assert "interaction_mode:=web" in commands[1]
     with pytest.raises(ValueError):
         supervisor.start_runtime("任意launch")
 

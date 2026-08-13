@@ -50,6 +50,16 @@ class FakeRos:
         self.stop_success = stop_success
         self.stop_called = threading.Event()
         self.suction_calls = []
+        self.prompt_responses = []
+        self.prompt = {
+            "pending": False,
+            "prompt_id": "",
+            "prompt_type": "",
+            "message": "",
+            "allow_fixed_yaml": False,
+            "allow_continue_dynamic": False,
+            "remaining_seconds": 0.0,
+        }
         self.status = {
             "ros_master": True,
             "camera_node": True,
@@ -71,7 +81,24 @@ class FakeRos:
         }
 
     def health_snapshot(self):
-        return self.status
+        return dict(self.status, operator_prompt=dict(self.prompt))
+
+    def operator_prompt_snapshot(self):
+        return dict(self.prompt)
+
+    def respond_operator_prompt(self, prompt_id, choice):
+        self.prompt_responses.append((prompt_id, choice))
+        if not self.prompt["pending"] or prompt_id != self.prompt["prompt_id"]:
+            return {"success": False, "code": "conflict", "message": "提示已过期"}
+        self.prompt["pending"] = False
+        return {"success": True, "code": "accepted", "message": "已接受"}
+
+    def cancel_operator_prompt(self, timeout=1.0):
+        if not self.prompt["pending"]:
+            return False
+        return self.respond_operator_prompt(
+            self.prompt["prompt_id"], "stop"
+        )["success"]
 
     def stop_arm(self):
         self.stop_called.set()
@@ -184,6 +211,24 @@ def test停止令牌在网络StopMotion调用前立即生效():
     assert wait_operation(coordinator, operation["operation_id"])["status"] == "success"
 
 
+def test停止运动会回答并取消正在等待的网页提示():
+    coordinator, _supervisor, ros = make_coordinator()
+    ros.prompt.update({
+        "pending": True,
+        "prompt_id": "prompt-stop",
+        "prompt_type": "dynamic_board_failure",
+        "message": "等待选择",
+        "allow_fixed_yaml": True,
+        "remaining_seconds": 60.0,
+    })
+    coordinator.on_ros_health(ros.health_snapshot())
+
+    operation = coordinator.emergency_stop()
+
+    assert wait_operation(coordinator, operation["operation_id"])["status"] == "success"
+    assert ros.prompt_responses == [("prompt-stop", "stop")]
+
+
 def test无法确认停止时持续全屏告警语义():
     coordinator, _supervisor, _ros = make_coordinator(stop_success=False)
     stop = coordinator.emergency_stop()
@@ -285,6 +330,68 @@ def test进阶顺序必须为0到6无重复排列():
         OperationCoordinator._validate_place_order(True, [0, 1, 2, 3, 4, 5, 5])
     with pytest.raises(OperationRejected):
         OperationCoordinator._validate_place_order(True, [0, 1])
+
+
+def test人工选择可绕过活动识别队列且继续动态盘面必须二次确认():
+    coordinator, _supervisor, ros = make_coordinator()
+    ros.prompt = {
+        "pending": True,
+        "prompt_id": "prompt-1",
+        "prompt_type": "dynamic_board_failure",
+        "message": "速度不一致",
+        "allow_fixed_yaml": True,
+        "allow_continue_dynamic": True,
+        "remaining_seconds": 42.1,
+    }
+    coordinator.on_ros_health(ros.health_snapshot())
+    with coordinator._lock:
+        coordinator._active_operation = {
+            "operation_id": "running",
+            "kind": "识别与规划",
+            "status": "running",
+        }
+
+    interaction_events = coordinator.event_bus.snapshot("interaction")
+    assert interaction_events[-1]["data"]["prompt_id"] == "prompt-1"
+
+    with pytest.raises(OperationRejected, match="二次确认"):
+        coordinator.respond_interaction(
+            "prompt-1",
+            "continue_dynamic",
+        )
+    response = coordinator.respond_interaction(
+        "prompt-1",
+        "continue_dynamic",
+        confirm_speed_mismatch=True,
+    )
+
+    assert response["accepted"] is True
+    assert ros.prompt_responses == [("prompt-1", "continue_dynamic")]
+    assert coordinator.snapshot()["interaction"]["pending"] is False
+
+
+def test结束本轮只丢弃识别数据且不调用硬件():
+    coordinator, _supervisor, ros = make_coordinator()
+    with coordinator._lock:
+        coordinator._state["task"].update({
+            "state": "等待确认",
+            "recognition_valid": True,
+            "confirmed": False,
+            "task_count": 34,
+            "total": 34,
+        })
+        coordinator._runner = object()
+        coordinator._prepare_response = object()
+
+    response = coordinator.discard_task()
+    task = coordinator.snapshot()["task"]
+
+    assert response == {"discarded": True}
+    assert task["state"] == "空闲"
+    assert task["task_count"] == 0
+    assert task["recognition_valid"] is False
+    assert ros.stop_called.is_set() is False
+    assert ros.suction_calls == []
 
 
 def test不会停止外部硬件进程():

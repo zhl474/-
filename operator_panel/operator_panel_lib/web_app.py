@@ -187,6 +187,22 @@ def create_app(coordinator, event_bus, config_manager, ros_gateway, panel_config
     def confirm_task():
         return jsonify(coordinator.confirm_task())
 
+    @app.post("/api/task/interaction/respond")
+    def respond_task_interaction():
+        payload = body()
+        return jsonify(coordinator.respond_interaction(
+            payload.get("prompt_id"),
+            payload.get("choice"),
+            confirm_speed_mismatch=payload.get(
+                "confirm_speed_mismatch",
+                False,
+            ),
+        ))
+
+    @app.post("/api/task/discard")
+    def discard_task():
+        return jsonify(coordinator.discard_task())
+
     @app.post("/api/task/start")
     def start_task():
         return jsonify(coordinator.execute_task()), 202

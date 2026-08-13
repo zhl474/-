@@ -61,10 +61,7 @@
     <main class="workspace">
       <section id="view-console" class="view active">
         <div class="view-heading">
-          <div>
-            <p class="eyebrow">运行控制台</p>
-            <h1>从识别到抓放，一条清晰的操作链</h1>
-          </div>
+          <h1 class="page-title">运行控制台</h1>
           <div id="operation-indicator" class="operation-indicator idle"><i></i><span>当前无操作</span></div>
         </div>
 
@@ -176,7 +173,7 @@
 
       <section id="view-manual" class="view">
         <div class="view-heading">
-          <div><p class="eyebrow">手动控制</p><h1>把常用工具动作放在伸手可及的位置</h1></div>
+          <h1 class="page-title">手动控制</h1>
           <div class="safety-note">只在硬件就绪、任务空闲且停止锁未锁定时开放</div>
         </div>
         <div class="manual-grid">
@@ -233,7 +230,7 @@
 
       <section id="view-config" class="view">
         <div class="view-heading config-heading">
-          <div><p class="eyebrow">参数中心</p><h1>只看需要改的参数，不再翻目录</h1></div>
+          <h1 class="page-title">参数中心</h1>
           <label class="search-box"><span>搜索</span><input id="config-search" type="search" placeholder="跨六份配置搜索字段、说明或值"></label>
         </div>
         <div class="config-layout">
@@ -273,7 +270,7 @@
 
       <section id="view-readonly" class="view">
         <div class="view-heading">
-          <div><p class="eyebrow">只读配置与标定</p><h1>看得到版本、误差和覆盖范围，但不零散改矩阵</h1></div>
+          <h1 class="page-title">只读配置与标定</h1>
           <button id="readonly-refresh" class="button ghost" type="button">刷新资料</button>
         </div>
         <div id="readonly-content" class="readonly-content">
@@ -301,7 +298,7 @@
 
       <section id="view-logs" class="view">
         <div class="view-heading">
-          <div><p class="eyebrow">运行日志</p><h1>ROS 与 launch 输出汇总</h1></div>
+          <h1 class="page-title">运行日志</h1>
           <div class="log-controls">
             <label>级别<select id="log-level"><option value="all">全部</option><option value="debug">调试</option><option value="info">信息</option><option value="warning">警告</option><option value="error">错误 / 致命</option></select></label>
             <input id="log-search" type="search" placeholder="搜索来源或消息">
@@ -318,6 +315,27 @@
   </div>
 
   <div id="toast-region" class="toast-region" aria-live="polite"></div>
+
+  <dialog id="image-zoom-dialog" class="image-zoom-dialog" aria-labelledby="image-zoom-title">
+    <button id="image-zoom-close" class="image-zoom-close" type="button" aria-label="关闭大图">×</button>
+    <img id="image-zoom-preview" alt="放大的预览图">
+    <p id="image-zoom-title"></p>
+  </dialog>
+
+  <dialog id="task-interaction-dialog" class="task-interaction-dialog" aria-labelledby="task-interaction-title">
+    <div class="interaction-heading">
+      <span class="interaction-mark">?</span>
+      <div>
+        <h2 id="task-interaction-title">等待选择</h2>
+        <span id="task-interaction-countdown" class="interaction-countdown" hidden></span>
+      </div>
+    </div>
+    <p id="task-interaction-message" class="interaction-message"></p>
+    <div id="task-interaction-summary" class="interaction-summary" hidden></div>
+    <div id="task-interaction-warning" class="interaction-warning" hidden></div>
+    <div id="task-interaction-actions" class="interaction-actions"></div>
+    <button id="task-interaction-stop-motion" class="interaction-stop-motion" type="button">停止运动并锁住后续动作</button>
+  </dialog>
 
   <dialog id="confirm-dialog" class="modal">
     <form method="dialog">
