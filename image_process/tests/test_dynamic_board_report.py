@@ -1,5 +1,6 @@
 """新 V5 动态报告的粗筛到唯一盘面精确回放测试。"""
 
+from copy import deepcopy
 import importlib.util
 from pathlib import Path
 
@@ -150,8 +151,11 @@ def test_new_dynamic_report_replays_same_rank_scores_board_and_sequence(tmp_path
     final_config = FinalBoardSelectorConfig(
         comparison_beam_width=10,
         comparison_returned_candidates=1,
+        comparison_worker_count=1,
+        confirmation_candidate_k=1,
         confirmation_beam_width=20,
         confirmation_returned_candidates=2,
+        confirmation_worker_count=1,
         soft_time_budget_sec=10.0,
     )
     motion_model = get_default_arm_motion_time_model()
@@ -171,8 +175,11 @@ def test_new_dynamic_report_replays_same_rank_scores_board_and_sequence(tmp_path
         "keep_coarse_boundary_ties": selector_config.keep_coarse_boundary_ties,
         "comparison_beam_width": final_config.comparison_beam_width,
         "comparison_returned_candidates": final_config.comparison_returned_candidates,
+        "comparison_worker_count": final_config.comparison_worker_count,
+        "confirmation_candidate_k": final_config.confirmation_candidate_k,
         "confirmation_beam_width": final_config.confirmation_beam_width,
         "confirmation_returned_candidates": final_config.confirmation_returned_candidates,
+        "confirmation_worker_count": final_config.confirmation_worker_count,
         "soft_time_budget_sec": final_config.soft_time_budget_sec,
         "failure_prompt_timeout_sec": 60.0,
         "task_sequence_optimizer": {
@@ -214,8 +221,29 @@ def test_new_dynamic_report_replays_same_rank_scores_board_and_sequence(tmp_path
         decision=decision,
         actual_planner_message="V5 shadow",
     )
+    assert document["协议版本"] == 2
+    assert "20盘比较" not in document
+    assert len(document["跨盘面低Beam比较"]) == len(relaxed_result.candidates)
+    assert len(document["高Beam复核"]) == 1
+    assert document["完整路径选优阶段统计"]["低Beam实际线程数"] == 1
     report_path = tmp_path / "动态盘面选择报告.json"
     atomic_write_json(report_path, document)
 
     replay_module = _load_replay_module()
     assert replay_module.replay_dynamic_report(report_path, library) == "ok"
+
+    # 历史 V1 报告没有线程数和前 K 名字段，仍按单胜者确认语义回放。
+    legacy_document = deepcopy(document)
+    legacy_document["协议版本"] = 1
+    legacy_document["20盘比较"] = legacy_document.pop("跨盘面低Beam比较")
+    legacy_document.pop("高Beam复核")
+    legacy_document.pop("完整路径选优阶段统计")
+    for key in (
+        "comparison_worker_count",
+        "confirmation_candidate_k",
+        "confirmation_worker_count",
+    ):
+        legacy_document["运行参数"].pop(key)
+    legacy_path = tmp_path / "动态盘面选择报告_V1.json"
+    atomic_write_json(legacy_path, legacy_document)
+    assert replay_module.replay_dynamic_report(legacy_path, library) == "ok"

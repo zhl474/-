@@ -59,6 +59,40 @@ def test_invalid_terminal_input_can_then_choose_fixed_yaml_fallback():
     assert "输入无效" in output.getvalue()
 
 
+def test_speed_mismatch_prompt_can_explicitly_continue_dynamic_execution():
+    output = io.StringIO()
+    stream = _FakeTty("c\n")
+
+    choice = prompt_dynamic_selection_failure(
+        "速度不一致",
+        allow_continue=True,
+        input_stream=stream,
+        output_stream=output,
+        wait_readable=lambda *_args: ([stream], [], []),
+    )
+
+    assert choice == "continue_dynamic"
+    assert "[c]" in output.getvalue()
+    assert "实际机械臂速度保持当前配置" in output.getvalue()
+
+
+def test_other_failures_do_not_accept_continue_choice():
+    output = io.StringIO()
+    stream = _FakeTty("c\ns\n")
+
+    choice = prompt_dynamic_selection_failure(
+        "普通失败",
+        allow_continue=False,
+        input_stream=stream,
+        output_stream=output,
+        wait_readable=lambda *_args: ([stream], [], []),
+    )
+
+    assert choice == "stop"
+    assert "[c]" not in output.getvalue()
+    assert "输入无效" in output.getvalue()
+
+
 def test_atomic_json_and_sha256_roundtrip(tmp_path):
     path = tmp_path / "动态盘面选择报告.json"
     document = {"协议版本": 1, "结果": ["成功", 34]}

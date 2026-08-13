@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>operator_panel</name>
+  <version>0.1.0</version>
+  <description>单臂俄罗斯方块本地运行控制台</description>
+  <maintainer email="zhl@todo.todo">zhl</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>camera</depend>
+  <depend>competition</depend>
+  <depend>control</depend>
+  <depend>cv_bridge</depend>
+  <depend>image_process</depend>
+  <depend>rosgraph</depend>
+  <depend>rosgraph_msgs</depend>
+  <depend>roslaunch</depend>
+  <depend>rosnode</depend>
+  <depend>rospy</depend>
+  <depend>rosservice</depend>
+  <depend>sensor_msgs</depend>
+</package>

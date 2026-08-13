@@ -22,6 +22,12 @@ CALIBRATION_LAUNCH_PATH = os.path.join(
     "launch",
     "calibration.launch",
 )
+PERCEPTION_LAUNCH_PATH = os.path.join(
+    SRC_DIR,
+    "competition",
+    "launch",
+    "perception.launch",
+)
 HARDWARE_LAUNCH_PATH = os.path.join(
     SRC_DIR,
     "competition",
@@ -49,13 +55,26 @@ def test_task_launches_do_not_own_hardware_nodes_and_share_session_id():
         competition_launch_text = file_handle.read()
     with open(CALIBRATION_LAUNCH_PATH, "r", encoding="utf-8") as file_handle:
         calibration_launch_text = file_handle.read()
+    with open(PERCEPTION_LAUNCH_PATH, "r", encoding="utf-8") as file_handle:
+        perception_launch_text = file_handle.read()
 
     for launch_text in (competition_launch_text, calibration_launch_text):
         assert 'pkg="camera"' not in launch_text
         assert 'pkg="control"' not in launch_text
-        assert launch_text.count(
+        assert '<include file="$(find competition)/launch/perception.launch">' in launch_text
+        assert (
+            '<arg name="experiment_session_id" value="$(arg experiment_session_id)"/>'
+            in launch_text
+        )
+        assert (
             '<param name="experiment_session_id" value="$(arg experiment_session_id)"/>'
-        ) == 2
+            in launch_text
+        )
+
+    assert (
+        '<param name="experiment_session_id" value="$(arg experiment_session_id)"/>'
+        in perception_launch_text
+    )
 
     assert "depth_max_age_sec" not in competition_launch_text
     assert "depth_batch_max_span_sec" not in competition_launch_text

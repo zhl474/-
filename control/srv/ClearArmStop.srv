@@ -1,0 +1,4 @@
+---
+bool success
+bool stop_latched
+string message

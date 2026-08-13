@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=单臂俄罗斯方块控制台
+Comment=启动本地项目驾驶舱，不自动连接硬件
+Exec=/bin/bash /home/zhl/SingleArmTetris/SingleArmTetris/src/operator_panel/scripts/start_operator_panel.sh
+Icon=/home/zhl/SingleArmTetris/SingleArmTetris/src/operator_panel/static/operator-panel.svg
+Path=/home/zhl/SingleArmTetris/SingleArmTetris/src
+Terminal=false
+StartupNotify=false
+DBusActivatable=false
+Categories=Utility;

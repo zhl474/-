@@ -22,6 +22,7 @@ V5_BOARD_LIBRARY_FORMAT_VERSION = 1
 V5_BOARD_TARGET_COUNT = 34
 V5_TARGETS_PER_CATEGORY = 5
 V5_REGION_MASK_ORDER = (1, 2, 4, 8, 3, 12, 5, 10, 15)
+V5_L_CATEGORIES = frozenset(("L_blue", "L_yellow"))
 
 # V5 搜索内部以逆时针方向为正，现有机械臂接口要求顺时针为正。
 V5_CLOCKWISE_ANGLE_OUTPUT_MAP = {
@@ -135,6 +136,56 @@ def _as_bounded_integer(
     if integer < minimum or integer > maximum:
         raise ValueError(f"{label}超出范围 [{minimum}, {maximum}]: {integer}")
     return integer
+
+
+def _l_placement_reference(
+    cells: np.ndarray,
+    label: str,
+) -> Tuple[float, float]:
+    """由 L 方块占格恢复机械臂实际使用的长边中间格。"""
+    # V5 cells 的每一项顺序为 [col, row]，返回值统一为 (row, col)。
+    cell_tuples = tuple((int(cell[0]), int(cell[1])) for cell in cells)
+    if len(set(cell_tuples)) != 4:
+        raise ValueError(f"{label}的 L 方块 cells 必须包含 4 个不同格子")
+
+    candidates = []
+    rows_to_cols: Dict[int, list] = {}
+    cols_to_rows: Dict[int, list] = {}
+    for col, row in cell_tuples:
+        rows_to_cols.setdefault(row, []).append(col)
+        cols_to_rows.setdefault(col, []).append(row)
+
+    for row, cols in rows_to_cols.items():
+        sorted_cols = sorted(cols)
+        if len(sorted_cols) == 3 and sorted_cols == list(
+            range(sorted_cols[0], sorted_cols[0] + 3)
+        ):
+            candidates.append((float(row), float(sorted_cols[1])))
+    for col, rows in cols_to_rows.items():
+        sorted_rows = sorted(rows)
+        if len(sorted_rows) == 3 and sorted_rows == list(
+            range(sorted_rows[0], sorted_rows[0] + 3)
+        ):
+            candidates.append((float(sorted_rows[1]), float(col)))
+
+    if len(candidates) != 1:
+        raise ValueError(
+            f"{label}无法从 cells 唯一确定 L 方块三格长边的中间格"
+        )
+    return candidates[0]
+
+
+def _runtime_placement_reference(
+    category: str,
+    catalog_row: float,
+    catalog_col: float,
+    cells: np.ndarray,
+    label: str,
+) -> Tuple[float, float]:
+    """返回实际摆放参考点；L 方块不能使用包围盒几何中心。"""
+    if category in V5_L_CATEGORIES:
+        return _l_placement_reference(cells, label)
+    return float(catalog_row), float(catalog_col)
 
 
 def _catalog_signature_order(
@@ -253,12 +304,23 @@ def _parse_catalog(catalog_path: Path) -> Tuple[Dict[str, np.ndarray], Tuple[Tup
         ):
             raise ValueError(f"placement {pid} cells 必须是 uint8 范围内的整数")
 
+        numeric_cells_uint8 = numeric_cells.astype(np.uint8)
+        runtime_row, runtime_col = _runtime_placement_reference(
+            category,
+            row,
+            col,
+            numeric_cells_uint8,
+            f"placement {pid}",
+        )
+
         placement_category[pid] = category_to_index[category]
-        placement_row[pid] = row
-        placement_col[pid] = col
+        # catalog 的 row/col 是包围盒中心；L 方块必须改用长边中间格，
+        # 才与视觉抓取参考点和固定 task_layout.yaml 保持一致。
+        placement_row[pid] = runtime_row
+        placement_col[pid] = runtime_col
         placement_yaw[pid] = V5_CLOCKWISE_ANGLE_OUTPUT_MAP[internal_angle]
         placement_region_mask[pid] = region_mask
-        placement_cells[pid] = numeric_cells.astype(np.uint8)
+        placement_cells[pid] = numeric_cells_uint8
 
     if seen_pids != set(range(placement_count)):
         raise ValueError("placement ID 必须从 0 开始连续，才能直接作为查表下标")
@@ -609,6 +671,31 @@ def _validate_loaded_arrays(arrays: Mapping[str, np.ndarray]) -> V5BoardLibrary:
     )
     if not np.all(valid_masks):
         raise ValueError("V5 盘面库 placement_region_mask 包含未知值")
+
+    # 旧版 NPZ 把 L 方块包围盒中心误当作摆放点，会产生约半格（约 10 mm）
+    # 的系统偏移。加载阶段显式拒绝旧数据，避免代码更新后仍静默执行坏盘面。
+    for pid in range(placement_count):
+        category = category_names[int(arrays["placement_category"][pid])]
+        if category not in V5_L_CATEGORIES:
+            continue
+        expected_row, expected_col = _l_placement_reference(
+            arrays["placement_cells"][pid],
+            f"V5 盘面库 placement {pid}",
+        )
+        actual_row = float(arrays["placement_row"][pid])
+        actual_col = float(arrays["placement_col"][pid])
+        if not np.allclose(
+            (actual_row, actual_col),
+            (expected_row, expected_col),
+            rtol=0.0,
+            atol=1e-6,
+        ):
+            raise ValueError(
+                f"V5 盘面库 placement {pid} 的 L 方块摆放参考点错误："
+                f"实际=({actual_row}, {actual_col})，"
+                f"应为长边中间格=({expected_row}, {expected_col})；"
+                "请重新运行转换V5盘面库.py"
+            )
 
     pids = arrays["board_target_pid"]
     if np.any(pids < -1) or np.any(pids >= placement_count):

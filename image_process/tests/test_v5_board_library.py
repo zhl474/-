@@ -38,9 +38,27 @@ def _write_small_v5_source(directory: Path):
     placements = []
     internal_angles = (0, 90, 180, -90, 0)
     masks = (1, 2, 4, 8, 15)
-    for category_index, category in enumerate(V5_CATEGORY_ORDER):
+    # 四种形态分别覆盖 L 长边朝横向/纵向及参考点的正负半格修正。
+    l_cells_by_orientation = (
+        [[1, 1], [2, 1], [3, 1], [3, 2]],
+        [[1, 1], [1, 2], [1, 3], [2, 1]],
+        [[1, 1], [1, 2], [2, 2], [3, 2]],
+        [[1, 3], [2, 1], [2, 2], [2, 3]],
+    )
+    for category in V5_CATEGORY_ORDER:
         for local_index in range(5):
             pid = len(placements)
+            if category in ("L_yellow", "L_blue"):
+                cells = l_cells_by_orientation[local_index % 4]
+            else:
+                col_offset = local_index * 2
+                cells = [
+                    [1 + col_offset, 1],
+                    [2 + col_offset, 1],
+                    [1 + col_offset, 2],
+                    [2 + col_offset, 2],
+                ]
+            cell_array = np.asarray(cells, dtype=float)
             placements.append(
                 {
                     "id": pid,
@@ -48,9 +66,14 @@ def _write_small_v5_source(directory: Path):
                     "angle_deg_internal": internal_angles[local_index],
                     # 故意写入旧的错误输出，转换器不应信任该字段。
                     "angle_deg": internal_angles[local_index],
-                    "row": float(category_index + 1),
-                    "col": float(local_index + 1),
-                    "cells": [[1, 1], [2, 1], [1, 2], [2, 2]],
+                    # 与正式 catalog 一样保存包围盒中心；L 的运行参考点由 cells 恢复。
+                    "row": float(
+                        (np.min(cell_array[:, 1]) + np.max(cell_array[:, 1])) / 2.0
+                    ),
+                    "col": float(
+                        (np.min(cell_array[:, 0]) + np.max(cell_array[:, 0])) / 2.0
+                    ),
+                    "cells": cells,
                     "region_mask": masks[local_index],
                 }
             )
@@ -156,6 +179,26 @@ def test_conversion_reorders_categories_derives_clockwise_angles_and_sorts(tmp_p
     assert int(library.placement_yaw_clockwise_deg[1]) == -90
     assert int(library.placement_yaw_clockwise_deg[3]) == 90
 
+    expected_l_references = (
+        (1.0, 2.0),
+        (2.0, 1.0),
+        (2.0, 2.0),
+        (2.0, 2.0),
+        (1.0, 2.0),
+    )
+    for category in ("L_yellow", "L_blue"):
+        category_pids = [
+            item["id"] for item in placements if item["category"] == category
+        ]
+        actual_references = tuple(
+            (
+                float(library.placement_row[pid]),
+                float(library.placement_col[pid]),
+            )
+            for pid in category_pids
+        )
+        assert actual_references == expected_l_references
+
 
 def test_loader_rejects_wrong_version_and_bad_pid(tmp_path):
     _write_small_v5_source(tmp_path)
@@ -179,6 +222,19 @@ def test_loader_rejects_wrong_version_and_bad_pid(tmp_path):
     with pytest.raises(ValueError, match="board_target_pid 越界"):
         load_v5_board_library(bad_pid_path)
 
+    l_category_index = library.category_names.index("L_yellow")
+    l_pid = int(np.flatnonzero(library.placement_category == l_category_index)[0])
+    wrong_l_rows = np.array(library.placement_row, copy=True)
+    wrong_l_rows[l_pid] += 0.5
+    wrong_l_reference_path = tmp_path / "wrong_l_reference.npz"
+    _save_library_arrays(
+        wrong_l_reference_path,
+        library,
+        placement_row=wrong_l_rows,
+    )
+    with pytest.raises(ValueError, match="L 方块摆放参考点错误"):
+        load_v5_board_library(wrong_l_reference_path)
+
 
 @pytest.mark.skipif(not OFFICIAL_LIBRARY_PATH.exists(), reason="当前工作区没有正式 V5 NPZ")
 def test_current_library_counts_and_task_layout_angle_equivalence():
@@ -190,7 +246,9 @@ def test_current_library_counts_and_task_layout_angle_equivalence():
         (float(row), float(col))
         for row, col in zip(library.placement_row, library.placement_col)
     }
-    assert len(unique_centers) == 365
+    # 旧库的 365 是包围盒几何中心数量；L 改用实际长边中间格后，
+    # 现场需要转换的不同摆放参考点共有 501 个，规模仍然很小。
+    assert len(unique_centers) == 501
 
     targets = load_task_layout(str(PACKAGE_DIRECTORY / "config" / "task_layout.yaml"))
     for target in targets:
@@ -212,6 +270,8 @@ def test_current_library_counts_and_task_layout_angle_equivalence():
             0.0,
         )
         assert delta == pytest.approx(0.0)
+        assert float(library.placement_row[pid]) == pytest.approx(target["row"])
+        assert float(library.placement_col[pid]) == pytest.approx(target["col"])
 
 
 if __name__ == "__main__":

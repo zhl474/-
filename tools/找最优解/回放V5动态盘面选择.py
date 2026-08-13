@@ -229,7 +229,8 @@ def _dynamic_targets(library, relaxed_result, center_by_key):
 def replay_dynamic_report(path, library):
     """使用新报告保存的原始像素/TCP/格点数据精确回放全链路。"""
     document = _read_json(path)
-    if document.get("协议版本") != 1:
+    protocol_version = document.get("协议版本")
+    if protocol_version not in (1, 2):
         raise ValueError(f"不支持的动态报告版本：{path}")
     expected_library_hash = document["文件身份"]["V5盘面库SHA256"]
     if library.source_sha256 != expected_library_hash:
@@ -312,9 +313,22 @@ def replay_dynamic_report(path, library):
             comparison_returned_candidates=int(
                 runtime["comparison_returned_candidates"]
             ),
+            comparison_worker_count=int(
+                runtime.get("comparison_worker_count", 1)
+            ),
+            # V1 只对低 Beam 第一名做确认；V2 才复核前 K 名。
+            confirmation_candidate_k=int(
+                runtime.get(
+                    "confirmation_candidate_k",
+                    1 if protocol_version == 1 else 10,
+                )
+            ),
             confirmation_beam_width=int(runtime["confirmation_beam_width"]),
             confirmation_returned_candidates=int(
                 runtime["confirmation_returned_candidates"]
+            ),
+            confirmation_worker_count=int(
+                runtime.get("confirmation_worker_count", 1)
             ),
             soft_time_budget_sec=float(runtime["soft_time_budget_sec"]),
         ),
@@ -327,6 +341,9 @@ def replay_dynamic_report(path, library):
         _dynamic_optimizer_config(runtime),
         motion_model,
     )
+    comparison_key = (
+        "20盘比较" if protocol_version == 1 else "跨盘面低Beam比较"
+    )
     reported_attempts = [
         (
             item["盘面ID"],
@@ -336,7 +353,7 @@ def replay_dynamic_report(path, library):
             tuple(item["PID执行顺序"]),
             tuple(item["source执行顺序"]),
         )
-        for item in document["20盘比较"]
+        for item in document[comparison_key]
     ]
     actual_attempts = [
         (
@@ -351,6 +368,31 @@ def replay_dynamic_report(path, library):
     ]
     if reported_attempts != actual_attempts:
         raise RuntimeError(f"精确回放的跨盘面比较结果不一致：{path}")
+    if protocol_version == 2:
+        reported_confirmations = [
+            (
+                item["盘面ID"],
+                bool(item["成功"]),
+                item["简化成本秒"],
+                item["舵机重放总时间秒"],
+                tuple(item["PID执行顺序"]),
+                tuple(item["source执行顺序"]),
+            )
+            for item in document["高Beam复核"]
+        ]
+        actual_confirmations = [
+            (
+                item.board_id,
+                item.succeeded,
+                item.simplified_cost_seconds,
+                item.servo_replay_total_seconds,
+                item.target_pid_sequence,
+                item.source_id_sequence,
+            )
+            for item in decision.confirmation_attempts
+        ]
+        if reported_confirmations != actual_confirmations:
+            raise RuntimeError(f"精确回放的高Beam复核结果不一致：{path}")
     exact_checks = {
         "board_id": decision.board_id,
         "decision_fingerprint": decision.decision_fingerprint,

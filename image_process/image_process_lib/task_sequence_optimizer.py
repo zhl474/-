@@ -254,6 +254,10 @@ class _BeamNode:
     prefix_score: float
 
 
+class MotionModelSpeedMismatchError(ValueError):
+    """路程时间标定速度与当前执行速度不一致。"""
+
+
 def validate_motion_model_speeds(
     motion_model: ArmMotionTimeModel,
     arm_speed: float,
@@ -265,7 +269,7 @@ def validate_motion_model_speeds(
     if any(not math.isfinite(value) for value in values):
         raise ValueError("机械臂速度必须是有限数值")
     if any(abs(value - expected) > 1e-9 for value in values):
-        raise ValueError(
+        raise MotionModelSpeedMismatchError(
             "路程时间标定速度与当前执行速度不一致："
             f"标定={expected:g}，arm_speed={values[0]:g}，"
             f"pick_approach_speed={values[1]:g}"

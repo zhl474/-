@@ -27,14 +27,16 @@ def test_current_execution_and_servo_configs_are_valid():
     assert execution.arm_speed > 0
     assert execution.servo_speed > 0
     assert execution.pick_approach_clearance_mm == 3.0
-    assert execution.pick_approach_speed == 100
+    # 运行参数允许由控制台按现场需要调整，这里只验证加载和取值范围。
+    assert execution.pick_approach_speed > 0
     assert execution.pick_retreat_blend_radius_mm == 5.0
     assert execution.minimum_tcp_z_mm == 165.0
     assert isinstance(execution.calibration_mode, bool)
     assert isinstance(execution.visual_servo_enabled, bool)
     assert execution.block_error_threshold_px == 1.0
     assert execution.tray_error_threshold_px == 0.5
-    assert execution.post_success_sample_frames == 20
+    assert isinstance(execution.post_success_sample_frames, int)
+    assert execution.post_success_sample_frames >= 0
     assert len(execution.shooting_pose) == 6
     assert not hasattr(execution, "lift_z")
     assert np.asarray(visual["pixel_to_robot_matrix"]).shape == (2, 2)

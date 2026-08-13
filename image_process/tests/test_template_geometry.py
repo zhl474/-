@@ -28,6 +28,7 @@ from image_process_lib.block_servo_detector import (
     _segment_roi_by_local_rgb_color,
     detect_block_with_high_prior_roi,
 )
+from image_process_lib.final_board_selector import FinalBoardSelectorConfig
 from image_process_lib.template_config import (
     load_color_segmentation_config,
     load_template_geometry,
@@ -812,9 +813,27 @@ def test_runtime_initialization_never_creates_depth_client(monkeypatch, tmp_path
     assert subscriber_calls[0][0][0] == "/camera/image_rect"
     assert processor.stable_world_points_client is None
     assert processor.high_tcp_localizer is not None
-    assert processor.dynamic_board_selection_mode == "shadow"
+    with open(image_node_module.PERCEPTION_CONFIG_PATH, "r", encoding="utf-8") as config_file:
+        dynamic_config = (yaml.safe_load(config_file) or {})[
+            "dynamic_board_selection"
+        ]
+    assert processor.dynamic_board_selection_mode == dynamic_config["mode"]
     assert processor.dynamic_board_library.board_count == 8460
     assert processor.dynamic_board_library.placement_count == 2021
+    assert processor.dynamic_board_comparison_returned_candidates == 1
+    assert processor.dynamic_board_comparison_worker_count == 12
+    assert processor.dynamic_board_confirmation_candidate_k == 10
+    assert processor.dynamic_board_confirmation_worker_count == 10
+    assert processor.dynamic_final_board_selector.config == FinalBoardSelectorConfig(
+        comparison_beam_width=1000,
+        comparison_returned_candidates=1,
+        comparison_worker_count=12,
+        confirmation_candidate_k=10,
+        confirmation_beam_width=5000,
+        confirmation_returned_candidates=20,
+        confirmation_worker_count=10,
+        soft_time_budget_sec=10.0,
+    )
 
 
 def test_dynamic_execute_initialization_rejects_enabled_visual_servo(
@@ -857,21 +876,20 @@ def test_formal_launch_files_explicitly_use_rectified_image_topic():
     for launch_name in ("competition.launch", "calibration.launch"):
         launch_path = os.path.join(src_dir, "competition", "launch", launch_name)
         text = open(launch_path, "r", encoding="utf-8").read()
-        assert '<param name="image_topic" value="/camera/image_rect"/>' in text
+        assert '<include file="$(find competition)/launch/perception.launch">' in text
+    perception_path = os.path.join(src_dir, "competition", "launch", "perception.launch")
+    perception_text = open(perception_path, "r", encoding="utf-8").read()
+    assert '<param name="image_topic" value="/camera/image_rect"/>' in perception_text
 
 
 @pytest.mark.parametrize(
-    ("visual_servo_enabled", "expected_safety_offset"),
-    [
-        (True, (0.0, 0.0)),
-        (False, (-94.1, -13.8)),
-    ],
+    "visual_servo_enabled",
+    [True, False],
 )
 def test_image_node_selects_high_tcp_safety_offset_from_servo_mode(
     monkeypatch,
     tmp_path,
     visual_servo_enabled,
-    expected_safety_offset,
 ):
     module = _load_process_module_with_stubs(
         monkeypatch,
@@ -889,6 +907,16 @@ def test_image_node_selects_high_tcp_safety_offset_from_servo_mode(
         encoding="utf-8",
     )
     monkeypatch.setattr(image_node_module, "EXECUTION_CONFIG_PATH", str(execution_path))
+    original_get_param = image_node_module.rospy.get_param
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "get_param",
+        lambda name, default=None: (
+            "disabled"
+            if name == "~dynamic_board_selection_mode"
+            else original_get_param(name, default)
+        ),
+    )
     _stub_image_processor_runtime(monkeypatch, image_node_module)
     received = {}
 
@@ -902,6 +930,12 @@ def test_image_node_selects_high_tcp_safety_offset_from_servo_mode(
 
     with open(image_node_module.PERCEPTION_CONFIG_PATH, "r", encoding="utf-8") as config_file:
         localization_config = (yaml.safe_load(config_file) or {})["high_tcp_localization"]
+    with open(image_node_module.VISUAL_SERVO_CONFIG_PATH, "r", encoding="utf-8") as config_file:
+        configured_offset = tuple(
+            float(value)
+            for value in (yaml.safe_load(config_file) or {})["camera_to_sucker_offset_mm"]
+        )
+    expected_safety_offset = (0.0, 0.0) if visual_servo_enabled else configured_offset
 
     assert processor.visual_servo_enabled is visual_servo_enabled
     assert processor.high_tcp_safety_xy_offset == expected_safety_offset
@@ -2691,3 +2725,50 @@ def test_dynamic_execute_failure_terminal_choice_routes_safely(
     else:
         assert "已停止" in response.message
         assert processor.dynamic_reports[-1]["human_failure_choice"] == "stop"
+
+
+def test_dynamic_execute_speed_mismatch_can_be_confirmed_for_low_speed_test(
+    monkeypatch,
+):
+    module = _load_process_module_with_stubs(
+        monkeypatch,
+        "process_dynamic_speed_mismatch_continue",
+    )
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    processor = _make_dynamic_routing_processor(module, "execute")
+    decision = types.SimpleNamespace(
+        tasks=("低速动态任务",),
+        board_id="v5_g00002_l00",
+        decision_fingerprint="b" * 64,
+    )
+    calls = []
+
+    def run_dynamic(*_args, **kwargs):
+        calls.append(dict(kwargs))
+        if not kwargs.get("allow_motion_speed_mismatch", False):
+            raise image_node_module.MotionModelSpeedMismatchError(
+                "路程时间标定速度与当前执行速度不一致"
+            )
+        return {"decision": decision}
+
+    prompt_calls = []
+
+    def choose_continue(*_args, **kwargs):
+        prompt_calls.append(dict(kwargs))
+        return "continue_dynamic"
+
+    processor._run_dynamic_board_selection = run_dynamic
+    monkeypatch.setattr(
+        image_node_module,
+        "prompt_dynamic_selection_failure",
+        choose_continue,
+    )
+
+    response = processor._prepare_task_locked(types.SimpleNamespace(advanced=False))
+
+    assert response.success is True
+    assert processor.task_targets == ["低速动态任务"]
+    assert calls == [{}, {"allow_motion_speed_mismatch": True}]
+    assert prompt_calls[0]["allow_continue"] is True
+    assert processor.dynamic_reports[-1]["human_failure_choice"] == "continue_dynamic"
+    assert "人工忽略" in response.message

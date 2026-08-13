@@ -1,0 +1,9 @@
+---
+bool success
+bool stop_latched
+bool motion_state_known
+bool motion_done
+int8 commanded_suction_state
+bool servo_target_known
+float64 servo_target_angle_deg
+string message

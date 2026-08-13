@@ -76,6 +76,7 @@ from image_process_lib.final_board_selector import (
     FinalBoardSelectorConfig,
 )
 from image_process_lib.task_sequence_optimizer import (
+    MotionModelSpeedMismatchError,
     TaskSequenceOptimizerConfig,
     build_task_plan_report,
     decide_optimizer_mode,
@@ -621,11 +622,20 @@ class ImageProcessor:
         self.dynamic_board_comparison_returned_candidates = positive_dynamic_int(
             "comparison_returned_candidates", 1
         )
+        self.dynamic_board_comparison_worker_count = positive_dynamic_int(
+            "comparison_worker_count", 12
+        )
+        self.dynamic_board_confirmation_candidate_k = positive_dynamic_int(
+            "confirmation_candidate_k", 10
+        )
         self.dynamic_board_confirmation_beam_width = positive_dynamic_int(
-            "confirmation_beam_width", 50000
+            "confirmation_beam_width", 5000
         )
         self.dynamic_board_confirmation_returned_candidates = positive_dynamic_int(
             "confirmation_returned_candidates", 20
+        )
+        self.dynamic_board_confirmation_worker_count = positive_dynamic_int(
+            "confirmation_worker_count", 10
         )
 
         def finite_dynamic_seconds(name, default, allow_zero):
@@ -672,10 +682,15 @@ class ImageProcessor:
             "comparison_returned_candidates": (
                 self.dynamic_board_comparison_returned_candidates
             ),
+            "comparison_worker_count": self.dynamic_board_comparison_worker_count,
+            "confirmation_candidate_k": (
+                self.dynamic_board_confirmation_candidate_k
+            ),
             "confirmation_beam_width": self.dynamic_board_confirmation_beam_width,
             "confirmation_returned_candidates": (
                 self.dynamic_board_confirmation_returned_candidates
             ),
+            "confirmation_worker_count": self.dynamic_board_confirmation_worker_count,
             "soft_time_budget_sec": self.dynamic_board_soft_time_budget_sec,
             "failure_prompt_timeout_sec": self.dynamic_board_failure_prompt_timeout_sec,
         }
@@ -718,11 +733,20 @@ class ImageProcessor:
                     comparison_returned_candidates=(
                         self.dynamic_board_comparison_returned_candidates
                     ),
+                    comparison_worker_count=(
+                        self.dynamic_board_comparison_worker_count
+                    ),
+                    confirmation_candidate_k=(
+                        self.dynamic_board_confirmation_candidate_k
+                    ),
                     confirmation_beam_width=(
                         self.dynamic_board_confirmation_beam_width
                     ),
                     confirmation_returned_candidates=(
                         self.dynamic_board_confirmation_returned_candidates
+                    ),
+                    confirmation_worker_count=(
+                        self.dynamic_board_confirmation_worker_count
                     ),
                     soft_time_budget_sec=self.dynamic_board_soft_time_budget_sec,
                 ),
@@ -1489,8 +1513,13 @@ class ImageProcessor:
             )
         return targets
 
-    def _run_dynamic_board_selection(self, observed_blocks, image_shape):
-        """完整执行粗筛、relaxed、20 盘比较和唯一盘面确认。"""
+    def _run_dynamic_board_selection(
+        self,
+        observed_blocks,
+        image_shape,
+        allow_motion_speed_mismatch=False,
+    ):
+        """完整执行粗筛、relaxed、低 Beam 比较和前 K 名高 Beam 复核。"""
         if (
             self.dynamic_board_candidate_selector is None
             or self.dynamic_final_board_selector is None
@@ -1502,6 +1531,9 @@ class ImageProcessor:
             "relaxed_result": None,
             "target_center_cache": (),
             "decision": None,
+            "motion_speed_mismatch_override": bool(
+                allow_motion_speed_mismatch
+            ),
         }
         self._current_dynamic_board_run = state
         tray_center = interpolate_grid_point(
@@ -1543,11 +1575,21 @@ class ImageProcessor:
             center_cache,
         )
         motion_model = get_default_arm_motion_time_model()
-        validate_motion_model_speeds(
-            motion_model,
-            self.arm_speed,
-            self.pick_approach_speed,
-        )
+        if allow_motion_speed_mismatch:
+            rospy.logwarn(
+                "已人工确认忽略路程时间标定速度不一致："
+                "标定=%g，arm_speed=%g，pick_approach_speed=%g。"
+                "实际执行速度不会被修改，但盘面预测时间不可视为真实秒数。",
+                float(motion_model.move_speed_percent),
+                self.arm_speed,
+                self.pick_approach_speed,
+            )
+        else:
+            validate_motion_model_speeds(
+                motion_model,
+                self.arm_speed,
+                self.pick_approach_speed,
+            )
         self.dynamic_motion_model_source_path = getattr(
             motion_model,
             "source_path",
@@ -1579,6 +1621,34 @@ class ImageProcessor:
                     attempt.error_message,
                 )
         rospy.loginfo(
+            "V5低Beam比较完成：%d 张，实际线程=%d，墙钟耗时=%.3f s",
+            len(decision.comparison_attempts),
+            decision.comparison_worker_count,
+            decision.comparison_elapsed_seconds,
+        )
+        for attempt in decision.confirmation_attempts:
+            if attempt.succeeded:
+                rospy.loginfo(
+                    "V5高Beam复核 %s：简化=%.6f s，舵机重放=%.6f s，"
+                    "耗时=%.3f s",
+                    attempt.board_id,
+                    attempt.simplified_cost_seconds,
+                    attempt.servo_replay_total_seconds,
+                    attempt.elapsed_seconds,
+                )
+            else:
+                rospy.logwarn(
+                    "V5高Beam复核 %s 失败：%s",
+                    attempt.board_id,
+                    attempt.error_message,
+                )
+        rospy.loginfo(
+            "V5高Beam复核完成：%d 张，实际线程=%d，墙钟耗时=%.3f s",
+            len(decision.confirmation_attempts),
+            decision.confirmation_worker_count,
+            decision.confirmation_elapsed_seconds,
+        )
+        rospy.loginfo(
             "V5唯一盘面=%s，指纹=%s，总耗时=%.3f s",
             decision.board_id,
             decision.decision_fingerprint,
@@ -1602,6 +1672,7 @@ class ImageProcessor:
         human_failure_choice="",
         actual_planner_message="",
         comparison_attempts=(),
+        confirmation_attempts=(),
     ):
         """尽力原子写入动态报告；报告失败不改变已选任务。"""
         report_dir = self.task_plan_report_dir
@@ -1648,6 +1719,9 @@ class ImageProcessor:
             )
             runtime_config["arm_speed"] = self.arm_speed
             runtime_config["pick_approach_speed"] = self.pick_approach_speed
+            runtime_config["motion_speed_mismatch_override"] = bool(
+                state.get("motion_speed_mismatch_override", False)
+            )
             decision = state.get("decision")
             document = build_dynamic_board_selection_report(
                 mode=self.dynamic_board_selection_mode,
@@ -1665,6 +1739,7 @@ class ImageProcessor:
                 relaxed_result=state.get("relaxed_result"),
                 decision=decision,
                 comparison_attempts=comparison_attempts,
+                confirmation_attempts=confirmation_attempts,
                 error_message=error_message,
                 human_failure_choice=human_failure_choice,
                 actual_planner_message=actual_planner_message,
@@ -2199,7 +2274,16 @@ class ImageProcessor:
                         actual_planner_message=planner_message,
                     )
                 elif dynamic_mode == "execute":
-                    attempts = getattr(dynamic_error, "attempts", ())
+                    comparison_attempts = getattr(
+                        dynamic_error,
+                        "comparison_attempts",
+                        getattr(dynamic_error, "attempts", ()),
+                    )
+                    confirmation_attempts = getattr(
+                        dynamic_error,
+                        "confirmation_attempts",
+                        (),
+                    )
                     failure_choice = prompt_dynamic_selection_failure(
                         str(dynamic_error),
                         getattr(
@@ -2207,59 +2291,124 @@ class ImageProcessor:
                             "dynamic_board_failure_prompt_timeout_sec",
                             60.0,
                         ),
+                        allow_continue=isinstance(
+                            dynamic_error,
+                            MotionModelSpeedMismatchError,
+                        ),
                     )
-                    if failure_choice != "fixed_yaml":
+                    if failure_choice == "continue_dynamic":
+                        try:
+                            # 只有速度不一致会展示此选项；重跑时仅跳过该校验。
+                            dynamic_state = self._run_dynamic_board_selection(
+                                observed_blocks,
+                                image.shape[:2],
+                                allow_motion_speed_mismatch=True,
+                            )
+                        except Exception as continue_exc:
+                            continue_comparison_attempts = getattr(
+                                continue_exc,
+                                "comparison_attempts",
+                                getattr(continue_exc, "attempts", ()),
+                            )
+                            continue_confirmation_attempts = getattr(
+                                continue_exc,
+                                "confirmation_attempts",
+                                (),
+                            )
+                            self._save_dynamic_board_report(
+                                observed_blocks,
+                                image.shape[:2],
+                                outcome="速度不一致人工继续，但动态重试失败",
+                                error_message=(
+                                    f"原始失败：{dynamic_error}；"
+                                    f"忽略速度校验后失败：{continue_exc}"
+                                ),
+                                human_failure_choice="continue_dynamic",
+                                comparison_attempts=(
+                                    continue_comparison_attempts
+                                ),
+                                confirmation_attempts=(
+                                    continue_confirmation_attempts
+                                ),
+                            )
+                            raise DynamicBoardSelectionError(
+                                "V5 动态盘面忽略速度校验后仍失败："
+                                f"{continue_exc}",
+                                continue_comparison_attempts,
+                                continue_confirmation_attempts,
+                            ) from continue_exc
+                        decision = dynamic_state["decision"]
+                        self.task_targets = list(decision.tasks)
+                        layout_message = f"V5 动态盘面 {decision.board_id}"
+                        planner_message = (
+                            "动态 execute 已人工忽略时间标定速度不一致，"
+                            f"确认路径，指纹={decision.decision_fingerprint}"
+                        )
+                        self._save_dynamic_board_report(
+                            observed_blocks,
+                            image.shape[:2],
+                            outcome="速度不一致人工确认，执行动态盘面",
+                            error_message=str(dynamic_error),
+                            human_failure_choice="continue_dynamic",
+                            actual_planner_message=planner_message,
+                        )
+                    elif failure_choice != "fixed_yaml":
                         self._save_dynamic_board_report(
                             observed_blocks,
                             image.shape[:2],
                             outcome="execute失败，停止本轮",
                             error_message=str(dynamic_error),
                             human_failure_choice="stop",
-                            comparison_attempts=attempts,
+                            comparison_attempts=comparison_attempts,
+                            confirmation_attempts=confirmation_attempts,
                         )
                         raise DynamicBoardSelectionError(
                             "V5 动态盘面选择失败，本轮已停止："
                             f"{dynamic_error}",
-                            attempts,
+                            comparison_attempts,
+                            confirmation_attempts,
                         )
-                    try:
-                        # 人工选择回退后重做固定盘面安全检查，不沿用旧结论。
-                        self._validate_high_task_safety(
-                            final_blocks,
-                            layout,
-                            "回退",
-                        )
-                        placement_targets = self._build_placement_targets(
-                            layout,
-                            image.shape[:2],
-                        )
-                        self.task_targets, fixed_message = self._plan_formal_tasks(
-                            observed_blocks,
-                            placement_targets,
-                        )
-                    except Exception as fallback_exc:
+                    else:
+                        try:
+                            # 人工选择回退后重做固定盘面安全检查，不沿用旧结论。
+                            self._validate_high_task_safety(
+                                final_blocks,
+                                layout,
+                                "回退",
+                            )
+                            placement_targets = self._build_placement_targets(
+                                layout,
+                                image.shape[:2],
+                            )
+                            self.task_targets, fixed_message = self._plan_formal_tasks(
+                                observed_blocks,
+                                placement_targets,
+                            )
+                        except Exception as fallback_exc:
+                            self._save_dynamic_board_report(
+                                observed_blocks,
+                                image.shape[:2],
+                                outcome="execute失败，固定YAML回退也失败",
+                                error_message=(
+                                    f"动态失败：{dynamic_error}；"
+                                    f"固定YAML回退失败：{fallback_exc}"
+                                ),
+                                human_failure_choice="fixed_yaml",
+                                comparison_attempts=comparison_attempts,
+                                confirmation_attempts=confirmation_attempts,
+                            )
+                            raise
+                        planner_message = f"动态 execute 失败，人工回退；{fixed_message}"
                         self._save_dynamic_board_report(
                             observed_blocks,
                             image.shape[:2],
-                            outcome="execute失败，固定YAML回退也失败",
-                            error_message=(
-                                f"动态失败：{dynamic_error}；"
-                                f"固定YAML回退失败：{fallback_exc}"
-                            ),
+                            outcome="execute失败，执行固定YAML回退",
+                            error_message=str(dynamic_error),
                             human_failure_choice="fixed_yaml",
-                            comparison_attempts=attempts,
+                            actual_planner_message=planner_message,
+                            comparison_attempts=comparison_attempts,
+                            confirmation_attempts=confirmation_attempts,
                         )
-                        raise
-                    planner_message = f"动态 execute 失败，人工回退；{fixed_message}"
-                    self._save_dynamic_board_report(
-                        observed_blocks,
-                        image.shape[:2],
-                        outcome="execute失败，执行固定YAML回退",
-                        error_message=str(dynamic_error),
-                        human_failure_choice="fixed_yaml",
-                        actual_planner_message=planner_message,
-                        comparison_attempts=attempts,
-                    )
                 else:
                     # disabled、shadow 和进阶任务均使用原固定规划链路。
                     try:
@@ -2287,7 +2436,12 @@ class ImageProcessor:
                                 ),
                                 comparison_attempts=getattr(
                                     dynamic_error,
-                                    "attempts",
+                                    "comparison_attempts",
+                                    getattr(dynamic_error, "attempts", ()),
+                                ),
+                                confirmation_attempts=getattr(
+                                    dynamic_error,
+                                    "confirmation_attempts",
                                     (),
                                 ),
                             )
@@ -2317,7 +2471,12 @@ class ImageProcessor:
                                 actual_planner_message=planner_message,
                                 comparison_attempts=getattr(
                                     dynamic_error,
-                                    "attempts",
+                                    "comparison_attempts",
+                                    getattr(dynamic_error, "attempts", ()),
+                                ),
+                                confirmation_attempts=getattr(
+                                    dynamic_error,
+                                    "confirmation_attempts",
                                     (),
                                 ),
                             )

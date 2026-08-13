@@ -3,7 +3,9 @@
 
 import math
 import os
+import threading
 import time
+import xmlrpc.client
 
 import numpy as np
 import rospy
@@ -12,14 +14,20 @@ from serial.tools import list_ports
 
 from akai_fr import AkaiElectricSucker, AkaiFr
 from control.srv import (
+    ClearArmStop,
+    ClearArmStopResponse,
     GetActualPose,
     GetActualPoseResponse,
+    GetControlStatus,
+    GetControlStatusResponse,
     MoveArm,
     MoveArmResponse,
     RotateTool,
     RotateToolResponse,
     SetSuction,
     SetSuctionResponse,
+    StopArm,
+    StopArmResponse,
 )
 
 
@@ -28,7 +36,22 @@ SRC_DIR = os.path.abspath(os.path.join(PACKAGE_DIR, ".."))
 DEFAULT_HAND_EYE_MATRIX = os.path.join(SRC_DIR, "camera", "config", "T_wrist2camera.npy")
 
 
+class _TimeoutTransport(xmlrpc.client.Transport):
+    """为高优先级停止连接设置独立超时，避免网络异常时永久阻塞。"""
+
+    def __init__(self, timeout_seconds):
+        super().__init__()
+        self.timeout_seconds = float(timeout_seconds)
+
+    def make_connection(self, host):
+        connection = super().make_connection(host)
+        connection.timeout = self.timeout_seconds
+        return connection
+
+
 class ControlNode:
+    SUCTION_UNKNOWN = -1
+
     def __init__(self):
         self.minimum_z = float(rospy.get_param("~minimum_z", 165.0))
         self.move_arm_timing_debug = bool(rospy.get_param("~move_arm_timing_debug", False))
@@ -40,7 +63,26 @@ class ControlNode:
         self.angular_speed_threshold = float(stability.get("angular_speed_threshold_deg_s", 3.0))
         self.position_tolerance = float(stability.get("position_tolerance_mm", 1.0))
         self.orientation_tolerance = float(stability.get("orientation_tolerance_deg", 0.5))
+        stop_motion = rospy.get_param("~stop_motion", {})
+        self.stop_rpc_timeout = float(stop_motion.get("rpc_timeout_seconds", 1.0))
+        self.stop_confirm_timeout = float(stop_motion.get("confirm_timeout_seconds", 2.0))
+        if self.stop_rpc_timeout <= 0.0 or self.stop_confirm_timeout <= 0.0:
+            raise ValueError("StopMotion 通信和确认超时必须大于 0")
+        self.state_lock = threading.RLock()
+        self.stop_latched = False
+        self.motion_active = False
+        self.commanded_suction_state = self.SUCTION_UNKNOWN
+        self.servo_target_known = False
+        self.servo_target_angle_deg = 0.0
         self.arm = AkaiFr()
+        self.robot_ip = str(
+            rospy.get_param(
+                "~robot_ip",
+                getattr(getattr(self.arm, "arm", None), "ip_address", "192.168.58.2"),
+            )
+        ).strip()
+        if not self.robot_ip:
+            raise ValueError("robot_ip 不能为空")
         hand_eye_matrix_path = rospy.get_param("~hand_eye_matrix", DEFAULT_HAND_EYE_MATRIX)
         wrist_to_camera = np.load(hand_eye_matrix_path)
         if wrist_to_camera.shape != (4, 4) or not np.all(np.isfinite(wrist_to_camera)):
@@ -58,6 +100,15 @@ class ControlNode:
         )
         self.motor_service = rospy.Service("/control/rotate_tool", RotateTool, self.rotate_tool)
         self.suction_service = rospy.Service("/control/set_suction", SetSuction, self.set_suction)
+        self.stop_arm_service = rospy.Service(
+            "/control/stop_arm", StopArm, self.stop_arm
+        )
+        self.clear_arm_stop_service = rospy.Service(
+            "/control/clear_arm_stop", ClearArmStop, self.clear_arm_stop
+        )
+        self.control_status_service = rospy.Service(
+            "/control/get_status", GetControlStatus, self.get_control_status
+        )
         rospy.on_shutdown(self.close)
         rospy.loginfo("机械臂、吸盘和舵机控制节点已启动")
 
@@ -76,6 +127,111 @@ class ControlNode:
     @staticmethod
     def _finite(values):
         return all(math.isfinite(float(value)) for value in values)
+
+    def _ensure_runtime_state(self):
+        """兼容不执行构造函数的单元测试，同时集中初始化运行状态。"""
+        if not hasattr(self, "state_lock"):
+            self.state_lock = threading.RLock()
+        defaults = {
+            "stop_latched": False,
+            "motion_active": False,
+            "commanded_suction_state": self.SUCTION_UNKNOWN,
+            "servo_target_known": False,
+            "servo_target_angle_deg": 0.0,
+            "robot_ip": "192.168.58.2",
+            "stop_rpc_timeout": 1.0,
+            "stop_confirm_timeout": 2.0,
+            "stable_poll_interval": 0.005,
+            "linear_speed_threshold": 3.0,
+            "angular_speed_threshold": 3.0,
+        }
+        for name, value in defaults.items():
+            if not hasattr(self, name):
+                setattr(self, name, value)
+
+    def _create_stop_rpc(self):
+        """每次创建独立 XML-RPC 连接，使停止命令不等待正在执行的 MoveL。"""
+        self._ensure_runtime_state()
+        transport = _TimeoutTransport(self.stop_rpc_timeout)
+        return xmlrpc.client.ServerProxy(
+            f"http://{self.robot_ip}:20003",
+            transport=transport,
+            allow_none=True,
+        )
+
+    @staticmethod
+    def _raw_rpc_result(name, result, value_count=0):
+        """解析控制器原始 XML-RPC 返回值，并兼容测试替身的嵌套列表。"""
+        if isinstance(result, (tuple, list)):
+            values = list(result)
+        else:
+            values = [result]
+        if not values or values[0] != 0:
+            code = values[0] if values else "空返回"
+            raise RuntimeError(f"{name} 失败，错误码: {code}")
+        if value_count == 0:
+            return None
+        payload = values[1:]
+        if len(payload) == 1 and isinstance(payload[0], (tuple, list)):
+            payload = list(payload[0])
+        if len(payload) < value_count:
+            raise RuntimeError(f"{name} 返回数据不足: {result!r}")
+        return payload[:value_count]
+
+    def _query_motion_state(self, rpc=None):
+        """读取运动完成信号和 TCP 合速度，返回（是否已停、线速度、姿态速度）。"""
+        rpc = rpc or self._create_stop_rpc()
+        motion_done = bool(
+            self._raw_rpc_result(
+                "GetRobotMotionDone",
+                rpc.GetRobotMotionDone(),
+                value_count=1,
+            )[0]
+        )
+        speeds = self._raw_rpc_result(
+            "GetActualTCPCompositeSpeed",
+            rpc.GetActualTCPCompositeSpeed(1),
+            value_count=2,
+        )
+        linear_speed, angular_speed = (abs(float(value)) for value in speeds)
+        stopped = (
+            motion_done
+            and linear_speed <= self.linear_speed_threshold
+            and angular_speed <= self.angular_speed_threshold
+        )
+        return stopped, linear_speed, angular_speed
+
+    def _wait_until_motion_stopped(self, rpc):
+        """StopMotion 后等待控制器反馈真正停止，并覆盖命令发出瞬间的竞态。
+
+        MoveL 使用厂商客户端时可能正在另一个线程里阻塞。停止锁会先阻止所有
+        后续请求；这里还会周期性重发 StopMotion，确保一个恰好越过锁检查、
+        但晚于首条 StopMotion 到达控制器的 MoveL 也会被终止。
+        """
+        deadline = time.monotonic() + self.stop_confirm_timeout
+        last_state = None
+        last_restop_at = 0.0
+        while time.monotonic() < deadline:
+            last_state = self._query_motion_state(rpc)
+            with self.state_lock:
+                command_handler_active = bool(self.motion_active)
+            if last_state[0] and not command_handler_active:
+                return last_state
+            now = time.monotonic()
+            if now - last_restop_at >= 0.05:
+                self._raw_rpc_result("StopMotion", rpc.StopMotion())
+                last_restop_at = now
+            time.sleep(max(0.005, self.stable_poll_interval))
+        if last_state is None:
+            raise TimeoutError("StopMotion 后没有取得运动状态")
+        with self.state_lock:
+            command_handler_active = bool(self.motion_active)
+        raise TimeoutError(
+            "StopMotion 后未在限定时间内确认停稳："
+            f"线速度={last_state[1]:.3f} mm/s，"
+            f"姿态速度={last_state[2]:.3f} °/s，"
+            f"运动服务仍在执行={command_handler_active}"
+        )
 
     @staticmethod
     def _angle_error(actual, target):
@@ -96,6 +252,10 @@ class ControlNode:
 
     def _wait_until_arm_stable(self, target_pose, motion_started_at=None):
         """等待机械臂到达目标位姿，并返回运动与保稳阶段耗时。"""
+        self._ensure_runtime_state()
+        with self.state_lock:
+            if self.stop_latched:
+                raise RuntimeError("等待机械臂停稳时收到停止锁，本次运动已中止")
         if motion_started_at is None:
             motion_started_at = time.monotonic()
         deadline = time.monotonic() + self.stable_timeout
@@ -103,6 +263,9 @@ class ControlNode:
         motion_finished_at = None
 
         while not rospy.is_shutdown():
+            with self.state_lock:
+                if self.stop_latched:
+                    raise RuntimeError("等待机械臂停稳时收到停止锁，本次运动已中止")
             motion_done = bool(
                 self._rpc_value(
                     "GetRobotMotionDone",
@@ -161,6 +324,13 @@ class ControlNode:
         raise RuntimeError("ROS 正在关闭，停止等待机械臂停稳")
 
     def move_arm(self, request):
+        self._ensure_runtime_state()
+        with self.state_lock:
+            if self.stop_latched:
+                return MoveArmResponse(
+                    success=False,
+                    message="机械臂停止锁已生效；请检查现场并解除停止锁后再运动",
+                )
         pose = [float(value) for value in request.pose]
         blend_enabled = bool(getattr(request, "blend_enabled", False))
         blend_radius_mm = float(getattr(request, "blend_radius_mm", 0.0))
@@ -201,6 +371,13 @@ class ControlNode:
                 pose[2],
             )
         try:
+            with self.state_lock:
+                if self.stop_latched:
+                    return MoveArmResponse(
+                        success=False,
+                        message="机械臂停止锁已生效；本次运动已拒绝",
+                    )
+                self.motion_active = True
             self.arm.set_speed(int(request.speed))
             motion_started_at = time.monotonic()
             result = self.arm.arm.MoveL(
@@ -214,6 +391,12 @@ class ControlNode:
                 not isinstance(result, bool) and result != 0
             ):
                 return MoveArmResponse(success=False, message=f"机械臂 MoveL 返回失败: {result!r}")
+            with self.state_lock:
+                if self.stop_latched:
+                    return MoveArmResponse(
+                        success=False,
+                        message="机械臂运动已被停止锁中止，不会继续后续动作",
+                    )
             if request.wait_until_stable:
                 motion_seconds, stabilization_seconds = self._wait_until_arm_stable(
                     pose,
@@ -225,6 +408,12 @@ class ControlNode:
                         motion_seconds * 1000.0,
                         stabilization_seconds * 1000.0,
                         (motion_seconds + stabilization_seconds) * 1000.0,
+                    )
+            with self.state_lock:
+                if self.stop_latched:
+                    return MoveArmResponse(
+                        success=False,
+                        message="机械臂运动已被停止锁中止，不会继续后续动作",
                     )
             if z_was_clamped:
                 motion_status = "已提交圆滑过渡运动" if blend_enabled else "已完成运动"
@@ -241,6 +430,9 @@ class ControlNode:
         except Exception as exc:
             rospy.logerr("机械臂运动异常: %s", exc)
             return MoveArmResponse(success=False, message=str(exc))
+        finally:
+            with self.state_lock:
+                self.motion_active = False
 
     def get_actual_pose(self, _request):
         """读取控制器实测 TCP 与相机光心在机器人基坐标系下的位姿。"""
@@ -273,17 +465,34 @@ class ControlNode:
             )
 
     def rotate_tool(self, request):
+        self._ensure_runtime_state()
+        with self.state_lock:
+            if self.stop_latched:
+                return RotateToolResponse(
+                    success=False,
+                    message="机械臂停止锁已生效；舵机指令已拒绝",
+                )
         angle = float(request.angle_deg)
         if not math.isfinite(angle) or not 0.0 <= angle <= 360.0:
             return RotateToolResponse(success=False, message="舵机角度必须在 0 到 360 度之间")
         try:
-            self.servo_serial.write(f"{angle}E".encode("ascii"))
+            with self.state_lock:
+                # 串口写入很短，和停止锁共用临界区可明确保证指令先后关系。
+                if self.stop_latched:
+                    return RotateToolResponse(
+                        success=False,
+                        message="机械臂停止锁已生效；舵机指令已拒绝",
+                    )
+                self.servo_serial.write(f"{angle}E".encode("ascii"))
+                self.servo_target_known = True
+                self.servo_target_angle_deg = angle
             return RotateToolResponse(success=True, message="舵机指令已发送")
         except Exception as exc:
             rospy.logerr("舵机指令发送失败: %s", exc)
             return RotateToolResponse(success=False, message=str(exc))
 
     def set_suction(self, request):
+        self._ensure_runtime_state()
         try:
             if request.state == request.SUCK:
                 self.sucker.set_solenoid_valve(False)
@@ -299,10 +508,109 @@ class ControlNode:
                 message = "吸盘已关闭"
             else:
                 return SetSuctionResponse(success=False, message=f"未知吸盘状态: {request.state}")
+            with self.state_lock:
+                self.commanded_suction_state = int(request.state)
             return SetSuctionResponse(success=True, message=message)
         except Exception as exc:
             rospy.logerr("吸盘控制失败: %s", exc)
             return SetSuctionResponse(success=False, message=str(exc))
+
+    def stop_arm(self, _request):
+        """锁存停止状态并通过独立 XML-RPC 连接终止当前机械臂运动。"""
+        self._ensure_runtime_state()
+        with self.state_lock:
+            self.stop_latched = True
+        try:
+            rpc = self._create_stop_rpc()
+            self._raw_rpc_result("StopMotion", rpc.StopMotion())
+            self._wait_until_motion_stopped(rpc)
+            rospy.logwarn("机械臂软件停止已确认；停止锁保持生效")
+            return StopArmResponse(
+                success=True,
+                stop_latched=True,
+                message="机械臂运动已停止；吸盘状态保持，停止锁仍生效",
+            )
+        except Exception as exc:
+            rospy.logerr("机械臂软件停止未确认: %s", exc)
+            return StopArmResponse(
+                success=False,
+                stop_latched=True,
+                message=f"软件停止未确认，请立即准备使用物理急停：{exc}",
+            )
+
+    def clear_arm_stop(self, _request):
+        """仅在确认机械臂已经停止后解除锁存，不自动复位或恢复旧任务。"""
+        self._ensure_runtime_state()
+        with self.state_lock:
+            if not self.stop_latched:
+                return ClearArmStopResponse(
+                    success=True,
+                    stop_latched=False,
+                    message="停止锁当前未生效",
+                )
+            if self.motion_active:
+                return ClearArmStopResponse(
+                    success=False,
+                    stop_latched=True,
+                    message="旧的机械臂运动服务仍在执行，不能解除停止锁",
+                )
+        try:
+            stopped, linear_speed, angular_speed = self._query_motion_state()
+            if not stopped:
+                return ClearArmStopResponse(
+                    success=False,
+                    stop_latched=True,
+                    message=(
+                        "机械臂尚未确认停稳，不能解除停止锁："
+                        f"线速度={linear_speed:.3f} mm/s，"
+                        f"姿态速度={angular_speed:.3f} °/s"
+                    ),
+                )
+            with self.state_lock:
+                if self.motion_active:
+                    return ClearArmStopResponse(
+                        success=False,
+                        stop_latched=True,
+                        message="旧的机械臂运动服务尚未结束，停止锁保持生效",
+                    )
+                self.stop_latched = False
+            return ClearArmStopResponse(
+                success=True,
+                stop_latched=False,
+                message="停止锁已解除；旧任务不会自动恢复",
+            )
+        except Exception as exc:
+            return ClearArmStopResponse(
+                success=False,
+                stop_latched=True,
+                message=f"无法确认机械臂停稳，停止锁保持生效：{exc}",
+            )
+
+    def get_control_status(self, _request):
+        """返回控制节点的软件锁存与最近命令状态；吸盘和舵机均无位置反馈。"""
+        self._ensure_runtime_state()
+        motion_state_known = False
+        motion_done = False
+        message = "控制节点状态已读取"
+        try:
+            motion_done = bool(self._query_motion_state()[0])
+            motion_state_known = True
+        except Exception as exc:
+            message = f"控制状态已读取，但机器人运动状态未知：{exc}"
+        with self.state_lock:
+            if self.motion_active:
+                motion_done = False
+                message = "机械臂运动服务仍在执行"
+            return GetControlStatusResponse(
+                success=True,
+                stop_latched=bool(self.stop_latched),
+                motion_state_known=motion_state_known,
+                motion_done=motion_done,
+                commanded_suction_state=int(self.commanded_suction_state),
+                servo_target_known=bool(self.servo_target_known),
+                servo_target_angle_deg=float(self.servo_target_angle_deg),
+                message=message,
+            )
 
     def close(self):
         if getattr(self, "servo_serial", None) is not None and self.servo_serial.is_open:

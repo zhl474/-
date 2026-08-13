@@ -16,9 +16,12 @@ def _load_ros_clients(monkeypatch):
     control = types.ModuleType("control")
     control.srv = types.ModuleType("control.srv")
     for name in (
+        "ClearArmStop", "ClearArmStopRequest",
         "GetActualPose", "GetActualPoseRequest",
+        "GetControlStatus", "GetControlStatusRequest",
         "MoveArm", "MoveArmRequest", "RotateTool", "RotateToolRequest",
         "SetSuction", "SetSuctionRequest",
+        "StopArm", "StopArmRequest",
     ):
         setattr(control.srv, name, _ServiceType)
     monkeypatch.setitem(sys.modules, "control", control)
@@ -49,6 +52,18 @@ def test_prepare_task_preserves_recoverable_failure_response(monkeypatch):
     response = client.prepare_task(advanced=False, place_order=[])
 
     assert response is failure
+
+
+def test_web_client_uses_finite_service_wait_timeout(monkeypatch):
+    module = _load_ros_clients(monkeypatch)
+    waits = []
+    module.rospy.wait_for_service = lambda name, **kwargs: waits.append((name, kwargs))
+    module.rospy.ServiceProxy = lambda *_args, **_kwargs: object()
+
+    module.RobotClients(service_wait_timeout=3.0)
+
+    assert len(waits) == len(module.SERVICE_NAMES)
+    assert all(item[1] == {"timeout": 3.0} for item in waits)
 
 
 def test_move_arm_forwards_stability_wait_flag(monkeypatch):

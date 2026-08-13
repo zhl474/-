@@ -5,14 +5,20 @@ import time
 import rospy
 
 from control.srv import (
+    ClearArmStop,
+    ClearArmStopRequest,
     GetActualPose,
     GetActualPoseRequest,
+    GetControlStatus,
+    GetControlStatusRequest,
     MoveArm,
     MoveArmRequest,
     RotateTool,
     RotateToolRequest,
     SetSuction,
     SetSuctionRequest,
+    StopArm,
+    StopArmRequest,
 )
 from image_process.srv import (
     DetectBlockOffset,
@@ -35,6 +41,9 @@ SERVICE_NAMES = (
     "/control/get_actual_pose",
     "/control/rotate_tool",
     "/control/set_suction",
+    "/control/stop_arm",
+    "/control/clear_arm_stop",
+    "/control/get_status",
 )
 
 
@@ -43,9 +52,16 @@ class RobotClients:
     BLOW = 1
     OFF = 2
 
-    def __init__(self):
+    def __init__(self, service_wait_timeout=None):
         for service_name in SERVICE_NAMES:
-            rospy.wait_for_service(service_name)
+            if service_wait_timeout is None:
+                # 原终端入口保持历史行为：等待操作人员启动所需节点。
+                rospy.wait_for_service(service_name)
+            else:
+                # 网页入口已经做过就绪检查，这里使用有限超时覆盖节点竞态退出。
+                rospy.wait_for_service(
+                    service_name, timeout=max(0.1, float(service_wait_timeout))
+                )
         self._prepare_task = rospy.ServiceProxy("/perception/prepare_task", PrepareTask)
         self._get_task_target = rospy.ServiceProxy("/perception/get_task_target", GetTaskTarget)
         self._block_offset = rospy.ServiceProxy("/perception/block_offset", DetectBlockOffset)
@@ -54,6 +70,13 @@ class RobotClients:
         self._get_actual_pose = rospy.ServiceProxy("/control/get_actual_pose", GetActualPose)
         self._rotate_tool = rospy.ServiceProxy("/control/rotate_tool", RotateTool)
         self._set_suction = rospy.ServiceProxy("/control/set_suction", SetSuction)
+        self._stop_arm = rospy.ServiceProxy("/control/stop_arm", StopArm)
+        self._clear_arm_stop = rospy.ServiceProxy(
+            "/control/clear_arm_stop", ClearArmStop
+        )
+        self._get_control_status = rospy.ServiceProxy(
+            "/control/get_status", GetControlStatus
+        )
 
     @staticmethod
     def _require_success(response, action):
@@ -116,3 +139,15 @@ class RobotClients:
     def set_suction(self, state):
         request = SetSuctionRequest(state=int(state))
         return self._require_success(self._set_suction(request), "吸盘控制")
+
+    def stop_arm(self):
+        """立即请求控制器终止运动；失败响应交给网页显示物理急停提示。"""
+        return self._stop_arm(StopArmRequest())
+
+    def clear_arm_stop(self):
+        """在人工检查现场后请求解除控制节点停止锁。"""
+        return self._clear_arm_stop(ClearArmStopRequest())
+
+    def get_control_status(self):
+        """读取停止锁及最近一次吸盘、舵机命令状态。"""
+        return self._get_control_status(GetControlStatusRequest())

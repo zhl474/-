@@ -6,6 +6,7 @@ from datetime import datetime
 import math
 from pathlib import Path
 import subprocess
+import threading
 import time
 
 import numpy as np
@@ -32,6 +33,35 @@ class TaskState(Enum):
     PLACING = "下放摆放"
     COMPLETED = "完成"
     FAILED = "失败"
+    ABORTED = "已中止"
+
+
+class TaskAbortedError(RuntimeError):
+    """任务已收到停止请求，禁止继续发送后续动作。"""
+
+
+class TaskAbortToken:
+    """线程安全的任务中止令牌。"""
+
+    def __init__(self):
+        self._event = threading.Event()
+
+    def request(self):
+        self._event.set()
+
+    def clear(self):
+        self._event.clear()
+
+    @property
+    def requested(self):
+        return self._event.is_set()
+
+    def wait(self, timeout):
+        return self._event.wait(timeout=max(0.0, float(timeout)))
+
+    def raise_if_requested(self):
+        if self.requested:
+            raise TaskAbortedError("任务已收到停止请求")
 
 
 @dataclass(frozen=True)
@@ -102,6 +132,10 @@ class TaskRunner:
         servo_csv_output_dir=DEFAULT_SERVO_CSV_OUTPUT_DIR,
         servo_csv_logger=None,
         experiment_session_id=None,
+        state_callback=None,
+        progress_callback=None,
+        holding_callback=None,
+        abort_token=None,
     ):
         self.clients = clients or RobotClients()
         self.config = execution_config or load_execution_config()
@@ -113,6 +147,10 @@ class TaskRunner:
         self.angle_planner = ServoAnglePlanner(self.config, self.clients.rotate_tool)
         self.state = TaskState.IDLE
         self.holding_block = False
+        self.state_callback = state_callback
+        self.progress_callback = progress_callback
+        self.holding_callback = holding_callback
+        self.abort_token = abort_token or TaskAbortToken()
         self.execution_start_time = None
         self.visual_servo_enabled = self.config.visual_servo_enabled
         if self.config.calibration_mode and not self.visual_servo_enabled:
@@ -134,6 +172,48 @@ class TaskRunner:
                 self.execution_start_time = None
         elif state is TaskState.FAILED:
             rospy.logerr("任务状态: %s", state.value)
+        elif state is TaskState.ABORTED:
+            rospy.logwarn("任务状态: %s", state.value)
+        self._emit_callback(self.state_callback, {
+            "state": state.value,
+            "holding_block": bool(self.holding_block),
+        })
+
+    @staticmethod
+    def _emit_callback(callback, payload):
+        """网页回调失败不能反向破坏机械臂主流程。"""
+        if callback is None:
+            return
+        try:
+            callback(dict(payload))
+        except Exception as exc:
+            rospy.logwarn("任务状态回调失败: %s", exc)
+
+    def _set_holding_block(self, holding):
+        self.holding_block = bool(holding)
+        self._emit_callback(self.holding_callback, {
+            "holding_block": self.holding_block,
+            "state": self.state.value,
+        })
+
+    def _notify_progress(self, current, total, category="", target_type=""):
+        self._emit_callback(self.progress_callback, {
+            "current": int(current),
+            "total": int(total),
+            "category": str(category or ""),
+            "target_type": str(target_type or ""),
+            "state": self.state.value,
+        })
+
+    def _check_abort(self):
+        self.abort_token.raise_if_requested()
+
+    def _sleep_abortible(self, seconds):
+        duration = max(0.0, float(seconds))
+        self._check_abort()
+        if duration > 0.0:
+            time.sleep(duration)
+        self._check_abort()
 
     @staticmethod
     def _print_prepare_failure(message):
@@ -149,11 +229,16 @@ class TaskRunner:
 
     def _timed_call(self, label, operation, *args, **kwargs):
         """在开启调试时记录一次任务步骤的端到端耗时。"""
+        self._check_abort()
         if not self.config.timing_debug:
-            return operation(*args, **kwargs)
+            result = operation(*args, **kwargs)
+            self._check_abort()
+            return result
         started_at = time.monotonic()
         try:
-            return operation(*args, **kwargs)
+            result = operation(*args, **kwargs)
+            self._check_abort()
+            return result
         finally:
             elapsed_ms = (time.monotonic() - started_at) * 1000.0
             rospy.loginfo("任务步骤耗时：%s=%.1f ms", label, elapsed_ms)
@@ -167,7 +252,7 @@ class TaskRunner:
         elapsed_sec = max(0.0, now - rotation.command_accepted_at)
         remaining_sec = max(0.0, rotation.ready_at - now)
         if remaining_sec > 0.0:
-            time.sleep(remaining_sec)
+            self._sleep_abortible(remaining_sec)
 
         if self.config.timing_debug:
             rospy.loginfo(
@@ -194,11 +279,20 @@ class TaskRunner:
 
         def move_checked(pose, *args, **kwargs):
             """视觉伺服每轮运动前复核位姿，避免无效识别结果生成危险命令。"""
+            self._check_abort()
             checked_pose = self._validate_motion_pose(pose, f"{log_label}修正位")
-            return self.clients.move_arm(checked_pose, *args, **kwargs)
+            result = self.clients.move_arm(checked_pose, *args, **kwargs)
+            self._check_abort()
+            return result
+
+        def offset_checked():
+            self._check_abort()
+            result = offset_func()
+            self._check_abort()
+            return result
 
         return run_offset_visual_servo_alignment(
-            offset_func,
+            offset_checked,
             move_checked,
             start_pose,
             self.visual_config,
@@ -218,6 +312,7 @@ class TaskRunner:
                 if self.config.calibration_mode
                 else 0
             ),
+            abort_check=self._check_abort,
         )
 
     def _validate_motion_pose(self, pose, label):
@@ -697,7 +792,7 @@ class TaskRunner:
                 self.clients.set_suction,
                 RobotClients.SUCK,
             )
-            self.holding_block = True
+            self._set_holding_block(True)
         retreat_pose = list(pre_pick_pose)
         retreat_pose[2] = retreat_z_mm
         retreat_pose = self._validate_motion_pose(retreat_pose, retreat_label)
@@ -822,23 +917,39 @@ class TaskRunner:
                 self.clients.set_suction,
                 RobotClients.BLOW,
             )
-        self.holding_block = False
+        self._set_holding_block(False)
 
     def prepare(self, advanced=False, place_order=()):
+        self._check_abort()
         self._set_state(TaskState.PREPARING)
         # 复位发生在拍摄和用户确认之前，因此不计入比赛方案成本。
         initial_angle = float(self.config.initial_motor_angle_deg)
-        self.clients.rotate_tool(initial_angle)
+        self._timed_call(
+            "高位识别前舵机复位",
+            self.clients.rotate_tool,
+            initial_angle,
+        )
         reset_wait_seconds = worst_case_servo_reset_seconds(
             initial_angle,
             self.config.motor_velocity_deg_per_sec,
         )
         # 无位置反馈时必须按 0°/360° 两端中的最坏角差保守等待。
-        time.sleep(reset_wait_seconds)
+        self._sleep_abortible(reset_wait_seconds)
         self.angle_planner.last_angle = initial_angle
         shooting_pose = self._validate_motion_pose(self.config.shooting_pose, "高位拍摄位")
-        self.clients.move_arm(shooting_pose, self.config.arm_speed, wait_until_stable=True)
-        return self.clients.prepare_task(advanced=advanced, place_order=place_order)
+        self._timed_call(
+            "高位拍摄位运动",
+            self.clients.move_arm,
+            shooting_pose,
+            self.config.arm_speed,
+            wait_until_stable=True,
+        )
+        return self._timed_call(
+            "高位识别与任务规划",
+            self.clients.prepare_task,
+            advanced=advanced,
+            place_order=place_order,
+        )
 
     @staticmethod
     def _git_metadata():
@@ -891,6 +1002,7 @@ class TaskRunner:
     def execute_all(self, task_count):
         experiment_status = "未开始"
         try:
+            self._check_abort()
             if self.config.calibration_mode:
                 paths = self.servo_csv_logger.open(
                     metadata=self._experiment_metadata()
@@ -905,8 +1017,13 @@ class TaskRunner:
                     {"实验状态": experiment_status, "计划任务数量": int(task_count)}
                 )
                 # 标定采集必须先确认气泵和电磁阀已关闭，失败则不允许开始运动。
-                self.clients.set_suction(RobotClients.OFF)
+                self._timed_call(
+                    "标定开始前关闭吸盘",
+                    self.clients.set_suction,
+                    RobotClients.OFF,
+                )
             for index in range(int(task_count)):
+                self._check_abort()
                 task_started_at = time.monotonic()
                 target = self._timed_call(
                     f"读取第 {index + 1} 个任务目标",
@@ -922,6 +1039,12 @@ class TaskRunner:
                         f"{target_type!r}；标定采集请改用 calibration.py 启动"
                     )
                 rospy.loginfo("执行第 %d/%d 个任务，类别=%s", index + 1, task_count, target.category)
+                self._notify_progress(
+                    index + 1,
+                    task_count,
+                    category=target.category,
+                    target_type=target_type,
+                )
                 place_rotation = self._pick(target, task_index=index + 1)
                 self._place(
                     target,
@@ -935,10 +1058,21 @@ class TaskRunner:
                         task_count,
                         (time.monotonic() - task_started_at) * 1000.0,
                     )
+                self._check_abort()
             if not self.config.calibration_mode:
-                self.clients.set_suction(RobotClients.OFF)
+                self._timed_call(
+                    "全部任务完成后关闭吸盘",
+                    self.clients.set_suction,
+                    RobotClients.OFF,
+                )
             experiment_status = "完成"
             self._set_state(TaskState.COMPLETED)
+        except TaskAbortedError:
+            experiment_status = "已中止"
+            self._set_state(TaskState.ABORTED)
+            if self.holding_block:
+                rospy.logerr("任务中止时仍持有方块，保持吸盘状态等待人工处理")
+            raise
         except Exception:
             experiment_status = "失败"
             self._set_state(TaskState.FAILED)
@@ -987,6 +1121,10 @@ class CalibrationTaskRunner(TaskRunner):
         servo_csv_output_dir=DEFAULT_SERVO_CSV_OUTPUT_DIR,
         servo_csv_logger=None,
         experiment_session_id=None,
+        state_callback=None,
+        progress_callback=None,
+        holding_callback=None,
+        abort_token=None,
     ):
         base_config = execution_config or load_execution_config()
         forced_config = replace(base_config, calibration_mode=True)
@@ -997,12 +1135,17 @@ class CalibrationTaskRunner(TaskRunner):
             servo_csv_output_dir=servo_csv_output_dir,
             servo_csv_logger=servo_csv_logger,
             experiment_session_id=experiment_session_id,
+            state_callback=state_callback,
+            progress_callback=progress_callback,
+            holding_callback=holding_callback,
+            abort_token=abort_token,
         )
         print("\033[96m当前模式：独立标定采集（方块=拾取，托盘=抵达，不吸不吹）\033[0m")
 
     def execute_all(self, task_count, block_count=0, tray_count=0):
         experiment_status = "未开始"
         try:
+            self._check_abort()
             paths = self.servo_csv_logger.open(metadata=self._experiment_metadata())
             print(
                 f"标定 CSV 已覆盖创建：方块={paths['block']}，"
@@ -1019,12 +1162,27 @@ class CalibrationTaskRunner(TaskRunner):
                 }
             )
             # 标定采集必须先确认气泵和电磁阀已关闭，失败则不允许开始运动。
-            self.clients.set_suction(RobotClients.OFF)
+            self._timed_call(
+                "标定开始前关闭吸盘",
+                self.clients.set_suction,
+                RobotClients.OFF,
+            )
             block_index = 0
             tray_index = 0
             for index in range(int(task_count)):
-                target = self.clients.get_task_target(index)
+                self._check_abort()
+                target = self._timed_call(
+                    f"读取第 {index + 1} 个标定目标",
+                    self.clients.get_task_target,
+                    index,
+                )
                 target_type = str(getattr(target, "target_type", "") or "")
+                self._notify_progress(
+                    index + 1,
+                    task_count,
+                    category=getattr(target, "category", ""),
+                    target_type=target_type,
+                )
                 if target_type == "block":
                     block_index += 1
                     rospy.loginfo("标定方块 %d/%d", block_index, block_count)
@@ -1037,8 +1195,13 @@ class CalibrationTaskRunner(TaskRunner):
                     raise RuntimeError(
                         f"未知目标类型 {target_type!r}，已停止标定"
                     )
+                self._check_abort()
             experiment_status = "完成"
             self._set_state(TaskState.COMPLETED)
+        except TaskAbortedError:
+            experiment_status = "已中止"
+            self._set_state(TaskState.ABORTED)
+            raise
         except Exception:
             experiment_status = "失败"
             self._set_state(TaskState.FAILED)

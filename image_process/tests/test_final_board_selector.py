@@ -3,6 +3,8 @@
 from dataclasses import replace
 import json
 from pathlib import Path
+import threading
+import time
 
 import numpy as np
 import pytest
@@ -150,9 +152,27 @@ def _selector_config():
     return FinalBoardSelectorConfig(
         comparison_beam_width=10,
         comparison_returned_candidates=1,
+        comparison_worker_count=1,
+        confirmation_candidate_k=2,
         confirmation_beam_width=20,
         confirmation_returned_candidates=2,
+        confirmation_worker_count=1,
         soft_time_budget_sec=10.0,
+    )
+
+
+def _replace_result_costs(result, simplified_cost, replay_cost):
+    """只改跨盘面排序字段，保留原方案的合法配对与34步顺序。"""
+    return replace(
+        result,
+        selected_plan=replace(
+            result.selected_plan,
+            simplified_cost_seconds=float(simplified_cost),
+        ),
+        selected_servo_replay=replace(
+            result.selected_servo_replay,
+            replay_total_seconds=float(replay_cost),
+        ),
     )
 
 
@@ -185,6 +205,12 @@ def test_final_selector_locks_34_unique_pids_sources_and_manifest(library):
     manifest = build_unique_board_manifest(decision)
     assert manifest["final_pid_sequence"] == list(decision.final_pid_sequence)
     assert manifest["decision_fingerprint"] == decision.decision_fingerprint
+    assert manifest["comparison_rank"] == 1
+    assert manifest["confirmation_rank"] == 1
+    assert manifest["comparison_worker_count"] == 1
+    assert manifest["confirmation_worker_count"] == 1
+    assert len(decision.confirmation_attempts) == 1
+    assert decision.confirmation_attempt == decision.confirmation_attempts[0]
     json.dumps(manifest, ensure_ascii=False)
 
 
@@ -250,16 +276,7 @@ def test_exact_comparison_tie_uses_stable_board_index_not_input_order(library):
             motion_model,
             **kwargs,
         )
-        if config.beam_width == 10:
-            return replace(
-                result,
-                selected_plan=replace(result.selected_plan, simplified_cost_seconds=100.0),
-                selected_servo_replay=replace(
-                    result.selected_servo_replay,
-                    replay_total_seconds=120.0,
-                ),
-            )
-        return result
+        return _replace_result_costs(result, 100.0, 120.0)
 
     selector = FinalBoardSelector(
         library,
@@ -277,6 +294,7 @@ def test_exact_comparison_tie_uses_stable_board_index_not_input_order(library):
 
     assert decision.board_index == 0
     assert decision.comparison_attempt.ranking_key[-1] == 0
+    assert decision.confirmation_attempt.ranking_key[-1] == 0
 
 
 def test_all_comparison_failures_raise_error_with_attempts(library):
@@ -300,3 +318,240 @@ def test_all_comparison_failures_raise_error_with_attempts(library):
         )
     assert len(caught.value.attempts) == 1
     assert not caught.value.attempts[0].succeeded
+
+
+def test_high_beam_top_k_can_reverse_low_beam_winner_without_third_search(library):
+    candidates = (_candidate(library, 0), _candidate(library, 1))
+    board_by_pid_set = {
+        frozenset(_board_pids(library, board_index)): board_index
+        for board_index in (0, 1)
+    }
+    calls = []
+
+    def optimizer_with_rank_reversal(
+        blocks,
+        targets,
+        board_angle_deg,
+        config,
+        motion_model,
+        **kwargs,
+    ):
+        board_index = board_by_pid_set[frozenset(target.index for target in targets)]
+        calls.append((board_index, config.beam_width, config.returned_candidate_limit))
+        result = optimize_task_sequence(
+            blocks,
+            targets,
+            board_angle_deg,
+            config,
+            motion_model,
+            **kwargs,
+        )
+        if config.beam_width == 10:
+            return _replace_result_costs(result, 10.0 + board_index, 20.0)
+        high_cost = 12.0 if board_index == 0 else 9.0
+        return _replace_result_costs(result, high_cost, 20.0)
+
+    decision = FinalBoardSelector(
+        library,
+        _selector_config(),
+        optimizer_callable=optimizer_with_rank_reversal,
+    ).select(
+        _result(library, candidates),
+        _observed_blocks(library),
+        _placement_targets(library, (0, 1)),
+        0.0,
+        _optimizer_config(),
+        线性时间模型(),
+    )
+
+    assert decision.board_index == 1
+    assert sorted(decision.comparison_attempts, key=lambda item: item.ranking_key)[0].board_index == 0
+    assert decision.comparison_attempt.board_index == 1
+    assert decision.confirmation_attempt.board_index == 1
+    assert decision.confirmation_result.simplified_cost_seconds == 9.0
+    assert len(calls) == 4
+    assert sorted(calls) == [
+        (0, 10, 1),
+        (0, 20, 2),
+        (1, 10, 1),
+        (1, 20, 2),
+    ]
+
+
+def test_high_beam_failure_is_isolated_and_all_failures_are_reported(library):
+    candidates = (_candidate(library, 0), _candidate(library, 1))
+    board_zero_pids = set(_board_pids(library, 0))
+
+    def fail_board_zero_confirmation(
+        blocks,
+        targets,
+        board_angle_deg,
+        config,
+        motion_model,
+        **kwargs,
+    ):
+        if config.beam_width == 20 and {target.index for target in targets} == board_zero_pids:
+            raise RuntimeError("注入的高Beam失败")
+        return optimize_task_sequence(
+            blocks,
+            targets,
+            board_angle_deg,
+            config,
+            motion_model,
+            **kwargs,
+        )
+
+    decision = FinalBoardSelector(
+        library,
+        _selector_config(),
+        optimizer_callable=fail_board_zero_confirmation,
+    ).select(
+        _result(library, candidates),
+        _observed_blocks(library),
+        _placement_targets(library, (0, 1)),
+        0.0,
+        _optimizer_config(),
+        线性时间模型(),
+    )
+    assert decision.board_index == 1
+    assert not next(
+        item for item in decision.confirmation_attempts if item.board_index == 0
+    ).succeeded
+
+    def fail_every_confirmation(
+        blocks,
+        targets,
+        board_angle_deg,
+        config,
+        motion_model,
+        **kwargs,
+    ):
+        if config.beam_width == 20:
+            raise RuntimeError("全部高Beam失败")
+        return optimize_task_sequence(
+            blocks,
+            targets,
+            board_angle_deg,
+            config,
+            motion_model,
+            **kwargs,
+        )
+
+    with pytest.raises(DynamicBoardSelectionError, match="高 Beam 复核全部失败") as caught:
+        FinalBoardSelector(
+            library,
+            _selector_config(),
+            optimizer_callable=fail_every_confirmation,
+        ).select(
+            _result(library, candidates),
+            _observed_blocks(library),
+            _placement_targets(library, (0, 1)),
+            0.0,
+            _optimizer_config(),
+            线性时间模型(),
+        )
+    assert len(caught.value.comparison_attempts) == 2
+    assert len(caught.value.confirmation_attempts) == 2
+    assert all(not item.succeeded for item in caught.value.confirmation_attempts)
+
+
+def test_parallel_completion_order_does_not_change_stable_output(library):
+    board_indices = (3, 2, 1, 0)
+    candidates = tuple(_candidate(library, index) for index in board_indices)
+    board_by_pid_set = {
+        frozenset(_board_pids(library, board_index)): board_index
+        for board_index in board_indices
+    }
+    completion_order = []
+    completion_lock = threading.Lock()
+
+    def delayed_optimizer(
+        blocks,
+        targets,
+        board_angle_deg,
+        config,
+        motion_model,
+        **kwargs,
+    ):
+        board_index = board_by_pid_set[frozenset(target.index for target in targets)]
+        result = optimize_task_sequence(
+            blocks,
+            targets,
+            board_angle_deg,
+            config,
+            motion_model,
+            **kwargs,
+        )
+        if config.beam_width == 10:
+            time.sleep(board_index * 0.03)
+            with completion_lock:
+                completion_order.append(board_index)
+        return result
+
+    common_arguments = (
+        _result(library, candidates),
+        _observed_blocks(library),
+        _placement_targets(library, board_indices),
+        0.0,
+        _optimizer_config(),
+        线性时间模型(),
+    )
+    sequential = FinalBoardSelector(
+        library,
+        replace(
+            _selector_config(),
+            comparison_worker_count=1,
+            confirmation_candidate_k=4,
+            confirmation_worker_count=1,
+        ),
+    ).select(*common_arguments)
+    parallel = FinalBoardSelector(
+        library,
+        replace(
+            _selector_config(),
+            comparison_worker_count=4,
+            confirmation_candidate_k=4,
+            confirmation_worker_count=4,
+        ),
+        optimizer_callable=delayed_optimizer,
+    ).select(*common_arguments)
+
+    def attempt_signature(items):
+        return tuple(
+            (
+                item.board_index,
+                item.succeeded,
+                item.simplified_cost_seconds,
+                item.servo_replay_total_seconds,
+                item.target_pid_sequence,
+                item.source_id_sequence,
+            )
+            for item in items
+        )
+
+    assert completion_order != list(board_indices)
+    assert [item.board_index for item in parallel.comparison_attempts] == list(board_indices)
+    assert parallel.board_index == sequential.board_index
+    assert parallel.final_pid_sequence == sequential.final_pid_sequence
+    assert parallel.final_source_to_pid == sequential.final_source_to_pid
+    assert attempt_signature(parallel.comparison_attempts) == attempt_signature(
+        sequential.comparison_attempts
+    )
+    assert attempt_signature(parallel.confirmation_attempts) == attempt_signature(
+        sequential.confirmation_attempts
+    )
+    assert parallel.comparison_worker_count == 4
+    assert parallel.confirmation_worker_count == 4
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "comparison_worker_count",
+        "confirmation_candidate_k",
+        "confirmation_worker_count",
+    ),
+)
+def test_parallel_configuration_requires_positive_integers(field_name):
+    with pytest.raises(ValueError, match="必须是正整数"):
+        FinalBoardSelectorConfig(**{field_name: 0})

@@ -1,0 +1,3 @@
+# Python 3.8 可用的固定版本，避免未来最新版提高最低 Python 版本。
+Flask==3.0.3
+ruamel.yaml==0.18.6

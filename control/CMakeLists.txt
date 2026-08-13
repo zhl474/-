@@ -4,10 +4,13 @@ project(control)
 find_package(catkin REQUIRED COMPONENTS message_generation rospy)
 
 add_service_files(FILES
+  ClearArmStop.srv
+  GetControlStatus.srv
   MoveArm.srv
   GetActualPose.srv
   RotateTool.srv
   SetSuction.srv
+  StopArm.srv
 )
 generate_messages()
 

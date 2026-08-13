@@ -142,14 +142,19 @@ def run_offset_visual_servo_alignment(
     log_label: str = "视觉伺服",
     event_callback: Optional[Callable[[dict], None]] = None,
     post_success_sample_frames: int = 0,
+    abort_check: Optional[Callable[[], None]] = None,
 ):
     pose = list(float(value) for value in start_pose)
     stable_count = 0
     missed_count = 0
     last_response = None
     for iteration in range(int(max_iter)):
+        if abort_check is not None:
+            abort_check()
         round_started_at = time.perf_counter()
         response = get_offset_func()
+        if abort_check is not None:
+            abort_check()
         detection_finished_at = time.perf_counter()
         last_response = response
         if not response.found:
@@ -161,6 +166,8 @@ def run_offset_visual_servo_alignment(
             )
             if missed_count < max_missed_frames and settle_sec > 0:
                 time.sleep(settle_sec)
+                if abort_check is not None:
+                    abort_check()
             round_finished_at = time.perf_counter()
             _emit_event(
                 event_callback,
@@ -195,6 +202,8 @@ def run_offset_visual_servo_alignment(
             )
             if stable_count < success_stable_frames and settle_sec > 0:
                 time.sleep(settle_sec)
+                if abort_check is not None:
+                    abort_check()
             round_finished_at = time.perf_counter()
             _emit_event(
                 event_callback,
@@ -218,6 +227,8 @@ def run_offset_visual_servo_alignment(
                 # 成功后的附加帧仅用于估计检测噪声，绝不再发送运动命令，
                 # 也不因诊断帧丢失或服务异常撤销已经成立的对准结果。
                 for sample_index in range(max(0, int(post_success_sample_frames))):
+                    if abort_check is not None:
+                        abort_check()
                     sample_started_at = time.perf_counter()
                     try:
                         sample_response = get_offset_func()
@@ -251,6 +262,8 @@ def run_offset_visual_servo_alignment(
                             message_override=str(exc),
                         )
                         print(f"[{log_label}] 成功后静止采样 {sample_index + 1} 异常: {exc}")
+                    if abort_check is not None:
+                        abort_check()
                 return True, pose, last_response, "视觉伺服对准成功"
             continue
 
@@ -273,9 +286,13 @@ def run_offset_visual_servo_alignment(
         )
         control_started_at = time.perf_counter()
         move_pose_func(pose, speed=speed, wait_sec=0.0, wait_until_stable=True)
+        if abort_check is not None:
+            abort_check()
         arm_arrived_at = time.perf_counter()
         if settle_sec > 0:
             time.sleep(settle_sec)
+            if abort_check is not None:
+                abort_check()
         round_finished_at = time.perf_counter()
         _emit_event(
             event_callback,

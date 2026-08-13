@@ -95,7 +95,7 @@ PROBE_DICT_NAMES = (  # 低位首帧诊断使用的多字典列表（第一个�
 SERVO_VIDEO_ENABLED = True  # 是否录制低位伺服过程的相机画面视频
 SERVO_VIDEO_FPS = 10.0  # 录像帧率（每伺服轮写入一帧，仅影响播放速度）
 OUTPUT_ROOT = Path("/home/zhl/桌面/aruco诊断实验")  # 实验批次输出根目录
-RESUME = True  # False 创建新批次；True 从 RESUME_OUTPUT_DIR 原目录继续
+RESUME = False  # False 创建新批次；True 从 RESUME_OUTPUT_DIR 原目录继续
 RESUME_OUTPUT_DIR = Path("/home/zhl/桌面/aruco诊断实验/20260808-220525")  # 续跑时改为已有批次目录，例如 Path("/home/zhl/桌面/aruco诊断实验/20260808-220525")
 
 CENTER_REFINE_CONFIG = CenterRefineConfig(

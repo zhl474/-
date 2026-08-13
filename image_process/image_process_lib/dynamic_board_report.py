@@ -23,7 +23,7 @@ from image_process_lib.task_sequence_optimizer import build_task_plan_report
 from image_process_lib.v5_board_library import V5BoardLibrary
 
 
-DYNAMIC_BOARD_REPORT_PROTOCOL_VERSION = 1
+DYNAMIC_BOARD_REPORT_PROTOCOL_VERSION = 2
 
 
 def _json_value(value):
@@ -245,16 +245,43 @@ def build_dynamic_board_selection_report(
     relaxed_result: BoardCandidateSelectionResult | None = None,
     decision: FinalBoardDecision | None = None,
     comparison_attempts: Sequence[BoardOptimizationAttempt] = (),
+    confirmation_attempts: Sequence[BoardOptimizationAttempt] = (),
     error_message: str = "",
     human_failure_choice: str = "",
     actual_planner_message: str = "",
 ) -> dict:
     """构造可精确回放“粗筛→确认”链路的中文 JSON 文档。"""
-    attempts = (
+    comparison_items = (
         decision.comparison_attempts
         if decision is not None
         else tuple(comparison_attempts)
     )
+    confirmation_items = (
+        decision.confirmation_attempts
+        if decision is not None
+        else tuple(confirmation_attempts)
+    )
+    stage_statistics = {
+        "低Beam候选数": len(comparison_items),
+        "低Beam成功数": sum(item.succeeded for item in comparison_items),
+        "低Beam实际线程数": (
+            None if decision is None else decision.comparison_worker_count
+        ),
+        "低Beam墙钟耗时秒": (
+            None if decision is None else decision.comparison_elapsed_seconds
+        ),
+        "高Beam候选数": len(confirmation_items),
+        "高Beam成功数": sum(item.succeeded for item in confirmation_items),
+        "高Beam实际线程数": (
+            None if decision is None else decision.confirmation_worker_count
+        ),
+        "高Beam墙钟耗时秒": (
+            None if decision is None else decision.confirmation_elapsed_seconds
+        ),
+        "两级总耗时秒": (
+            None if decision is None else decision.total_elapsed_seconds
+        ),
+    }
     document = {
         "协议版本": DYNAMIC_BOARD_REPORT_PROTOCOL_VERSION,
         "报告类型": "V5动态盘面选择报告",
@@ -282,7 +309,11 @@ def build_dynamic_board_selection_report(
         },
         "四区粗筛": _coarse_document(coarse_result),
         "relaxed筛选": _relaxed_document(relaxed_result),
-        "20盘比较": [_attempt_document(item) for item in attempts],
+        "完整路径选优阶段统计": stage_statistics,
+        "跨盘面低Beam比较": [
+            _attempt_document(item) for item in comparison_items
+        ],
+        "高Beam复核": [_attempt_document(item) for item in confirmation_items],
         "唯一盘面清单": (
             None if decision is None else build_unique_board_manifest(decision)
         ),

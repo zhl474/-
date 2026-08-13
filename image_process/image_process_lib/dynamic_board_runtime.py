@@ -66,8 +66,9 @@ def prompt_dynamic_selection_failure(
     output_stream: TextIO | None = None,
     wait_readable: Callable = select.select,
     monotonic: Callable[[], float] = time.monotonic,
+    allow_continue: bool = False,
 ) -> str:
-    """在真实 TTY 中询问停止或回退，任何不确定情况均停止。"""
+    """在真实 TTY 中询问失败处理，任何不确定情况均停止。"""
     input_stream = input_stream or sys.stdin
     output_stream = output_stream or sys.stderr
     try:
@@ -88,6 +89,17 @@ def prompt_dynamic_selection_failure(
     print("\n动态盘面选择失败：" + str(reason), file=output_stream, flush=True)
     print("[s] 停止本轮", file=output_stream, flush=True)
     print("[f] 回退固定 task_layout.yaml", file=output_stream, flush=True)
+    if allow_continue:
+        print(
+            "[c] 忽略时间标定速度不一致，继续动态盘面执行",
+            file=output_stream,
+            flush=True,
+        )
+        print(
+            "    实际机械臂速度保持当前配置，仅盘面预测时间不再代表真实秒数。",
+            file=output_stream,
+            flush=True,
+        )
     deadline = monotonic() + timeout
     while True:
         remaining = deadline - monotonic()
@@ -116,4 +128,7 @@ def prompt_dynamic_selection_failure(
             return "stop"
         if choice in ("f", "fallback"):
             return "fixed_yaml"
-        print("输入无效，请输入 s 或 f。", file=output_stream, flush=True)
+        if allow_continue and choice in ("c", "continue"):
+            return "continue_dynamic"
+        choices_text = "s、f 或 c" if allow_continue else "s 或 f"
+        print(f"输入无效，请输入 {choices_text}。", file=output_stream, flush=True)

@@ -10,6 +10,14 @@ import pytest
 from competition_lib.config import load_execution_config, load_visual_servo_config
 
 
+def _camera_to_sucker_offset():
+    """现场标定值可由参数中心调整，运动测试始终读取当前配置。"""
+    return [
+        float(value)
+        for value in load_visual_servo_config()["camera_to_sucker_offset_mm"]
+    ]
+
+
 def _execution_config(**changes):
     """测试不依赖现场正在使用的标定/正式模式开关。"""
     base = replace(
@@ -242,18 +250,20 @@ def test_闭环抓取使用动态预抓取和托盘伺服高度抬升(
     runner._pick(target)
 
     expected_pick_z_mm = surface_z_mm + runner.config.pick_surface_offset_mm
+    offset_x, offset_y = _camera_to_sucker_offset()
+    pick_x, pick_y = 1.0 + offset_x, 2.0 + offset_y
     expected_poses = [
         [0, 0, 200, -180, 0, 90],
         [
-            -93.1,
-            -11.8,
+            pick_x,
+            pick_y,
             expected_pick_z_mm + runner.config.pick_approach_clearance_mm,
             -180,
             0,
             90,
         ],
-        [-93.1, -11.8, expected_pick_z_mm, -180, 0, 90],
-        [-93.1, -11.8, 200.0, -180, 0, 90],
+        [pick_x, pick_y, expected_pick_z_mm, -180, 0, 90],
+        [pick_x, pick_y, 200.0, -180, 0, 90],
     ]
     for move, expected_pose in zip(clients.moves, expected_poses):
         assert move[0] == pytest.approx(expected_pose)
@@ -286,17 +296,18 @@ def test_开环抓取直接到动态预抓取位并抬到托盘伺服高度(monk
     runner._pick(target)
 
     expected_pick_z_mm = target.pick_surface_z_mm + execution_config.pick_surface_offset_mm
+    offset_x, offset_y = _camera_to_sucker_offset()
     expected_poses = [
         [
-            -94.1,
-            -13.8,
+            offset_x,
+            offset_y,
             expected_pick_z_mm + execution_config.pick_approach_clearance_mm,
             -180.0,
             0.0,
             90.0,
         ],
-        [-94.1, -13.8, expected_pick_z_mm, -180.0, 0.0, 90.0],
-        [-94.1, -13.8, 200.0, -180.0, 0.0, 90.0],
+        [offset_x, offset_y, expected_pick_z_mm, -180.0, 0.0, 90.0],
+        [offset_x, offset_y, 200.0, -180.0, 0.0, 90.0],
     ]
     assert len(clients.moves) == len(expected_poses)
     for move, expected_pose in zip(clients.moves, expected_poses):
@@ -383,8 +394,11 @@ def test_place_keeps_dynamic_observation_height_and_directly_releases(monkeypatc
 
     runner._place(target, place_rotation=_completed_rotation(module))
 
+    offset_x, offset_y = _camera_to_sucker_offset()
     assert clients.moves[0][0] == [10, 10, 200, -180, 0, 90]
-    assert clients.moves[1][0] == pytest.approx([-83.1, -1.8, 234.0, -180.0, 0.0, 90.0])
+    assert clients.moves[1][0] == pytest.approx(
+        [11.0 + offset_x, 12.0 + offset_y, 234.0, -180.0, 0.0, 90.0]
+    )
     assert [move[3] for move in clients.moves] == [True, True]
     assert clients.suction_states == [module.RobotClients.BLOW]
     assert not hasattr(execution_config, "place_high_z")
@@ -410,9 +424,10 @@ def test_开环摆放应用xy偏置并保留托盘高度(monkeypatch):
         place_rotation=_completed_rotation(module),
     )
 
+    offset_x, offset_y = _camera_to_sucker_offset()
     assert len(clients.moves) == 1
     assert clients.moves[0][0] == pytest.approx(
-        [-84.1, -3.8, 200.0, -180.0, 0.0, 90.0]
+        [10.0 + offset_x, 10.0 + offset_y, 200.0, -180.0, 0.0, 90.0]
     )
     assert clients.moves[0][3] is True
     assert clients.suction_states == [module.RobotClients.BLOW]
@@ -1188,18 +1203,20 @@ def test_标定方块下探后退回自身观察高度且不读取全零托盘�
     runner._pick(target)
 
     expected_pick_z_mm = target.pick_surface_z_mm + runner.config.pick_surface_offset_mm
+    offset_x, offset_y = _camera_to_sucker_offset()
+    pick_x, pick_y = 1.0 + offset_x, 2.0 + offset_y
     expected_poses = [
         [0, 0, 200, -180, 0, 90],
         [
-            -93.1,
-            -11.8,
+            pick_x,
+            pick_y,
             expected_pick_z_mm + runner.config.pick_approach_clearance_mm,
             -180,
             0,
             90,
         ],
-        [-93.1, -11.8, expected_pick_z_mm, -180, 0, 90],
-        [-93.1, -11.8, 200.0, -180, 0, 90],
+        [pick_x, pick_y, expected_pick_z_mm, -180, 0, 90],
+        [pick_x, pick_y, 200.0, -180, 0, 90],
     ]
     for move, expected_pose in zip(clients.moves, expected_poses):
         assert move[0] == pytest.approx(expected_pose)
@@ -1326,3 +1343,47 @@ def test_formal_runner_rejects_calibration_target_type(monkeypatch, tmp_path):
 
     assert clients.moves == []
     assert clients.suction_states == []
+
+
+def test_abort_token_blocks_followup_action_and_marks_runner_aborted(monkeypatch, tmp_path):
+    module = _load_task_runner(monkeypatch)
+    token = module.TaskAbortToken()
+    state_events = []
+    runner = module.TaskRunner(
+        clients=_FakeClients(),
+        execution_config=_execution_config(),
+        visual_config=load_visual_servo_config(),
+        servo_csv_output_dir=tmp_path,
+        abort_token=token,
+        state_callback=state_events.append,
+    )
+    token.request()
+
+    with pytest.raises(module.TaskAbortedError):
+        runner.execute_all(1)
+
+    assert runner.state is module.TaskState.ABORTED
+    assert state_events[-1]["state"] == "已中止"
+
+
+def test_abort_requested_during_blocking_call_prevents_next_command(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    token = module.TaskAbortToken()
+    runner = module.TaskRunner(
+        clients=_FakeClients(),
+        execution_config=_execution_config(),
+        visual_config=load_visual_servo_config(),
+        abort_token=token,
+    )
+    calls = []
+
+    def blocking_operation():
+        calls.append("当前命令")
+        token.request()
+
+    with pytest.raises(module.TaskAbortedError):
+        runner._timed_call("模拟阻塞命令", blocking_operation)
+    if not token.requested:
+        calls.append("后续命令")
+
+    assert calls == ["当前命令"]

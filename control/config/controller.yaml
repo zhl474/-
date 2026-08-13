@@ -1,6 +1,13 @@
 # 是否输出 MoveL 动作的运动、保稳阶段耗时。调试完成后可改为 false。
 move_arm_timing_debug: true
 
+# 网页“停止运动”调用控制器 StopMotion 后的确认参数。
+stop_motion:
+  # 与机器人 XML-RPC 单次通信的超时，单位秒。
+  rpc_timeout_seconds: 1.0
+  # 最长等待多久确认运动完成且 TCP 速度降到停稳阈值以内。
+  confirm_timeout_seconds: 2.0
+
 # 机械臂 MoveL 返回后的停稳判定参数
 arm_stability:
   timeout_seconds: 5.0

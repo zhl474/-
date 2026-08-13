@@ -575,8 +575,9 @@ def test_optimizer_limits_and_motion_calibration_speed_are_explicit():
             _config(),
             线性批量时间模型(),
         )
-    with pytest.raises(ValueError, match="速度不一致"):
+    with pytest.raises(ValueError, match="速度不一致") as error:
         validate_motion_model_speeds(线性批量时间模型(), 99, 100)
+    assert error.type.__name__ == "MotionModelSpeedMismatchError"
 
 
 def test_legacy_shadow_execute_modes_have_expected_failure_isolation():

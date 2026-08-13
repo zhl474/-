@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="operator-token" content="{{ page_token }}">
+  <title>单臂俄罗斯方块 · 项目驾驶舱</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body>
+  <div id="emergency-overlay" class="emergency-overlay" hidden>
+    <div class="emergency-panel">
+      <span class="emergency-mark">!</span>
+      <div>
+        <strong>无法确认机械臂已经停止</strong>
+        <p id="emergency-message">请立即使用物理急停，并在现场确认设备状态。</p>
+      </div>
+    </div>
+  </div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      <div>
+        <strong>项目驾驶舱</strong>
+        <small>单臂俄罗斯方块 · 本机 127.0.0.1</small>
+      </div>
+    </div>
+    <div class="status-strip" id="status-strip">
+      <span class="status-chip" data-status="ros"><i></i>ROS <b>检查中</b></span>
+      <span class="status-chip" data-status="camera"><i></i>相机 <b>未连接</b></span>
+      <span class="status-chip" data-status="arm"><i></i>机械臂 <b>未连接</b></span>
+      <span class="status-chip" data-status="runtime"><i></i>感知 <b>未启动</b></span>
+      <span class="status-chip" data-status="holding"><i></i>持块 <b>否</b></span>
+      <span class="status-chip danger" data-status="stop"><i></i>停止锁 <b>未锁定</b></span>
+    </div>
+    <button id="global-stop" class="stop-button" type="button">
+      <span>停止运动</span><small>保持吸盘 · 锁住后续动作</small>
+    </button>
+  </header>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <nav aria-label="主要功能">
+        <button class="nav-item active" data-view="console" type="button"><span>01</span>运行控制台</button>
+        <button class="nav-item" data-view="manual" type="button"><span>02</span>手动控制</button>
+        <button class="nav-item" data-view="config" type="button"><span>03</span>参数中心</button>
+        <button class="nav-item" data-view="readonly" type="button"><span>04</span>只读与标定</button>
+        <button class="nav-item" data-view="logs" type="button"><span>05</span>运行日志</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="pending-box">
+          <small>待重启范围</small>
+          <strong id="pending-restart">无</strong>
+        </div>
+        <button id="exit-panel" class="text-button" type="button">显式退出控制台</button>
+        <p>关闭浏览器不会停止后台或硬件。</p>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <section id="view-console" class="view active">
+        <div class="view-heading">
+          <div>
+            <p class="eyebrow">运行控制台</p>
+            <h1>从识别到抓放，一条清晰的操作链</h1>
+          </div>
+          <div id="operation-indicator" class="operation-indicator idle"><i></i><span>当前无操作</span></div>
+        </div>
+
+        <div class="console-grid">
+          <div class="primary-column">
+            <article class="card process-card">
+              <div class="card-heading">
+                <div><span class="step-number">01</span><h2>启动与模式</h2></div>
+                <span class="hint">启动页面不会自动连接硬件</span>
+              </div>
+              <div class="process-row">
+                <div class="process-unit">
+                  <div><strong>硬件层</strong><small>相机 + 机械臂控制节点</small></div>
+                  <div class="button-group">
+                    <button id="hardware-start" class="button primary" type="button">启动硬件</button>
+                    <button id="hardware-stop" class="button ghost" type="button">停止硬件</button>
+                  </div>
+                </div>
+                <div class="process-divider"></div>
+                <div class="process-unit">
+                  <div><strong>感知模式</strong><small>模式切换会使识别结果失效</small></div>
+                  <div class="segmented" id="runtime-mode">
+                    <button data-mode="formal" type="button">正式</button>
+                    <button data-mode="calibration" type="button">标定</button>
+                  </div>
+                  <button id="runtime-stop" class="button ghost compact" type="button">停止感知</button>
+                </div>
+              </div>
+              <div class="readiness-line">
+                <span data-ready="control">控制服务</span>
+                <span data-ready="frame">新相机帧</span>
+                <span data-ready="model">感知服务</span>
+              </div>
+            </article>
+
+            <article class="card task-card">
+              <div class="card-heading">
+                <div><span class="step-number">02</span><h2>识别与任务</h2></div>
+                <span id="task-state-badge" class="state-badge">空闲</span>
+              </div>
+              <div class="task-mode-row">
+                <label class="radio-card">
+                  <input type="radio" name="task-level" value="basic" checked>
+                  <span><b>基础任务</b><small>使用固定 34 项盘面</small></span>
+                </label>
+                <label class="radio-card">
+                  <input type="radio" name="task-level" value="advanced">
+                  <span><b>进阶任务</b><small>指定七类方块优先顺序</small></span>
+                </label>
+              </div>
+              <div id="advanced-order-panel" class="advanced-order" hidden>
+                <div class="inline-heading">
+                  <div><strong>拖动调整顺序</strong><small>提交值会校验为 0～6 的无重复排列</small></div>
+                  <button id="reset-order" class="text-button" type="button">恢复默认</button>
+                </div>
+                <ol id="block-order" class="block-order"></ol>
+              </div>
+              <div class="task-actions">
+                <button id="task-prepare" class="button primary large" type="button">开始识别</button>
+                <button id="task-confirm" class="button secondary large" type="button">确认结果</button>
+                <button id="task-start" class="button success large" type="button">开始执行</button>
+              </div>
+              <div class="task-message" id="task-message">请先启动硬件和感知模式。</div>
+            </article>
+
+            <article class="card progress-card">
+              <div class="card-heading">
+                <div><span class="step-number">03</span><h2>任务进度</h2></div>
+                <strong id="progress-count">0 / 0</strong>
+              </div>
+              <div class="progress-track"><span id="progress-bar"></span></div>
+              <div class="progress-detail">
+                <div><small>当前阶段</small><strong id="progress-phase">未开始</strong></div>
+                <div><small>当前方块</small><strong id="progress-category">—</strong></div>
+                <div><small>目标类型</small><strong id="progress-target">—</strong></div>
+              </div>
+            </article>
+          </div>
+
+          <div class="visual-column">
+            <article class="card camera-card">
+              <div class="card-heading">
+                <div><h2>相机预览</h2><small>独立 JPEG 缓存 · 最多 2 FPS</small></div>
+                <span id="camera-time" class="mono">尚无画面</span>
+              </div>
+              <div class="image-frame camera-frame">
+                <img id="camera-image" alt="相机实时预览">
+                <div class="image-placeholder"><span>等待相机帧</span></div>
+              </div>
+            </article>
+            <article class="card debug-card">
+              <div class="card-heading">
+                <div><h2>识别调试图</h2><small>最新一次识别结果</small></div>
+                <button id="refresh-images" class="text-button" type="button">刷新</button>
+              </div>
+              <div class="debug-tabs" role="tablist">
+                <button class="active" data-image="block_mask" type="button">方块 Mask</button>
+                <button data-image="template_match" type="button">模板匹配</button>
+                <button data-image="board_grid" type="button">托盘格点</button>
+              </div>
+              <div class="image-frame debug-frame">
+                <img id="debug-image" alt="识别调试图">
+                <div class="image-placeholder"><span>识别后在此显示</span></div>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-manual" class="view">
+        <div class="view-heading">
+          <div><p class="eyebrow">手动控制</p><h1>把常用工具动作放在伸手可及的位置</h1></div>
+          <div class="safety-note">只在硬件就绪、任务空闲且停止锁未锁定时开放</div>
+        </div>
+        <div class="manual-grid">
+          <article class="card manual-card suction-card">
+            <div class="card-heading"><div><span class="tool-icon">吸</span><h2>电子吸盘</h2></div><span id="suction-status" class="state-badge">状态未知</span></div>
+            <p>普通喷气会在 1.0 秒后自动关闭。持续喷气必须再次确认。</p>
+            <div class="manual-actions">
+              <button class="button primary" data-suction="suck" type="button">吸气</button>
+              <button class="button ghost" data-suction="off" type="button">关闭</button>
+              <button class="button warning" data-suction="blow" type="button">喷气 1.0 秒</button>
+              <button class="button danger-outline" data-suction="continuous" type="button">持续喷气</button>
+            </div>
+          </article>
+
+          <article class="card manual-card servo-card">
+            <div class="card-heading"><div><span class="tool-icon">转</span><h2>末端舵机</h2></div><span id="servo-status" class="state-badge">角度未知</span></div>
+            <label class="field-label" for="servo-angle">目标绝对角度（0～360°）</label>
+            <div class="input-action">
+              <input id="servo-angle" type="number" min="0" max="360" step="0.1" value="180">
+              <button id="servo-send" class="button primary" type="button">旋转</button>
+            </div>
+            <div class="quick-buttons" id="servo-quick">
+              <button type="button" data-angle="0">0°</button><button type="button" data-angle="90">90°</button>
+              <button type="button" data-angle="180">180°</button><button type="button" data-angle="270">270°</button>
+              <button type="button" data-angle="360">360°</button><button type="button" data-angle="initial">回初始角</button>
+            </div>
+          </article>
+
+          <article class="card manual-card pose-card">
+            <div class="card-heading"><div><span class="tool-icon">位</span><h2>当前位姿</h2></div><button id="pose-refresh" class="text-button" type="button">读取位姿</button></div>
+            <div class="pose-values">
+              <div><small>TCP 位姿</small><code id="tcp-pose">尚未读取</code><button data-copy="tcp" type="button">复制</button></div>
+              <div><small>相机位姿</small><code id="camera-pose">尚未读取</code><button data-copy="camera" type="button">复制</button></div>
+            </div>
+          </article>
+
+          <article class="card manual-card reset-card">
+            <div class="card-heading"><div><span class="tool-icon">复</span><h2>机械臂复位</h2></div><span class="risk-tag">运动操作</span></div>
+            <p>复位目标来自 <code>execution.yaml / shooting_pose</code>，固定速度为 50。</p>
+            <div class="reset-pose"><small>完整目标位姿</small><code id="reset-pose">加载中…</code></div>
+            <button id="arm-reset" class="button warning full" type="button">确认位姿并复位</button>
+          </article>
+
+          <article class="card stop-card">
+            <div>
+              <span class="tool-icon stop-icon">停</span>
+              <div><h2>软件停止锁</h2><p>StopMotion + 中止任务 + 停止感知。不会关闭吸盘，也不会自动复位。</p></div>
+            </div>
+            <button id="clear-stop" class="button danger-outline" type="button">人工检查后解除停止锁</button>
+            <small>软件停止不替代安全等级物理急停。</small>
+          </article>
+        </div>
+      </section>
+
+      <section id="view-config" class="view">
+        <div class="view-heading config-heading">
+          <div><p class="eyebrow">参数中心</p><h1>只看需要改的参数，不再翻目录</h1></div>
+          <label class="search-box"><span>搜索</span><input id="config-search" type="search" placeholder="跨六份配置搜索字段、说明或值"></label>
+        </div>
+        <div class="config-layout">
+          <aside class="config-sidebar">
+            <div id="config-files" class="config-files"></div>
+            <div class="preset-panel">
+              <div class="inline-heading"><strong>完整配置预设</strong><button id="preset-new" class="text-button" type="button">保存当前</button></div>
+              <div id="preset-list" class="preset-list"></div>
+            </div>
+          </aside>
+          <div class="config-main">
+            <article class="card config-toolbar">
+              <div>
+                <p class="eyebrow" id="config-file-id">尚未选择</p>
+                <h2 id="config-title">请选择一份配置</h2>
+                <p id="config-description">字段说明来自原 YAML 中文注释和已验证的代码约束。</p>
+              </div>
+              <div class="toolbar-actions">
+                <span id="dirty-count" class="dirty-count">无修改</span>
+                <button id="config-reload" class="button ghost" type="button">重新加载</button>
+                <button id="config-diff" class="button ghost" type="button">查看差异</button>
+                <button id="config-save" class="button secondary" type="button">保存</button>
+                <button id="config-apply" class="button primary" type="button">保存并应用</button>
+              </div>
+            </article>
+            <div id="config-search-results" class="search-results" hidden></div>
+            <div id="config-editor" class="config-editor empty-state">
+              <div><strong>选择左侧配置卡片</strong><p>页面会按 YAML 层级显示全部现有字段，不允许增加、删除键或改变固定数组长度。</p></div>
+            </div>
+            <article class="card history-panel">
+              <div class="card-heading"><div><h2>修改历史</h2><small>每次保存记录修改前后全文、差异、Git 版本和时间</small></div><button id="history-refresh" class="text-button" type="button">刷新</button></div>
+              <div id="history-list" class="history-list"><p class="muted">选择配置后加载历史。</p></div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-readonly" class="view">
+        <div class="view-heading">
+          <div><p class="eyebrow">只读配置与标定</p><h1>看得到版本、误差和覆盖范围，但不零散改矩阵</h1></div>
+          <button id="readonly-refresh" class="button ghost" type="button">刷新资料</button>
+        </div>
+        <div id="readonly-content" class="readonly-content">
+          <article class="card empty-state"><div><strong>正在读取只读配置</strong><p>盘面、像素标定和手眼矩阵会在此汇总。</p></div></article>
+        </div>
+        <article class="card deploy-card">
+          <div class="card-heading"><div><h2>整文件替换</h2><small>仅在硬件空闲时开放；替换前自动备份</small></div><span class="risk-tag">专家操作</span></div>
+          <div class="deploy-grid">
+            <div>
+              <strong>方块 + 托盘像素标定</strong>
+              <p>两份 YAML 必须同时选择，并通过 schema、主体和 generation_id 一致性校验。</p>
+              <label class="file-field">方块 YAML<input id="block-calibration-file" type="file" accept=".yaml,.yml"></label>
+              <label class="file-field">托盘 YAML<input id="tray-calibration-file" type="file" accept=".yaml,.yml"></label>
+              <button id="deploy-calibration" class="button warning" type="button">校验并成对部署</button>
+            </div>
+            <div>
+              <strong>手眼矩阵</strong>
+              <p>V1 使用 JSON 格式的有限 4×4 数组整文件导入；页面不提供逐项编辑。</p>
+              <label class="file-field">4×4 JSON<input id="hand-eye-file" type="file" accept=".json,application/json"></label>
+              <button id="deploy-hand-eye" class="button warning" type="button">校验并部署矩阵</button>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="view-logs" class="view">
+        <div class="view-heading">
+          <div><p class="eyebrow">运行日志</p><h1>ROS 与 launch 输出汇总</h1></div>
+          <div class="log-controls">
+            <label>级别<select id="log-level"><option value="all">全部</option><option value="debug">调试</option><option value="info">信息</option><option value="warning">警告</option><option value="error">错误 / 致命</option></select></label>
+            <input id="log-search" type="search" placeholder="搜索来源或消息">
+            <label class="switch"><input id="log-autoscroll" type="checkbox" checked><span></span>自动滚动</label>
+            <button id="log-clear" class="button ghost compact" type="button">清空显示</button>
+          </div>
+        </div>
+        <article class="log-panel">
+          <div class="log-header"><span>时间</span><span>级别</span><span>来源</span><span>消息</span></div>
+          <div id="log-list" class="log-list"></div>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+
+  <dialog id="confirm-dialog" class="modal">
+    <form method="dialog">
+      <div class="modal-mark">!</div>
+      <h2 id="confirm-title">请确认操作</h2>
+      <p id="confirm-message"></p>
+      <pre id="confirm-detail" hidden></pre>
+      <div class="modal-actions">
+        <button value="cancel" class="button ghost">取消</button>
+        <button value="confirm" class="button warning">确认继续</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="diff-dialog" class="modal wide">
+    <form method="dialog">
+      <div class="card-heading"><div><p class="eyebrow">配置差异</p><h2 id="diff-title">修改预览</h2></div><button value="cancel" class="close-button" aria-label="关闭">×</button></div>
+      <pre id="diff-content" class="diff-content"></pre>
+    </form>
+  </dialog>
+
+  <script type="module" src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

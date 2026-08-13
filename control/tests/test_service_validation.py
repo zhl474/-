@@ -27,9 +27,25 @@ def _load_controller(monkeypatch):
 
     control = types.ModuleType("control")
     control.srv = types.ModuleType("control.srv")
-    for name in ("GetActualPose", "MoveArm", "RotateTool", "SetSuction"):
+    for name in (
+        "ClearArmStop",
+        "GetActualPose",
+        "GetControlStatus",
+        "MoveArm",
+        "RotateTool",
+        "SetSuction",
+        "StopArm",
+    ):
         setattr(control.srv, name, object)
-    for name in ("GetActualPoseResponse", "MoveArmResponse", "RotateToolResponse", "SetSuctionResponse"):
+    for name in (
+        "ClearArmStopResponse",
+        "GetActualPoseResponse",
+        "GetControlStatusResponse",
+        "MoveArmResponse",
+        "RotateToolResponse",
+        "SetSuctionResponse",
+        "StopArmResponse",
+    ):
         setattr(control.srv, name, _Response)
     monkeypatch.setitem(sys.modules, "control", control)
     monkeypatch.setitem(sys.modules, "control.srv", control.srv)
@@ -158,6 +174,22 @@ def test_wait_until_arm_stable_uses_motion_speed_and_pose(monkeypatch):
     node._wait_until_arm_stable(target_pose)
 
     assert clock.now == 0.01
+
+
+def test_wait_until_arm_stable_exits_immediately_when_stop_is_latched(monkeypatch):
+    module = _load_controller(monkeypatch)
+    node = object.__new__(module.ControlNode)
+    node.stop_latched = True
+    node.arm = types.SimpleNamespace(
+        arm=types.SimpleNamespace(
+            GetRobotMotionDone=lambda: (_ for _ in ()).throw(
+                AssertionError("停止锁生效后不应继续轮询运动")
+            )
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="停止锁"):
+        node._wait_until_arm_stable([0, 0, 200, 0, 0, 0])
 
 
 def test_move_arm_logs_motion_and_stabilization_timing(monkeypatch):
@@ -436,3 +468,199 @@ def test_set_suction_rejects_unknown_state_without_hardware_action(monkeypatch):
     assert response.success is False
     assert "未知吸盘状态" in response.message
     assert calls == []
+
+
+def test_stop_arm_latches_before_calling_rpc_and_confirms_stop(monkeypatch):
+    module = _load_controller(monkeypatch)
+    calls = []
+
+    class FakeRpc:
+        def StopMotion(self):
+            calls.append("StopMotion")
+            assert node.stop_latched is True
+            return 0
+
+        def GetRobotMotionDone(self):
+            return [0, 1]
+
+        def GetActualTCPCompositeSpeed(self, flag):
+            calls.append(("GetActualTCPCompositeSpeed", flag))
+            return [0, 0.0, 0.0]
+
+    node = object.__new__(module.ControlNode)
+    node._create_stop_rpc = lambda: FakeRpc()
+
+    response = node.stop_arm(None)
+
+    assert response.success is True
+    assert response.stop_latched is True
+    assert node.stop_latched is True
+    assert calls == ["StopMotion", ("GetActualTCPCompositeSpeed", 1)]
+
+
+def test_stop_arm_failure_keeps_latch_and_warns_physical_estop(monkeypatch):
+    module = _load_controller(monkeypatch)
+    node = object.__new__(module.ControlNode)
+    node._create_stop_rpc = lambda: types.SimpleNamespace(StopMotion=lambda: 9)
+
+    response = node.stop_arm(None)
+
+    assert response.success is False
+    assert response.stop_latched is True
+    assert node.stop_latched is True
+    assert "物理急停" in response.message
+
+
+def test_stop_arm_repeats_stop_until_racing_move_handler_finishes(monkeypatch):
+    module = _load_controller(monkeypatch)
+    calls = []
+
+    class FakeRpc:
+        def StopMotion(self):
+            calls.append("StopMotion")
+            return 0
+
+        def GetRobotMotionDone(self):
+            return [0, 1]
+
+        def GetActualTCPCompositeSpeed(self, _flag):
+            if calls.count("StopMotion") >= 2:
+                node.motion_active = False
+            return [0, 0.0, 0.0]
+
+    node = object.__new__(module.ControlNode)
+    node.motion_active = True
+    node.stop_confirm_timeout = 0.2
+    node.stable_poll_interval = 0.001
+    node._create_stop_rpc = lambda: FakeRpc()
+
+    response = node.stop_arm(None)
+
+    assert response.success is True
+    assert calls.count("StopMotion") >= 2
+
+
+def test_move_that_overlaps_stop_returns_failure_before_next_action(monkeypatch):
+    module = _load_controller(monkeypatch)
+    node = object.__new__(module.ControlNode)
+    node.stop_latched = False
+    node.minimum_z = 165.0
+    node.arm = types.SimpleNamespace()
+    node.arm.set_speed = lambda _speed: None
+
+    def move_l(*_args, **_kwargs):
+        node.stop_latched = True
+        return 0
+
+    node.arm.arm = types.SimpleNamespace(MoveL=move_l)
+    response = node.move_arm(types.SimpleNamespace(
+        pose=[0, 0, 200, 0, 0, 0], speed=20,
+        wait_until_stable=False, blend_enabled=False, blend_radius_mm=0.0,
+    ))
+
+    assert response.success is False
+    assert "停止锁中止" in response.message
+
+
+def test_stop_latch_rejects_arm_and_servo_but_allows_suction(monkeypatch):
+    module = _load_controller(monkeypatch)
+    hardware_calls = []
+    node = object.__new__(module.ControlNode)
+    node.stop_latched = True
+    node.minimum_z = 165.0
+    node.arm = types.SimpleNamespace(
+        set_speed=lambda _speed: hardware_calls.append("set_speed"),
+        arm=types.SimpleNamespace(MoveL=lambda *_args, **_kwargs: hardware_calls.append("MoveL")),
+    )
+    node.servo_serial = types.SimpleNamespace(
+        write=lambda _data: hardware_calls.append("servo")
+    )
+    node.sucker = types.SimpleNamespace(
+        set_solenoid_valve=lambda enabled: hardware_calls.append(("电磁阀", enabled)),
+        set_pump_motor=lambda enabled: hardware_calls.append(("气泵", enabled)),
+    )
+
+    move_response = node.move_arm(types.SimpleNamespace(
+        pose=[0, 0, 200, 0, 0, 0],
+        speed=20,
+        wait_until_stable=False,
+        blend_enabled=False,
+        blend_radius_mm=0.0,
+    ))
+    servo_response = node.rotate_tool(types.SimpleNamespace(angle_deg=180.0))
+    suction_response = node.set_suction(
+        types.SimpleNamespace(state=2, SUCK=0, BLOW=1, OFF=2)
+    )
+
+    assert move_response.success is False
+    assert servo_response.success is False
+    assert suction_response.success is True
+    assert hardware_calls == [("电磁阀", False), ("气泵", False)]
+
+
+def test_clear_stop_requires_confirmed_stable_motion(monkeypatch):
+    module = _load_controller(monkeypatch)
+    node = object.__new__(module.ControlNode)
+    node.stop_latched = True
+    node._query_motion_state = lambda: (False, 4.0, 0.2)
+
+    rejected = node.clear_arm_stop(None)
+
+    assert rejected.success is False
+    assert rejected.stop_latched is True
+
+    node._query_motion_state = lambda: (True, 0.0, 0.0)
+    accepted = node.clear_arm_stop(None)
+
+    assert accepted.success is True
+    assert accepted.stop_latched is False
+    assert node.stop_latched is False
+
+
+def test_clear_stop_rejects_racing_old_move_handler(monkeypatch):
+    module = _load_controller(monkeypatch)
+    node = object.__new__(module.ControlNode)
+    node.stop_latched = True
+    node.motion_active = True
+    node._query_motion_state = lambda: (_ for _ in ()).throw(
+        AssertionError("旧运动线程存在时不应只按瞬时速度解锁")
+    )
+
+    response = node.clear_arm_stop(None)
+
+    assert response.success is False
+    assert response.stop_latched is True
+    assert "仍在执行" in response.message
+
+
+def test_control_status_reports_last_commanded_states(monkeypatch):
+    module = _load_controller(monkeypatch)
+    node = object.__new__(module.ControlNode)
+    node.stop_latched = True
+    node.commanded_suction_state = 0
+    node.servo_target_known = True
+    node.servo_target_angle_deg = 135.0
+    node._query_motion_state = lambda: (True, 0.0, 0.0)
+
+    response = node.get_control_status(None)
+
+    assert response.success is True
+    assert response.stop_latched is True
+    assert response.motion_state_known is True
+    assert response.motion_done is True
+    assert response.commanded_suction_state == 0
+    assert response.servo_target_known is True
+    assert response.servo_target_angle_deg == 135.0
+
+
+def test_control_status_does_not_report_done_while_move_handler_is_active(monkeypatch):
+    module = _load_controller(monkeypatch)
+    node = object.__new__(module.ControlNode)
+    node.motion_active = True
+    node._query_motion_state = lambda: (True, 0.0, 0.0)
+
+    response = node.get_control_status(None)
+
+    assert response.motion_state_known is True
+    assert response.motion_done is False
+    assert "仍在执行" in response.message
