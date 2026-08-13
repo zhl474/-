@@ -147,9 +147,9 @@ BASE_SHAPES: Dict[str, Tuple[Tuple[int, int], ...]] = {
 
 ANGLE_OUTPUT_MAP = {
     0: 0,
-    90: 90,
+    90: -90,
     180: 180,
-    -90: -90,
+    -90: 90,
 }
 
 # bit mask：LU=1, RU=2, LD=4, RD=8
