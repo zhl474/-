@@ -44,6 +44,25 @@ def test六份YAML完整读取且建立初始稳定预设(manager):
     assert template["schema"]["template_sizes.active_profile"]["options"] == ["high", "low"]
 
 
+def test图像识别参数所有大字号标签均为中文(manager):
+    schema = manager.get_config("perception")["schema"]
+
+    def has_cjk(text):
+        return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+    for path, metadata in schema.items():
+        assert has_cjk(metadata["label"]), f"{path} 的大字号标签仍是英文：{metadata['label']}"
+
+    # 锁定若干关键映射与危险标记（models/calibration 子项风险不得因补标签而丢失）
+    assert schema["models.detection"]["label"] == "方块检测模型"
+    assert schema["models.detection"]["risk"] == "danger"
+    assert schema["dynamic_board_selection"]["label"] == "动态盘面选择"
+    assert schema["high_template_match.size_tolerance_px"]["label"] == "尺寸筛选容差"
+    assert schema["calibration.block_pixel_to_tcp"]["label"] == "方块像素-TCP 标定文件"
+    assert schema["calibration.block_pixel_to_tcp"]["risk"] == "danger"
+    assert schema["board_servo.min_dot_circularity"]["label"] == "最小圆点圆度"
+
+
 def test保存保留中文注释并记录差异(manager):
     document = manager.get_config("execution")
     document["data"]["servo"]["timing_debug"] = not document["data"]["servo"]["timing_debug"]

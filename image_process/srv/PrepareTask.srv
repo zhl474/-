@@ -6,3 +6,4 @@ int32 task_count
 int32 block_count
 int32 tray_count
 string message
+string layout_json

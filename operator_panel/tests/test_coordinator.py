@@ -589,3 +589,34 @@ def test停止执行要求处于执行中或已暂停():
     coordinator, _supervisor, _ros = make_coordinator()
     with pytest.raises(OperationRejected, match="没有正在执行"):
         coordinator.stop_execution()
+
+
+def test暂停释放操作队列且继续恢复():
+    coordinator, _supervisor, _ros = make_coordinator()
+    coordinator._pause_token = FakePauseToken()
+    with coordinator._lock:
+        coordinator._state["task"]["state"] = "执行中"
+        coordinator._active_operation = {
+            "operation_id": "exec", "kind": "执行任务", "status": "running",
+        }
+
+    coordinator.pause_task()
+    assert coordinator._active_operation is None
+    assert coordinator._execution_operation["kind"] == "执行任务"
+
+    coordinator.resume_task()
+    assert coordinator._active_operation["kind"] == "执行任务"
+    assert coordinator._execution_operation is None
+
+
+def test继续在手動操作进行中时拒绝():
+    coordinator, _supervisor, _ros = make_coordinator()
+    coordinator._pause_token = FakePauseToken()
+    with coordinator._lock:
+        coordinator._state["task"]["state"] = "已暂停"
+        coordinator._active_operation = {
+            "operation_id": "manual", "kind": "吸盘控制", "status": "running",
+        }
+
+    with pytest.raises(OperationRejected, match="手动操作进行中"):
+        coordinator.resume_task()

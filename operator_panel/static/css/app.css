@@ -18,6 +18,7 @@
   --shadow: 0 12px 34px rgba(30, 48, 41, .07);
   --radius: 18px;
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --emergency-h: 46px;
 }
 
 * { box-sizing: border-box; }
@@ -437,11 +438,14 @@ code, .mono { font-family: var(--mono); }
 .close-button { border: 0; color: var(--muted); background: transparent; font-size: 24px; cursor: pointer; }
 .diff-content { min-height: 350px; max-height: 70vh !important; color: #d9e6e1 !important; background: #17231f !important; }
 
-.emergency-overlay { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 30px; color: white; background: rgba(128, 0, 6, .93); animation: emergency-pulse 1.2s infinite alternate; }
-.emergency-panel { max-width: 880px; display: flex; align-items: center; gap: 25px; padding: 32px; border: 3px solid white; border-radius: 20px; background: #a30f16; box-shadow: 0 0 0 8px rgba(255,255,255,.12); }
-.emergency-mark { display: grid; place-items: center; flex: 0 0 auto; width: 90px; height: 90px; border-radius: 50%; color: #a30f16; background: white; font-size: 65px; font-weight: 900; }
-.emergency-panel strong { font-size: 34px; }
-.emergency-panel p { margin: 8px 0 0; font-size: 18px; }
+.emergency-overlay { position: fixed; z-index: 100; inset: 0 0 auto 0; height: var(--emergency-h); display: flex; align-items: center; gap: 12px; padding: 0 22px; color: #fff; background: #a30f16; border-bottom: 2px solid #ffd7d9; box-shadow: 0 6px 18px rgba(120, 0, 6, .28); animation: emergency-pulse 1.2s infinite alternate; }
+.emergency-mark { display: grid; place-items: center; flex: 0 0 auto; width: 28px; height: 28px; border-radius: 50%; color: #a30f16; background: #fff; font-size: 19px; font-weight: 900; }
+.emergency-body { min-width: 0; display: flex; align-items: baseline; gap: 14px; overflow: hidden; }
+.emergency-body strong { flex: 0 0 auto; font-size: 15px; white-space: nowrap; }
+.emergency-body p { margin: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+body.has-emergency .topbar { top: var(--emergency-h); }
+body.has-emergency .sidebar { top: calc(72px + var(--emergency-h)); }
+body.has-emergency .app-shell { padding-top: calc(72px + var(--emergency-h)); }
 @keyframes emergency-pulse { from { background: rgba(120,0,6,.92); } to { background: rgba(166,0,9,.96); } }
 
 @media (max-width: 1380px) {

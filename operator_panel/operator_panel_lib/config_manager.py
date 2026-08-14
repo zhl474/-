@@ -129,6 +129,12 @@ FIELD_OVERRIDES = {
     "execution.motion.pick_retreat_blend_radius_mm": {
         "label": "抓后抬升圆滑半径", "risk": "danger", "unit": "mm",
     },
+    "execution.motion.place_descent_offset_mm": {
+        "label": "摆放下探深度", "risk": "danger", "unit": "mm",
+    },
+    "execution.motion.place_descent_blend_radius_mm": {
+        "label": "摆放下探圆滑半径", "risk": "danger", "unit": "mm",
+    },
     "execution.tool_motor.initial_angle_deg": {
         "label": "舵机初始角度", "unit": "°", "risk": "warning", "min": 0, "max": 360,
     },
@@ -144,13 +150,35 @@ FIELD_OVERRIDES = {
     "visual_servo.camera_to_sucker_offset_mm": {
         "label": "相机到吸盘偏移", "unit": "mm", "risk": "danger",
     },
+    # --- 图像识别参数（perception）分组与字段大字号中文名 ---
     "perception.models": {
-        "label": "推理模型路径", "risk": "danger",
+        "label": "推理模型", "risk": "danger",
         "description": "模型路径修改后必须重新启动感知节点。",
+    },
+    "perception.models.detection": {
+        "label": "方块检测模型", "risk": "danger",
+    },
+    "perception.models.board": {
+        "label": "托盘外框识别模型", "risk": "danger",
+    },
+    "perception.models.segmentation": {
+        "label": "方块上表面分割模型", "risk": "danger",
+    },
+    "perception.task_sequence_optimizer": {
+        "label": "固定盘面任务序列优化",
     },
     "perception.task_sequence_optimizer.mode": {
         "label": "固定盘面优化模式", "options": ["legacy", "shadow", "execute"],
         "risk": "warning",
+    },
+    "perception.task_sequence_optimizer.beam_width": {
+        "label": "束搜索宽度",
+    },
+    "perception.task_sequence_optimizer.report_top_candidates": {
+        "label": "记录候选方案数",
+    },
+    "perception.dynamic_board_selection": {
+        "label": "动态盘面选择",
     },
     "perception.dynamic_board_selection.mode": {
         "label": "动态盘面模式", "options": ["disabled", "shadow", "execute"],
@@ -159,11 +187,113 @@ FIELD_OVERRIDES = {
     "perception.dynamic_board_selection.library_path": {
         "label": "动态盘面库路径", "risk": "danger",
     },
-    "perception.high_mask_manual_editor.preview_device": {
-        "label": "Mask 预览设备", "options": ["cpu", "cuda"],
+    "perception.dynamic_board_selection.coarse_top_k": {
+        "label": "粗筛候选数",
+    },
+    "perception.dynamic_board_selection.final_candidate_k": {
+        "label": "最终候选数",
+    },
+    "perception.dynamic_board_selection.keep_coarse_boundary_ties": {
+        "label": "粗筛边界并列保留",
+    },
+    "perception.dynamic_board_selection.comparison_beam_width": {
+        "label": "比较束搜索宽度",
+    },
+    "perception.dynamic_board_selection.comparison_returned_candidates": {
+        "label": "比较返回候选数",
+    },
+    "perception.dynamic_board_selection.comparison_worker_count": {
+        "label": "比较并行进程数",
+    },
+    "perception.dynamic_board_selection.confirmation_candidate_k": {
+        "label": "确认候选数",
+    },
+    "perception.dynamic_board_selection.confirmation_beam_width": {
+        "label": "确认束搜索宽度",
+    },
+    "perception.dynamic_board_selection.confirmation_returned_candidates": {
+        "label": "确认返回候选数",
+    },
+    "perception.dynamic_board_selection.confirmation_worker_count": {
+        "label": "确认并行进程数",
+    },
+    "perception.dynamic_board_selection.soft_time_budget_sec": {
+        "label": "软时间预算",
+    },
+    "perception.dynamic_board_selection.failure_prompt_timeout_sec": {
+        "label": "失败提示超时",
+    },
+    "perception.high_mask_manual_editor": {
+        "label": "高位 Mask 人工编辑",
+    },
+    "perception.high_mask_manual_editor.enabled": {
+        "label": "启用人工 Mask 编辑",
     },
     "perception.high_mask_manual_editor.script": {
         "label": "Mask 编辑器脚本", "risk": "danger",
+    },
+    "perception.high_mask_manual_editor.preview_device": {
+        "label": "Mask 预览设备", "options": ["cpu", "cuda"],
+    },
+    "perception.calibration": {
+        "label": "标定文件", "risk": "danger",
+    },
+    "perception.calibration.block_pixel_to_tcp": {
+        "label": "方块像素-TCP 标定文件", "risk": "danger",
+    },
+    "perception.calibration.tray_pixel_to_tcp": {
+        "label": "托盘像素-TCP 标定文件", "risk": "danger",
+    },
+    "perception.calibration.hand_eye_matrix": {
+        "label": "手眼矩阵文件", "risk": "danger",
+    },
+    "perception.high_template_match": {
+        "label": "高位模板匹配",
+    },
+    "perception.high_template_match.enabled": {
+        "label": "启用高位快速匹配",
+    },
+    "perception.high_template_match.size_tolerance_px": {
+        "label": "尺寸筛选容差",
+    },
+    "perception.high_template_match.relaxed_size_tolerance_px": {
+        "label": "放宽尺寸容差",
+    },
+    "perception.high_template_match.min_candidate_angles": {
+        "label": "最少候选角度数",
+    },
+    "perception.high_template_match.kernel_safety_margin_px": {
+        "label": "核安全边距",
+    },
+    "perception.high_template_match.minimum_translation_margin_px": {
+        "label": "最小平移余量",
+    },
+    "perception.high_template_match.legacy_fallback_enabled": {
+        "label": "尺寸失败回退慢匹配",
+    },
+    "perception.calibration_depth": {
+        "label": "深度标定",
+    },
+    "perception.calibration_depth.frame_count": {
+        "label": "深度采集帧数",
+    },
+    "perception.calibration_depth.min_valid_frames": {
+        "label": "最少有效帧数",
+    },
+    "perception.calibration_depth.capture_timeout_sec": {
+        "label": "采集超时",
+    },
+    "perception.calibration_depth.block_max_mad_mm": {
+        "label": "方块深度 MAD 上限",
+    },
+    "perception.calibration_depth.block_plane_max_rmse_mm": {
+        "label": "方块平面 RMSE 上限",
+    },
+    "perception.calibration_depth.tray_tcp_below_block_observation_mm": {
+        "label": "托盘相对方块观察高度差", "unit": "mm", "risk": "danger",
+    },
+    "perception.high_tcp_localization": {
+        "label": "高位 TCP 定位",
     },
     "perception.high_tcp_localization.safe_x_range_mm": {
         "label": "高位定位 X 安全范围", "unit": "mm", "risk": "danger",
@@ -171,14 +301,83 @@ FIELD_OVERRIDES = {
     "perception.high_tcp_localization.safe_y_range_mm": {
         "label": "高位定位 Y 安全范围", "unit": "mm", "risk": "danger",
     },
+    "perception.pick_height": {
+        "label": "抓取高度",
+    },
     "perception.pick_height.block_observation_height_mm": {
         "label": "方块观察高度", "unit": "mm", "risk": "danger",
     },
-    "perception.calibration_depth.tray_tcp_below_block_observation_mm": {
-        "label": "托盘相对方块观察高度差", "unit": "mm", "risk": "danger",
+    "perception.fallback": {
+        "label": "回退兜底",
     },
-    "perception.calibration": {
-        "label": "标定文件路径", "risk": "danger",
+    "perception.fallback.color_segmentation": {
+        "label": "颜色分割回退",
+    },
+    "perception.block_servo": {
+        "label": "方块视觉伺服",
+    },
+    "perception.block_servo.search_radius_px": {
+        "label": "搜索半径",
+    },
+    "perception.block_servo.fallback_search_radius_px": {
+        "label": "回退搜索半径",
+    },
+    "perception.block_servo.boundary_guard_px": {
+        "label": "边界保护像素",
+    },
+    "perception.block_servo.kernel_safety_margin_px": {
+        "label": "核安全边距",
+    },
+    "perception.block_servo.legacy_fallback_enabled": {
+        "label": "异常回退旧慢速匹配",
+    },
+    "perception.block_servo.angle_window_deg": {
+        "label": "角度窗口",
+    },
+    "perception.block_servo.angle_step_deg": {
+        "label": "角度步长",
+    },
+    "perception.block_servo.white_s_max": {
+        "label": "白色饱和度上限",
+    },
+    "perception.block_servo.white_v_min": {
+        "label": "白色亮度下限",
+    },
+    "perception.block_servo.min_foreground_area": {
+        "label": "最小前景面积",
+    },
+    "perception.board_servo": {
+        "label": "托盘视觉伺服",
+    },
+    "perception.board_servo.roi_half_size": {
+        "label": "ROI 半尺寸",
+    },
+    "perception.board_servo.blackhat_kernel_size": {
+        "label": "黑帽核尺寸",
+    },
+    "perception.board_servo.min_dot_area": {
+        "label": "最小圆点面积",
+    },
+    "perception.board_servo.max_dot_area": {
+        "label": "最大圆点面积",
+    },
+    "perception.board_servo.min_dot_circularity": {
+        "label": "最小圆点圆度",
+    },
+    "perception.board_servo.max_dot_aspect_ratio": {
+        "label": "最大圆点长宽比",
+    },
+    "perception.visual_servo_debug": {
+        "label": "视觉伺服调试",
+    },
+    "perception.visual_servo_debug.enabled": {
+        "label": "启用视觉伺服调试",
+    },
+    "perception.visual_servo_debug.output_dir": {
+        "label": "调试视频输出目录",
+    },
+    "perception.visual_servo_debug.video_fps": {
+        "label": "调试视频帧率",
     },
     "controller.stop_motion": {
         "label": "软件停止确认参数", "risk": "danger", "unit": "s",
@@ -493,6 +692,12 @@ class ConfigManager:
         blend = _finite_number(motion["pick_retreat_blend_radius_mm"], "motion.pick_retreat_blend_radius_mm", nonnegative=True)
         if blend > 1000:
             raise ConfigError("motion.pick_retreat_blend_radius_mm 必须小于等于 1000")
+        descent_offset = _finite_number(motion["place_descent_offset_mm"], "motion.place_descent_offset_mm", nonnegative=True)
+        descent_blend = _finite_number(motion["place_descent_blend_radius_mm"], "motion.place_descent_blend_radius_mm", nonnegative=True)
+        if descent_blend > 1000:
+            raise ConfigError("motion.place_descent_blend_radius_mm 必须小于等于 1000")
+        if descent_offset > 0 and descent_blend >= descent_offset:
+            raise ConfigError("motion.place_descent_blend_radius_mm 必须小于 motion.place_descent_offset_mm")
         minimum_z = _finite_number(motion["minimum_tcp_z_mm"], "motion.minimum_tcp_z_mm", positive=True)
         if float(pose[2]) < minimum_z:
             raise ConfigError("shooting_pose 的 Z 低于 minimum_tcp_z_mm")

@@ -180,6 +180,7 @@ class ImageProcessor:
             raise ValueError("image_topic 必须是非空字符串")
         self.image_topic = self.image_topic.strip()
         self.task_targets = []
+        self.last_board_layout = []
         self.board_grid_points = None
         self.board_grid_image_shape = None
         self.board_grid_image = None
@@ -1466,6 +1467,36 @@ class ImageProcessor:
         )
         return layout, f"进阶任务布局，极限填满 {fill_line} 行"
 
+    @staticmethod
+    def _layout_to_board_dicts(layout):
+        """把布局（含 cells）序列化为统一盘面结构，供网页只读展示。"""
+        return [
+            {
+                "col": float(item["col"]),
+                "row": float(item["row"]),
+                "angle_deg": float(item["angle_deg"]),
+                "category": str(item["category"]),
+                "cells": [[int(col), int(row)] for col, row in item["cells"]],
+            }
+            for item in layout
+        ]
+
+    def _v5_decision_to_board_dicts(self, decision):
+        """从 V5 决策 + 盘面库重建盘面结构（含 cells），供网页只读展示。"""
+        library = self.dynamic_board_library
+        targets = []
+        for pid in decision.placement_pids:
+            pid = int(pid)
+            category = str(library.category_names[int(library.placement_category[pid])])
+            targets.append({
+                "col": float(library.placement_col[pid]),
+                "row": float(library.placement_row[pid]),
+                "angle_deg": float(library.placement_yaw_clockwise_deg[pid]),
+                "category": category,
+                "cells": [[int(col), int(row)] for col, row in library.placement_cells[pid]],
+            })
+        return targets
+
     def _build_placement_targets(self, layout, image_shape):
         """把布局格点转换成摆放粗观察位。"""
         targets = []
@@ -2290,6 +2321,7 @@ class ImageProcessor:
                 block_count=0,
                 tray_count=0,
                 message="已有一轮高位识别或人工编辑正在进行，请勿并发请求",
+                layout_json="",
             )
         try:
             return self._prepare_task_locked(request)
@@ -2300,6 +2332,7 @@ class ImageProcessor:
     def _prepare_task_locked(self, request):
         """用同一高位图像快照完成托盘、方块识别与任务规划。"""
         self.task_targets = []
+        self.last_board_layout = []
         self.board_grid_points = None
         self.board_grid_image_shape = None
         self.board_grid_image = None
@@ -2316,6 +2349,7 @@ class ImageProcessor:
                 block_count=0,
                 tray_count=0,
                 message=f"等待高位新图像超时（{self.fresh_image_timeout_sec:.1f} 秒）",
+                layout_json="",
             )
         block_count = 0
         tray_count = 0
@@ -2340,6 +2374,7 @@ class ImageProcessor:
                 raw_blocks, raw_debug_image, geometry = self._detect_blocks_automatic(image)
                 preliminary_blocks, cube_counts = self._summarize_detected_blocks(raw_blocks)
                 layout, layout_message = self._load_layout_for_request(request, cube_counts)
+                self.last_board_layout = self._layout_to_board_dicts(layout)
                 dynamic_execute_requested = (
                     not request.advanced
                     and getattr(
@@ -2395,6 +2430,7 @@ class ImageProcessor:
                 if dynamic_mode == "execute" and dynamic_state is not None:
                     decision = dynamic_state["decision"]
                     self.task_targets = list(decision.tasks)
+                    self.last_board_layout = self._v5_decision_to_board_dicts(decision)
                     layout_message = f"V5 动态盘面 {decision.board_id}"
                     planner_message = (
                         "动态 execute 确认路径，指纹="
@@ -2467,6 +2503,7 @@ class ImageProcessor:
                             ) from continue_exc
                         decision = dynamic_state["decision"]
                         self.task_targets = list(decision.tasks)
+                        self.last_board_layout = self._v5_decision_to_board_dicts(decision)
                         layout_message = f"V5 动态盘面 {decision.board_id}"
                         planner_message = (
                             "动态 execute 已人工忽略时间标定速度不一致，"
@@ -2629,6 +2666,7 @@ class ImageProcessor:
                 block_count=block_count,
                 tray_count=tray_count,
                 message=message,
+                layout_json=json.dumps(self.last_board_layout),
             )
         except HighTcpSafetyCheckError as exc:
             self.task_targets = []
@@ -2643,6 +2681,7 @@ class ImageProcessor:
                 block_count=0,
                 tray_count=0,
                 message=str(exc),
+                layout_json="",
             )
         except Exception as exc:
             self.task_targets = []
@@ -2653,6 +2692,7 @@ class ImageProcessor:
                 block_count=0,
                 tray_count=0,
                 message=str(exc),
+                layout_json="",
             )
 
     def get_task_target(self, request):

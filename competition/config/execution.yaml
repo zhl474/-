@@ -43,6 +43,15 @@ motion:
   # 大于 0 时机械臂不会在抬升点停下，而会圆滑拐向托盘区域；0 表示关闭圆滑。
   pick_retreat_blend_radius_mm: 5.0
 
+  # 摆放释放前的下探深度，单位 mm。
+  # 到达最终摆放位后继续竖直下探该距离再喷气；0 表示关闭下探、直接在释放高度喷气。
+  place_descent_offset_mm: 8.0
+
+  # 到达最终摆放位时的 MoveL 圆滑半径，单位 mm。
+  # 大于 0 时机械臂不在摆放位停下，而圆滑拐向下探点；0 表示关闭圆滑、精确停在摆放位。
+  # 必须小于 place_descent_offset_mm，否则圆滑会吞掉整段下探。
+  place_descent_blend_radius_mm: 2.0
+
   # 所有正式 TCP 运动命令允许的最低绝对 Z，必须与控制节点 minimum_z 保持一致。
   # 总控会在发出命令前主动拒绝低于该值的观察位和最终抓放位，避免依赖控制层静默钳制。
   minimum_tcp_z_mm: 165.0

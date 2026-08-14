@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from datetime import datetime
+import json
 import math
 import threading
 import time
@@ -54,6 +55,7 @@ class OperationCoordinator:
         self._prepare_response = None
         self._abort_token = None
         self._pause_token = None
+        self._execution_operation = None
         self._timed_blow_timer = None
         self._timed_blow_generation = 0
         self._state = {
@@ -94,6 +96,7 @@ class OperationCoordinator:
                 "target_type": "",
                 "message": "",
                 "error": "",
+                "board": None,
             },
             "hardware": {
                 "stop_latched": False,
@@ -358,6 +361,7 @@ class OperationCoordinator:
         task["message"] = str(reason)
         self._runner = None
         self._prepare_response = None
+        task["board"] = None
 
     def invalidate_recognition(self, reason):
         with self._lock:
@@ -572,6 +576,7 @@ class OperationCoordinator:
                 self._runner = runner
                 self._abort_token = token
                 self._pause_token = pause_token
+                self._execution_operation = None
                 self._prepare_response = None
                 self._state["task"].update({
                     "state": "准备识别", "phase": "移动到拍摄位并识别",
@@ -600,8 +605,25 @@ class OperationCoordinator:
                 "block_count": int(getattr(response, "block_count", 0)),
                 "tray_count": int(getattr(response, "tray_count", 0)),
             }
+            board = None
+            if success:
+                layout_json = str(getattr(response, "layout_json", "") or "")
+                if layout_json:
+                    try:
+                        targets = json.loads(layout_json)
+                        if isinstance(targets, list) and targets:
+                            if "V5 动态盘面" in message:
+                                mode_label = "V5 动态盘面"
+                            elif advanced:
+                                mode_label = "进阶任务布局"
+                            else:
+                                mode_label = "基础任务布局"
+                            board = {"mode_label": mode_label, "targets": targets}
+                    except (ValueError, TypeError):
+                        board = None
             with self._lock:
                 self._prepare_response = response if success else None
+                self._state["task"]["board"] = board
                 self._state["task"].update({
                     "state": "等待确认" if success else "失败",
                     "phase": "识别完成" if success else "识别失败，可调整后重试",
@@ -703,6 +725,7 @@ class OperationCoordinator:
             self._invalidate_recognition_locked("本轮已结束，可以重新识别")
             self._abort_token = None
             self._pause_token = None
+            self._execution_operation = None
             task.update({
                 "state": "空闲",
                 "phase": "本轮已结束",
@@ -773,7 +796,7 @@ class OperationCoordinator:
         return self.submit("执行任务", action)
 
     def pause_task(self):
-        """暂停正在执行的任务：只置暂停标志，当前运动跑完后在下一个运动调用前阻塞。"""
+        """暂停正在执行的任务：置暂停标志，并释放操作队列让手动控制可用。"""
         with self._lock:
             if self._pause_token is None:
                 raise OperationRejected("当前没有可暂停的任务")
@@ -781,8 +804,11 @@ class OperationCoordinator:
                 raise OperationRejected("当前不在执行中，无法暂停")
             self._pause_token.pause()
             self._state["task"].update({"state": "已暂停", "phase": "已暂停"})
+            # 挂起“执行任务”操作，释放操作队列，手动控制可正常提交。
+            self._execution_operation = self._active_operation
+            self._active_operation = None
         self._publish_state()
-        self._log("info", "任务已暂停：当前运动完成后停止，点击“继续”恢复", source="手动控制")
+        self._log("info", "任务已暂停：当前运动完成后停止，可进行手动控制，点击“继续”恢复", source="手动控制")
         return {"paused": True}
 
     def resume_task(self):
@@ -792,8 +818,12 @@ class OperationCoordinator:
                 raise OperationRejected("当前没有可恢复的任务")
             if self._state["task"]["state"] != "已暂停":
                 raise OperationRejected("当前不在暂停状态，无法恢复")
+            if self._active_operation is not None:
+                raise OperationRejected("手动操作进行中，请等它结束后再继续")
             self._pause_token.resume()
             self._state["task"].update({"state": "执行中", "phase": "继续执行"})
+            self._active_operation = self._execution_operation
+            self._execution_operation = None
         self._publish_state()
         self._log("info", "任务已恢复执行", source="手动控制")
         return {"resumed": True}
@@ -805,6 +835,7 @@ class OperationCoordinator:
                 raise OperationRejected("当前没有正在执行的任务")
             if self._abort_token is not None:
                 self._abort_token.request()
+            self._execution_operation = None
 
         def stop_runtime_async():
             try:

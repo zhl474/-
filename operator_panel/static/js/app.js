@@ -419,16 +419,19 @@ function renderState(state) {
   $('#runtime-stop').disabled = busy || !process.runtime?.owned || ['准备识别', '执行中'].includes(task.state);
   const running = task.state === '执行中' || task.state === '已暂停';
   $('#task-prepare').disabled = busy || stopped || !health.control_services_ready || !health.perception_services_ready || running;
-  $('#task-stop').disabled = busy || !running;
-  $('#task-start').disabled = busy || stopped || !['可以执行', '执行中', '已暂停'].includes(task.state) || (task.state === '可以执行' && !task.confirmed);
-  $('#task-prepare').textContent = ['等待确认', '可以执行', '失败'].includes(task.state) ? '重新识别' : '开始识别';
+  // 停止始终按任务状态开关；暂停要绕过 busy（执行任务占着队列）；继续要等手动操作结束（busy）。
+  $('#task-stop').disabled = !running;
   if (task.state === '执行中') {
+    $('#task-start').disabled = false;
     $('#task-start').textContent = '暂停';
   } else if (task.state === '已暂停') {
+    $('#task-start').disabled = busy;
     $('#task-start').textContent = '继续';
   } else {
+    $('#task-start').disabled = busy || stopped || task.state !== '可以执行' || !task.confirmed;
     $('#task-start').textContent = '开始执行';
   }
+  $('#task-prepare').textContent = ['等待确认', '可以执行', '失败'].includes(task.state) ? '重新识别' : '开始识别';
   $('#task-start').classList.toggle('attention', !$('#task-start').disabled && task.state === '可以执行');
   $('#task-start').classList.toggle('warning', task.state === '执行中');
   $('#clear-stop').disabled = busy || !stopped;
@@ -448,6 +451,7 @@ function renderState(state) {
   const overlay = $('#emergency-overlay');
   const stopFailed = warning.includes('无法确认');
   overlay.hidden = !stopFailed;
+  document.body.classList.toggle('has-emergency', stopFailed);
   if (stopFailed) $('#emergency-message').textContent = warning;
 
   if (health.last_frame_at) $('#camera-time').textContent = health.last_frame_at.replace('T', ' ').slice(0, 23);
@@ -1234,8 +1238,22 @@ async function loadReadOnly() {
   container.replaceChildren();
   try {
     const result = await api('/api/read-only-config');
+    const liveBoard = app.state?.task?.board;
+    let renderedLive = false;
+    if (liveBoard?.targets?.length) {
+      container.append(renderLayout({
+        label: liveBoard.mode_label || '实际盘面',
+        subtitle: `实际盘面 · ${liveBoard.targets.length} 项 · 识别结果`,
+        revision: '',
+        target_count: liveBoard.targets.length,
+        data: { targets: liveBoard.targets },
+      }));
+      renderedLive = true;
+    }
     const layout = result.items.find((item) => item.kind === 'layout');
-    if (layout?.exists) container.append(renderLayout(layout));
+    if (layout?.exists && !renderedLive) {
+      container.append(renderLayout({ ...layout, subtitle: `10×14 盘面 · ${layout.target_count} 项 · 固定参考（尚未识别）` }));
+    }
     const grid = document.createElement('div'); grid.className = 'calibration-grid';
     result.items.filter((item) => item.kind !== 'layout').forEach((item) => grid.append(renderCalibration(item)));
     container.append(grid);
@@ -1254,8 +1272,8 @@ function heading(title, subtitle = '') {
 function renderLayout(item) {
   const card = document.createElement('article'); card.className = 'card layout-card';
   const top = document.createElement('div'); top.className = 'card-heading';
-  top.append(heading(item.label, `10×14 盘面 · ${item.target_count} 项 · 只读`));
-  const revision = document.createElement('span'); revision.className = 'mono'; revision.textContent = item.revision.slice(0, 10); top.append(revision); card.append(top);
+  top.append(heading(item.label, item.subtitle || `10×14 盘面 · ${item.target_count} 项 · 只读`));
+  const revision = document.createElement('span'); revision.className = 'mono'; revision.textContent = (item.revision || '').slice(0, 10); top.append(revision); card.append(top);
   const content = document.createElement('div'); content.className = 'layout-content';
   const board = document.createElement('div'); board.className = 'board-preview';
   const occupied = new Map();

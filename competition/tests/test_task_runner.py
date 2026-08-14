@@ -380,7 +380,7 @@ def test_开环抓取在运动前拒绝无效粗定位位姿(monkeypatch):
     assert clients.suction_states == []
 
 
-def test_place_keeps_dynamic_observation_height_and_directly_releases(monkeypatch):
+def test_place_keeps_dynamic_observation_height_and_descends_before_release(monkeypatch):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
     execution_config = _execution_config()
@@ -399,7 +399,22 @@ def test_place_keeps_dynamic_observation_height_and_directly_releases(monkeypatc
     assert clients.moves[1][0] == pytest.approx(
         [11.0 + offset_x, 12.0 + offset_y, 234.0, -180.0, 0.0, 90.0]
     )
-    assert [move[3] for move in clients.moves] == [True, True]
+    assert clients.moves[2][0] == pytest.approx(
+        [
+            11.0 + offset_x,
+            12.0 + offset_y,
+            234.0 - execution_config.place_descent_offset_mm,
+            -180.0,
+            0.0,
+            90.0,
+        ]
+    )
+    assert [move[3] for move in clients.moves] == [True, False, True]
+    assert [move[4] for move in clients.moves] == [
+        None,
+        execution_config.place_descent_blend_radius_mm,
+        None,
+    ]
     assert clients.suction_states == [module.RobotClients.BLOW]
     assert not hasattr(execution_config, "place_high_z")
     assert not hasattr(execution_config, "place_down_z")
@@ -425,11 +440,25 @@ def test_开环摆放应用xy偏置并保留托盘高度(monkeypatch):
     )
 
     offset_x, offset_y = _camera_to_sucker_offset()
-    assert len(clients.moves) == 1
+    assert len(clients.moves) == 2
     assert clients.moves[0][0] == pytest.approx(
         [10.0 + offset_x, 10.0 + offset_y, 200.0, -180.0, 0.0, 90.0]
     )
-    assert clients.moves[0][3] is True
+    assert clients.moves[1][0] == pytest.approx(
+        [
+            10.0 + offset_x,
+            10.0 + offset_y,
+            200.0 - execution_config.place_descent_offset_mm,
+            -180.0,
+            0.0,
+            90.0,
+        ]
+    )
+    assert [move[3] for move in clients.moves] == [False, True]
+    assert [move[4] for move in clients.moves] == [
+        execution_config.place_descent_blend_radius_mm,
+        None,
+    ]
     assert clients.suction_states == [module.RobotClients.BLOW]
     assert clients.board_offset_requests == []
     assert runner.state is module.TaskState.PLACING
@@ -517,6 +546,29 @@ def test_place_rejects_low_aligned_release_height_before_final_move(monkeypatch)
     )
 
     with pytest.raises(RuntimeError, match="最终摆放位.*低于 TCP 安全下限"):
+        runner._place(clients.get_task_target(0))
+
+    assert len(clients.moves) == 1
+    assert clients.suction_states == []
+
+
+def test_place_rejects_low_descent_height_before_final_move(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=_execution_config(),
+        visual_config=load_visual_servo_config(),
+    )
+    # 摆放位 Z=167 本身合法，但下探 5mm 后 162 < minimum_tcp_z_mm(165)。
+    runner._align = lambda *_args, **_kwargs: (
+        True,
+        [11, 12, 167, -180, 0, 90],
+        None,
+        "成功",
+    )
+
+    with pytest.raises(RuntimeError, match="摆放下探位.*低于 TCP 安全下限"):
         runner._place(clients.get_task_target(0))
 
     assert len(clients.moves) == 1
@@ -757,7 +809,7 @@ def test_formal_mode_uses_suction_without_csv_or_actual_pose(monkeypatch, tmp_pa
     assert not (tmp_path / "托盘视觉伺服.csv").exists()
 
 
-def test_calibration_and_formal_modes_keep_same_motion_points_but_only_formal_blends(
+def test_calibration_keeps_release_z_while_formal_blends_and_descends(
     monkeypatch,
     tmp_path,
 ):
@@ -786,10 +838,16 @@ def test_calibration_and_formal_modes_keep_same_motion_points_but_only_formal_bl
     build_runner(formal_clients, False, tmp_path / "formal").execute_all(1)
     build_runner(calibration_clients, True, tmp_path / "calibration").execute_all(1)
 
-    assert [move[:4] for move in calibration_clients.moves] == [
-        move[:4] for move in formal_clients.moves
+    # 抓取四步的位姿/速度/等待保持一致，仅正式模式在抬升点圆滑。
+    assert [move[:4] for move in calibration_clients.moves[:4]] == [
+        move[:4] for move in formal_clients.moves[:4]
     ]
     assert formal_clients.moves[3][4] == 5.0
+    # 正式模式：到达摆放位圆滑拐向下探，最终 Z 停在 200-5=195。
+    assert formal_clients.moves[5][4] == 2.0
+    assert formal_clients.moves[6][0][2] == pytest.approx(195.0)
+    assert len(calibration_clients.moves) == 6
+    assert calibration_clients.moves[5][0][2] == pytest.approx(200.0)
     assert all(move[4] is None for move in calibration_clients.moves)
     assert calibration_clients.suction_states == [module.RobotClients.OFF]
 
@@ -1132,7 +1190,8 @@ def test_摆放旋转统一在喷气前检查(monkeypatch):
     )
     assert events.index("机械臂运动3") < events.index("舵机旋转270")
     assert events.index("舵机旋转270") < events.index("机械臂运动4")
-    assert events.index("机械臂运动4") < events.index("检查抓取后摆放旋转")
+    assert events.index("机械臂运动4") < events.index("机械臂运动5")
+    assert events.index("机械臂运动5") < events.index("检查抓取后摆放旋转")
     assert events.index("检查抓取后摆放旋转") < events.index(
         f"吸盘状态{module.RobotClients.BLOW}"
     )

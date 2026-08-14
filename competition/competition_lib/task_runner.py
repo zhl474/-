@@ -920,15 +920,33 @@ class TaskRunner:
             place_pose = apply_camera_to_sucker_offset(camera_pose, self.visual_config)
             # 托盘标定给出的观察 Z 同时就是吹气释放 Z，此处只应用吸盘 XY 偏移。
             place_pose = self._validate_motion_pose(place_pose, "最终摆放位")
+        else:
+            place_pose = open_loop_place_pose
+
+        if (
+            not self.config.calibration_mode
+            and self.config.place_descent_offset_mm > 0.0
+        ):
+            descent_pose = list(place_pose)
+            descent_pose[2] = place_pose[2] - self.config.place_descent_offset_mm
+            descent_pose = self._validate_motion_pose(descent_pose, "摆放下探位")
+            blend_radius_mm = self.config.place_descent_blend_radius_mm
             self._timed_call(
                 "最终摆放位运动",
                 self.clients.move_arm,
                 place_pose,
                 self.config.arm_speed,
+                wait_until_stable=False,
+                blend_radius_mm=(blend_radius_mm if blend_radius_mm > 0.0 else None),
+            )
+            self._timed_call(
+                "摆放下探运动",
+                self.clients.move_arm,
+                descent_pose,
+                self.config.arm_speed,
                 wait_until_stable=True,
             )
         else:
-            place_pose = open_loop_place_pose
             self._timed_call(
                 "最终摆放位运动",
                 self.clients.move_arm,
@@ -1093,6 +1111,10 @@ class TaskRunner:
                     )
                 self._check_abort()
             if not self.config.calibration_mode:
+                # 最后一块喷气后先保持泄压，避免 OFF 立刻把残余负压封回吸盘，
+                # 导致最后一块被负压吸住、下落过慢。时长与操作面板手动喷气的
+                # timed_blow_seconds（1.0s）保持一致。
+                self._sleep_abortible(1.0)
                 self._timed_call(
                     "全部任务完成后关闭吸盘",
                     self.clients.set_suction,
