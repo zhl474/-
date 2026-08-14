@@ -211,6 +211,18 @@ def create_app(coordinator, event_bus, config_manager, ros_gateway, panel_config
     def start_task():
         return jsonify(coordinator.execute_task()), 202
 
+    @app.post("/api/task/pause")
+    def pause_task():
+        return jsonify(coordinator.pause_task())
+
+    @app.post("/api/task/resume")
+    def resume_task():
+        return jsonify(coordinator.resume_task())
+
+    @app.post("/api/task/stop")
+    def stop_execution():
+        return jsonify(coordinator.stop_execution())
+
     @app.post("/api/task/abort")
     def abort_task():
         return jsonify(coordinator.emergency_stop()), 202
@@ -244,6 +256,16 @@ def create_app(coordinator, event_bus, config_manager, ros_gateway, panel_config
     def reset_arm():
         return jsonify(coordinator.reset_arm(
             confirmed_pose=body().get("confirmed_pose", False)
+        )), 202
+
+    @app.post("/api/control/move-relative")
+    def move_relative():
+        payload = body()
+        return jsonify(coordinator.move_arm_relative(
+            payload.get("dx"),
+            payload.get("dy"),
+            payload.get("dz"),
+            speed=payload.get("speed"),
         )), 202
 
     @app.get("/api/control/pose")

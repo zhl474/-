@@ -8,13 +8,13 @@ models:
 
 # 固定盘面最短摆放方案 V1。shadow 计算并记录新方案，但仍执行旧匈牙利方案。
 task_sequence_optimizer:
-  mode: execute           # legacy / shadow / execute
+  mode: legacy            # legacy / shadow / execute
   beam_width: 5000
   report_top_candidates: 20
 
 # 普通 260 分任务的 V5 动态盘面选择。shadow 完整计算并记录，但仍执行固定 YAML。
 dynamic_board_selection:
-  mode: execute                 # disabled / shadow / execute
+  mode: disabled                # disabled / shadow / execute
   library_path: image_process/config/v5_board_library_v1.npz
   coarse_top_k: 1000
   final_candidate_k: 100
@@ -96,7 +96,7 @@ high_tcp_localization:
   # 当前模式下实际准备运动到的 TCP 必须落在实测安全 XY 范围内：
   # 闭环检查高位标定预测的相机观察 TCP，开环检查预测 TCP 加相机到吸盘偏移后的目标。
   safe_x_range_mm: [-520.224, -148.17]
-  safe_y_range_mm: [-263.279, 315.925]
+  safe_y_range_mm: [-305.0, 315.925]
 
 pick_height:
   # 正式模式由观察 TCP Z 减该值得到表面 Z；标定模式由表面深度加该值得到观察 TCP Z。

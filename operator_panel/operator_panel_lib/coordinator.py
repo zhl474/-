@@ -35,6 +35,7 @@ class OperationCoordinator:
         state_store,
         panel_config,
         exit_callback=None,
+        direct_hardware=None,
     ):
         self.event_bus = event_bus
         self.supervisor = supervisor
@@ -43,6 +44,7 @@ class OperationCoordinator:
         self.store = state_store
         self.panel_config = panel_config
         self.exit_callback = exit_callback
+        self.direct = direct_hardware
         self._lock = threading.RLock()
         self._stop_channel_lock = threading.Lock()
         self._active_operation = None
@@ -51,6 +53,7 @@ class OperationCoordinator:
         self._runner = None
         self._prepare_response = None
         self._abort_token = None
+        self._pause_token = None
         self._timed_blow_timer = None
         self._timed_blow_generation = 0
         self._state = {
@@ -254,6 +257,13 @@ class OperationCoordinator:
                 self._invalidate_recognition_locked("感知进程已停止，识别结果已失效")
             if not runtime.get("running"):
                 self._state["interaction"] = self._empty_interaction()
+            # 节点停止运行即离开待重启名单：不再有节点持有旧参数。
+            pending = set(self._state["config"]["pending_restart"])
+            if not process_state.get("hardware", {}).get("running"):
+                pending.discard("hardware")
+            if not runtime.get("running"):
+                pending.discard("perception")
+            self._state["config"]["pending_restart"] = sorted(pending)
         self._publish_state()
 
     def _log(self, level, message, source="控制台"):
@@ -261,7 +271,7 @@ class OperationCoordinator:
             "source": source, "level": str(level), "message": str(message),
         })
 
-    def submit(self, kind, operation):
+    def submit(self, kind, operation, source="控制台"):
         """提交一个常规异步操作；忙时直接拒绝，不积压现场指令。"""
         with self._lock:
             if self._state["system"]["exiting"]:
@@ -287,7 +297,11 @@ class OperationCoordinator:
                 with self._lock:
                     record["status"] = "aborted" if self._is_aborting() else "error"
                     record["error"] = str(exc)
-                self._log("warning" if record["status"] == "aborted" else "error", f"{kind}：{exc}")
+                self._log(
+                    "warning" if record["status"] == "aborted" else "error",
+                    f"{kind}：{exc}",
+                    source=source,
+                )
             finally:
                 with self._lock:
                     record["finished_at"] = self._now()
@@ -360,6 +374,9 @@ class OperationCoordinator:
                     or self._state["hardware"]["stop_latched"]
                 )
             frame_before = getattr(self.ros, "_last_frame_monotonic", 0.0)
+            # 启动 hardware.launch 前先释放直连层长驻的舵机串口，否则 control_node 打不开串口。
+            if self.direct is not None:
+                self.direct.release_servo()
             self.supervisor.start_hardware()
             try:
                 timeout = self.panel_config["timeouts"]["hardware_start_seconds"]
@@ -532,10 +549,12 @@ class OperationCoordinator:
             from competition_lib.task_runner import (
                 CalibrationTaskRunner,
                 TaskAbortToken,
+                TaskPauseToken,
                 TaskRunner,
             )
 
             token = TaskAbortToken()
+            pause_token = TaskPauseToken()
             clients = self.ros.create_robot_clients()
             runner_class = CalibrationTaskRunner if mode == "calibration" else TaskRunner
             output_dir = self.panel_config["output"]["servo_csv_output_dir"]
@@ -547,10 +566,12 @@ class OperationCoordinator:
                 progress_callback=self._task_progress_callback,
                 holding_callback=self._holding_callback,
                 abort_token=token,
+                pause_token=pause_token,
             )
             with self._lock:
                 self._runner = runner
                 self._abort_token = token
+                self._pause_token = pause_token
                 self._prepare_response = None
                 self._state["task"].update({
                     "state": "准备识别", "phase": "移动到拍摄位并识别",
@@ -681,6 +702,7 @@ class OperationCoordinator:
                 raise OperationRejected("当前没有可以结束的识别轮次")
             self._invalidate_recognition_locked("本轮已结束，可以重新识别")
             self._abort_token = None
+            self._pause_token = None
             task.update({
                 "state": "空闲",
                 "phase": "本轮已结束",
@@ -750,6 +772,61 @@ class OperationCoordinator:
 
         return self.submit("执行任务", action)
 
+    def pause_task(self):
+        """暂停正在执行的任务：只置暂停标志，当前运动跑完后在下一个运动调用前阻塞。"""
+        with self._lock:
+            if self._pause_token is None:
+                raise OperationRejected("当前没有可暂停的任务")
+            if self._state["task"]["state"] != "执行中":
+                raise OperationRejected("当前不在执行中，无法暂停")
+            self._pause_token.pause()
+            self._state["task"].update({"state": "已暂停", "phase": "已暂停"})
+        self._publish_state()
+        self._log("info", "任务已暂停：当前运动完成后停止，点击“继续”恢复", source="手动控制")
+        return {"paused": True}
+
+    def resume_task(self):
+        """恢复已暂停的任务。"""
+        with self._lock:
+            if self._pause_token is None:
+                raise OperationRejected("当前没有可恢复的任务")
+            if self._state["task"]["state"] != "已暂停":
+                raise OperationRejected("当前不在暂停状态，无法恢复")
+            self._pause_token.resume()
+            self._state["task"].update({"state": "执行中", "phase": "继续执行"})
+        self._publish_state()
+        self._log("info", "任务已恢复执行", source="手动控制")
+        return {"resumed": True}
+
+    def stop_execution(self):
+        """软停止：中止任务 + 停止感知（等价 Ctrl+C），不停臂、不加停止锁。"""
+        with self._lock:
+            if self._state["task"]["state"] not in {"执行中", "已暂停"}:
+                raise OperationRejected("当前没有正在执行的任务")
+            if self._abort_token is not None:
+                self._abort_token.request()
+
+        def stop_runtime_async():
+            try:
+                runtime_stopped = self.supervisor.stop_runtime()
+                if not runtime_stopped:
+                    runtime = self.supervisor.snapshot().get("runtime", {})
+                    if runtime.get("external"):
+                        self._log(
+                            "warning",
+                            "感知节点由外部进程管理，停止执行不会结束它；任务令牌已中止。",
+                        )
+                self._log("info", "任务已中止，感知已停止；机械臂走完当前运动后停止", source="手动控制")
+            except Exception as exc:
+                self._log("error", f"停止执行时停感知失败：{exc}", source="手动控制")
+
+        threading.Thread(
+            target=stop_runtime_async,
+            name=f"operator-stop-exec-{uuid.uuid4().hex[:8]}",
+            daemon=True,
+        ).start()
+        return {"stopping": True}
+
     def emergency_stop(self):
         """高优先级停止通道：不等待常规操作锁，也不自动改变吸盘。"""
         with self._stop_channel_lock:
@@ -781,8 +858,13 @@ class OperationCoordinator:
             response = None
             error = ""
             try:
-                # 控制服务先设置 stop_latched，再通过独立 XML-RPC 调用 StopMotion。
-                response = self.ros.stop_arm()
+                # control_node 在跑时经 ROS 服务停止；否则直连独立 XML-RPC 调 StopMotion。
+                if self._control_node_running():
+                    response = self.ros.stop_arm()
+                elif self.direct is not None:
+                    response = self.direct.stop_motion()
+                else:
+                    raise OperationRejected("直连硬件层未配置，无法在脱离 ROS 时停止机械臂")
                 try:
                     cancel_prompt = getattr(self.ros, "cancel_operator_prompt", None)
                     if cancel_prompt is not None:
@@ -855,7 +937,14 @@ class OperationCoordinator:
 
     def clear_stop(self):
         def action():
-            response = self.ros.clear_arm_stop()
+            if self._control_node_running():
+                response = self.ros.clear_arm_stop()
+            elif self.direct is not None:
+                if not self.direct.is_stopped():
+                    raise OperationRejected("机械臂尚未确认停稳，不能解除停止锁")
+                response = {"success": True, "stop_latched": False, "message": "停止锁已解除（直连）"}
+            else:
+                raise OperationRejected("直连硬件层未配置，无法在脱离 ROS 时解除停止锁")
             if not response.get("success") or response.get("stop_latched"):
                 raise OperationRejected(response.get("message") or "停止锁解除失败")
             with self._lock:
@@ -872,9 +961,20 @@ class OperationCoordinator:
 
         return self.submit("解除停止锁", action)
 
+    def _control_node_running(self):
+        """control_node 在 ROS 里存在时返回 True（此时走 ROS 服务，不直连抢硬件）。"""
+        return bool(self.ros.health_snapshot().get("control_node"))
+
+    def _manual_backend(self):
+        """手动控制后端分流：control_node 在跑走 ROS，否则走直连硬件。"""
+        if self._control_node_running():
+            return self.ros
+        if self.direct is None:
+            raise OperationRejected("直连硬件层未配置，无法在脱离 ROS 时手动控制")
+        return self.direct
+
     def _assert_manual_allowed(self):
         self._require_not_stopped()
-        self._require_hardware()
         self._require_task_idle()
 
     def control_suction(self, action, continuous=False, confirm_continuous=False):
@@ -888,7 +988,8 @@ class OperationCoordinator:
             self._assert_manual_allowed()
             self.invalidate_recognition("手动控制后识别结果已失效")
             values = {"suck": 0, "blow": 1, "off": 2}
-            result = self.ros.set_suction(values[normalized])
+            result = self._manual_backend().set_suction(values[normalized])
+            self._log("info", f"吸盘命令完成：{result.get('message', '')}", source="手动控制")
             with self._lock:
                 self._state["hardware"]["suction_state"] = values[normalized]
                 self._timed_blow_generation += 1
@@ -908,13 +1009,13 @@ class OperationCoordinator:
                         ):
                             return
                     try:
-                        self.ros.set_suction(2)
+                        self._manual_backend().set_suction(2)
                         with self._lock:
                             self._state["hardware"]["suction_state"] = 2
                             self._timed_blow_timer = None
                         self._publish_state()
                     except Exception as exc:
-                        self._log("error", f"定时喷气后自动关闭失败：{exc}")
+                        self._log("error", f"定时喷气后自动关闭失败：{exc}", source="手动控制")
 
                 timer = threading.Timer(duration, turn_off)
                 timer.daemon = True
@@ -924,7 +1025,7 @@ class OperationCoordinator:
                 result["auto_off_seconds"] = duration
             return result
 
-        return self.submit("吸盘控制", operation)
+        return self.submit("吸盘控制", operation, source="手动控制")
 
     def control_servo(self, angle_deg, confirm_outside_safe=False):
         try:
@@ -942,7 +1043,8 @@ class OperationCoordinator:
         def operation():
             self._assert_manual_allowed()
             self.invalidate_recognition("手动舵机运动后识别结果已失效")
-            result = self.ros.rotate_tool(angle)
+            result = self._manual_backend().rotate_tool(angle)
+            self._log("info", f"舵机命令完成：{result.get('message', '')}（目标 {angle}°）", source="手动控制")
             with self._lock:
                 self._state["hardware"].update({
                     "servo_target_known": True,
@@ -950,7 +1052,7 @@ class OperationCoordinator:
                 })
             return result
 
-        return self.submit("舵机旋转", operation)
+        return self.submit("舵机旋转", operation, source="手动控制")
 
     def reset_arm(self, confirmed_pose=False):
         if not bool(confirmed_pose):
@@ -962,16 +1064,61 @@ class OperationCoordinator:
         def operation():
             self._assert_manual_allowed()
             self.invalidate_recognition("机械臂复位后识别结果已失效")
-            return self.ros.move_arm(pose, speed, wait_until_stable=True)
+            result = self._manual_backend().move_arm(pose, speed, wait_until_stable=True)
+            self._log("info", f"机械臂复位完成：{result.get('message', '')}", source="手动控制")
+            return result
 
-        result = self.submit("机械臂复位", operation)
+        result = self.submit("机械臂复位", operation, source="手动控制")
         result["pose"] = pose
         result["speed"] = speed
         return result
 
+    def move_arm_relative(self, dx, dy, dz, speed=None):
+        """以当前 TCP 位姿为基准平移 dx/dy/dz（mm），姿态保持不变。"""
+        try:
+            delta = [float(dx), float(dy), float(dz)]
+        except (TypeError, ValueError):
+            raise OperationRejected("增量必须是数值") from None
+        if not all(math.isfinite(value) for value in delta):
+            raise OperationRejected("增量必须是有限数值")
+        if speed is None:
+            speed = int(self.panel_config["manual_control"].get("relative_move_speed", 50))
+        else:
+            try:
+                speed = int(speed)
+            except (TypeError, ValueError):
+                raise OperationRejected("速度必须是数值") from None
+        if speed <= 0:
+            raise OperationRejected("速度必须大于 0")
+
+        def operation():
+            self._assert_manual_allowed()
+            self.invalidate_recognition("手动增量移动后识别结果已失效")
+            pose = self._manual_backend().get_pose()
+            tcp = [float(value) for value in pose["tcp_pose"]]
+            target = list(tcp)
+            target[0] += delta[0]
+            target[1] += delta[1]
+            target[2] += delta[2]
+            result = self._manual_backend().move_arm(target, speed, wait_until_stable=True)
+            self._log(
+                "info",
+                f"增量移动完成：{result.get('message', '')}（Δ={delta}）",
+                source="手动控制",
+            )
+            result["from_pose"] = tcp
+            result["target_pose"] = target
+            result["delta"] = delta
+            return result
+
+        result = self.submit("增量移动", operation, source="手动控制")
+        result["delta"] = delta
+        result["speed"] = speed
+        return result
+
     def get_pose(self):
-        self._require_hardware()
-        return self.ros.get_pose()
+        self._assert_manual_allowed()
+        return self._manual_backend().get_pose()
 
     def _config_operation_allowed(self):
         self._require_not_stopped()
@@ -991,6 +1138,16 @@ class OperationCoordinator:
         status = self.ros.get_control_status()
         if not status.get("motion_state_known") or not status.get("motion_done"):
             raise OperationRejected("机械臂未明确确认停稳，禁止部署标定文件")
+
+    def _running_scopes(self):
+        """返回当前正在运行、可能持有旧参数的节点作用域。"""
+        process = self.supervisor.snapshot()
+        scopes = set()
+        if process.get("hardware", {}).get("running"):
+            scopes.add("hardware")
+        if process.get("runtime", {}).get("running"):
+            scopes.add("perception")
+        return scopes
 
     def _apply_restart(self, scopes):
         scopes = set(scopes)
@@ -1051,30 +1208,32 @@ class OperationCoordinator:
                 payload.get("revision"),
                 confirm_dangerous=payload.get("confirm_dangerous", False),
             )
+            scope = result["restart_scope"]
             if result.get("changed"):
-                scope = result["restart_scope"]
+                running = self._running_scopes()
                 with self._lock:
                     pending = set(self._state["config"]["pending_restart"])
-                    pending.add(scope)
+                    if scope in running:
+                        pending.add(scope)
                     self._state["config"]["pending_restart"] = sorted(pending)
                     self._state["config"]["files"] = self.config_manager.list_configs()
                     self._invalidate_recognition_locked("配置修改后识别结果已失效")
-                if payload.get("apply"):
-                    try:
-                        self._apply_restart({scope})
-                    except Exception as exc:
-                        # 文件已成功原子保存，应用失败不能误报为“未保存”。
-                        result["applied"] = False
-                        result["apply_error"] = str(exc)
-                        self._log("warning", f"配置已保存，但自动应用失败：{exc}")
-                    else:
-                        with self._lock:
-                            pending = set(self._state["config"]["pending_restart"])
-                            pending.discard(scope)
-                            self._state["config"]["pending_restart"] = sorted(pending)
-                        result["applied"] = True
-                else:
+            if payload.get("apply"):
+                try:
+                    self._apply_restart({scope})
+                except Exception as exc:
+                    # 文件已成功原子保存，应用失败不能误报为“未保存”。
                     result["applied"] = False
+                    result["apply_error"] = str(exc)
+                    self._log("warning", f"配置已保存，但自动重启失败：{exc}")
+                else:
+                    with self._lock:
+                        pending = set(self._state["config"]["pending_restart"])
+                        pending.discard(scope)
+                        self._state["config"]["pending_restart"] = sorted(pending)
+                    result["applied"] = True
+            else:
+                result["applied"] = False
             return result
 
         return self.submit("保存配置", operation)
@@ -1087,9 +1246,11 @@ class OperationCoordinator:
                 confirm_dangerous=payload.get("confirm_dangerous", False),
             )
             scope = result["restart_scope"]
+            running = self._running_scopes()
             with self._lock:
                 pending = set(self._state["config"]["pending_restart"])
-                pending.add(scope)
+                if scope in running:
+                    pending.add(scope)
                 self._state["config"]["pending_restart"] = sorted(pending)
                 self._state["config"]["files"] = self.config_manager.list_configs()
                 self._invalidate_recognition_locked("恢复配置后识别结果已失效")
@@ -1099,7 +1260,7 @@ class OperationCoordinator:
                 except Exception as exc:
                     result["applied"] = False
                     result["apply_error"] = str(exc)
-                    self._log("warning", f"历史已恢复，但自动应用失败：{exc}")
+                    self._log("warning", f"历史已恢复，但自动重启失败：{exc}")
                 else:
                     with self._lock:
                         self._state["config"]["pending_restart"] = [
@@ -1143,9 +1304,10 @@ class OperationCoordinator:
                 confirm_dangerous=payload.get("confirm_dangerous", False),
             )
             scopes = set(result["restart_scopes"])
+            running = self._running_scopes()
             with self._lock:
                 pending = set(self._state["config"]["pending_restart"])
-                pending.update(scopes)
+                pending.update(scopes & running)
                 self._state["config"]["pending_restart"] = sorted(pending)
                 self._state["config"]["files"] = self.config_manager.list_configs()
                 self._invalidate_recognition_locked("恢复预设后识别结果已失效")
@@ -1155,7 +1317,7 @@ class OperationCoordinator:
                 except Exception as exc:
                     result["applied"] = False
                     result["apply_error"] = str(exc)
-                    self._log("warning", f"预设已恢复，但自动应用失败：{exc}")
+                    self._log("warning", f"预设已恢复，但自动重启失败：{exc}")
                 else:
                     with self._lock:
                         self._state["config"]["pending_restart"] = [
@@ -1175,9 +1337,11 @@ class OperationCoordinator:
             self._require_task_idle()
             self._require_motion_idle()
             result = self.config_manager.deploy_calibration_pair(block_text, tray_text)
+            running = self._running_scopes()
             with self._lock:
                 pending = set(self._state["config"]["pending_restart"])
-                pending.add("perception")
+                if "perception" in running:
+                    pending.add("perception")
                 self._state["config"]["pending_restart"] = sorted(pending)
                 self._invalidate_recognition_locked("标定替换后识别结果已失效")
             return result
@@ -1193,9 +1357,11 @@ class OperationCoordinator:
             self._require_task_idle()
             self._require_motion_idle()
             result = self.config_manager.deploy_hand_eye(matrix)
+            running = self._running_scopes()
             with self._lock:
                 pending = set(self._state["config"]["pending_restart"])
-                pending.add("hardware")
+                if "hardware" in running:
+                    pending.add("hardware")
                 self._state["config"]["pending_restart"] = sorted(pending)
                 self._invalidate_recognition_locked("手眼矩阵替换后识别结果已失效")
             return result

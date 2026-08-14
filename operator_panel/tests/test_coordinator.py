@@ -8,7 +8,11 @@ from operator_panel_lib.event_bus import EventBus
 
 
 PANEL_CONFIG = {
-    "manual_control": {"timed_blow_seconds": 0.01, "reset_speed": 50},
+    "manual_control": {
+        "timed_blow_seconds": 0.01,
+        "reset_speed": 50,
+        "relative_move_speed": 50,
+    },
     "timeouts": {
         "hardware_start_seconds": 0.1,
         "perception_start_seconds": 0.1,
@@ -420,3 +424,168 @@ def test定时喷气会自动关闭但停止锁会取消自动关闭():
     coordinator.emergency_stop()
     time.sleep(0.03)
     assert ros.suction_calls == [1]
+
+
+class FakeDirect:
+    """记录调用的直连硬件替身。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def set_suction(self, state):
+        self.calls.append(("set_suction", state))
+        return {"success": True, "message": "直连吸盘", "state": state}
+
+    def rotate_tool(self, angle):
+        self.calls.append(("rotate_tool", angle))
+        return {"success": True, "message": "直连舵机", "angle_deg": angle}
+
+    def move_arm(self, pose, speed, wait_until_stable=True):
+        self.calls.append(("move_arm", pose, speed, wait_until_stable))
+        return {"success": True, "message": "直连复位", "pose": pose}
+
+    def get_pose(self):
+        self.calls.append(("get_pose",))
+        return {"success": True, "tcp_pose": [0] * 6, "camera_pose": None, "message": "ok"}
+
+    def stop_motion(self):
+        self.calls.append(("stop_motion",))
+        return {"success": True, "stop_latched": True, "message": "已停止"}
+
+    def is_stopped(self):
+        self.calls.append(("is_stopped",))
+        return True
+
+
+def make_coordinator_with_direct():
+    bus = EventBus()
+    supervisor = FakeSupervisor()
+    ros = FakeRos()
+    direct = FakeDirect()
+    coordinator = OperationCoordinator(
+        bus, supervisor, ros, FakeConfigManager(), FakeStore(), PANEL_CONFIG,
+        direct_hardware=direct,
+    )
+    return coordinator, supervisor, ros, direct
+
+
+def test手动后端在control_node运行时走ROS():
+    coordinator, _supervisor, _ros, direct = make_coordinator_with_direct()
+    assert coordinator._control_node_running() is True
+    assert coordinator._manual_backend() is coordinator.ros
+    assert direct.calls == []
+
+
+def test手动后端在control_node缺失时走直连():
+    coordinator, _supervisor, ros, direct = make_coordinator_with_direct()
+    ros.status["control_node"] = False
+    assert coordinator._control_node_running() is False
+    assert coordinator._manual_backend() is direct
+
+
+def test手动后端无直连且无control_node时报错():
+    coordinator, _supervisor, ros = make_coordinator()
+    ros.status["control_node"] = False
+    with pytest.raises(OperationRejected, match="直连硬件层未配置"):
+        coordinator._manual_backend()
+
+
+def test手动控制不再要求控制服务与相机画面():
+    coordinator, _supervisor, ros = make_coordinator()
+    ros.status["control_services_ready"] = False
+    ros.status["camera_frame_fresh"] = False
+    # 手动控制已脱离 ROS，不应再因控制服务/相机未就绪而被拒绝。
+    coordinator._assert_manual_allowed()
+
+
+def test吸盘在control_node缺失时走直连():
+    coordinator, _supervisor, ros, direct = make_coordinator_with_direct()
+    ros.status["control_node"] = False
+    operation = coordinator.control_suction("suck")
+    assert wait_operation(coordinator, operation["operation_id"])["status"] == "success"
+    assert direct.calls[0] == ("set_suction", 0)
+
+
+def test相对移动读取TCP并叠加增量后运动():
+    coordinator, _supervisor, ros, direct = make_coordinator_with_direct()
+    ros.status["control_node"] = False
+    operation = coordinator.move_arm_relative(5.0, -3.0, 2.5, speed=30)
+    assert wait_operation(coordinator, operation["operation_id"])["status"] == "success"
+    assert direct.calls == [
+        ("get_pose",),
+        ("move_arm", [5.0, -3.0, 2.5, 0.0, 0.0, 0.0], 30, True),
+    ]
+
+
+def test相对移动拒绝非法增量与速度():
+    coordinator, _supervisor, _ros, _direct = make_coordinator_with_direct()
+    with pytest.raises(OperationRejected, match="增量"):
+        coordinator.move_arm_relative("x", 0, 0)
+    with pytest.raises(OperationRejected, match="速度"):
+        coordinator.move_arm_relative(1, 0, 0, speed=0)
+
+
+class FakePauseToken:
+    def __init__(self):
+        self._paused = False
+
+    def pause(self):
+        self._paused = True
+
+    def resume(self):
+        self._paused = False
+
+    @property
+    def paused(self):
+        return self._paused
+
+
+class FakeAbortToken:
+    def __init__(self):
+        self._requested = False
+
+    def request(self):
+        self._requested = True
+
+    @property
+    def requested(self):
+        return self._requested
+
+
+def test暂停和恢复切换任务状态():
+    coordinator, _supervisor, _ros = make_coordinator()
+    coordinator._pause_token = FakePauseToken()
+    with coordinator._lock:
+        coordinator._state["task"]["state"] = "执行中"
+
+    assert coordinator.pause_task()["paused"] is True
+    assert coordinator._state["task"]["state"] == "已暂停"
+    assert coordinator._pause_token.paused is True
+
+    assert coordinator.resume_task()["resumed"] is True
+    assert coordinator._state["task"]["state"] == "执行中"
+    assert coordinator._pause_token.paused is False
+
+
+def test暂停要求处于执行中():
+    coordinator, _supervisor, _ros = make_coordinator()
+    coordinator._pause_token = FakePauseToken()
+    with pytest.raises(OperationRejected, match="不在执行中"):
+        coordinator.pause_task()
+
+
+def test停止执行请求中止令牌():
+    coordinator, _supervisor, _ros = make_coordinator()
+    with coordinator._lock:
+        coordinator._state["task"]["state"] = "执行中"
+    abort = FakeAbortToken()
+    coordinator._abort_token = abort
+
+    coordinator.stop_execution()
+    assert abort.requested is True
+
+
+def test停止执行要求处于执行中或已暂停():
+    coordinator, _supervisor, _ros = make_coordinator()
+    with pytest.raises(OperationRejected, match="没有正在执行"):
+        coordinator.stop_execution()

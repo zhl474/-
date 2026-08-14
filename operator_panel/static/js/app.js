@@ -21,6 +21,7 @@ const app = {
   pose: { tcp: null, camera: null },
   logs: [],
   logRenderScheduled: false,
+  selectedLogChannel: 'all',
   seenOperations: new Set(),
   interactionDialogKey: '',
   interactionDialogKind: '',
@@ -380,8 +381,9 @@ function renderState(state) {
   indicator.className = `operation-indicator ${active ? 'running' : 'idle'}`;
   $('span', indicator).textContent = active ? `正在${active.kind}` : '当前无操作';
 
-  $('#pending-restart').textContent = state.config?.pending_restart?.length
-    ? state.config.pending_restart.map((scope) => scope === 'hardware' ? '硬件' : '感知').join('、')
+  const pendingScopes = (state.config?.pending_restart || []).filter((scope) => scopeRunning(scope));
+  $('#pending-restart').textContent = pendingScopes.length
+    ? pendingScopes.map((scope) => scope === 'hardware' ? '硬件' : '感知').join('、')
     : '无';
 
   const taskBadge = $('#task-state-badge');
@@ -415,16 +417,27 @@ function renderState(state) {
   $('#hardware-stop').disabled = busy || !process.hardware?.owned || ['准备识别', '执行中'].includes(task.state);
   $$('#runtime-mode button').forEach((button) => { button.disabled = busy || stopped || !health.control_services_ready || (process.runtime?.running && button.dataset.mode === runtimeMode); });
   $('#runtime-stop').disabled = busy || !process.runtime?.owned || ['准备识别', '执行中'].includes(task.state);
-  $('#task-prepare').disabled = busy || stopped || !health.control_services_ready || !health.perception_services_ready || task.state === '执行中';
-  $('#task-confirm').disabled = busy || task.state !== '等待确认' || !task.recognition_valid;
-  $('#task-start').disabled = busy || stopped || task.state !== '可以执行' || !task.confirmed;
+  const running = task.state === '执行中' || task.state === '已暂停';
+  $('#task-prepare').disabled = busy || stopped || !health.control_services_ready || !health.perception_services_ready || running;
+  $('#task-stop').disabled = busy || !running;
+  $('#task-start').disabled = busy || stopped || !['可以执行', '执行中', '已暂停'].includes(task.state) || (task.state === '可以执行' && !task.confirmed);
   $('#task-prepare').textContent = ['等待确认', '可以执行', '失败'].includes(task.state) ? '重新识别' : '开始识别';
+  if (task.state === '执行中') {
+    $('#task-start').textContent = '暂停';
+  } else if (task.state === '已暂停') {
+    $('#task-start').textContent = '继续';
+  } else {
+    $('#task-start').textContent = '开始执行';
+  }
   $('#task-start').classList.toggle('attention', !$('#task-start').disabled && task.state === '可以执行');
+  $('#task-start').classList.toggle('warning', task.state === '执行中');
   $('#clear-stop').disabled = busy || !stopped;
 
-  const manualEnabled = !busy && !stopped && health.control_services_ready && health.camera_frame_fresh && !['准备识别', '执行中'].includes(task.state);
-  $$('[data-suction], #servo-send, #servo-quick button, #arm-reset').forEach((button) => { button.disabled = !manualEnabled; });
-  $('#pose-refresh').disabled = !health.control_services_ready || !health.camera_frame_fresh;
+  const manualEnabled = !busy && !stopped && !['准备识别', '执行中'].includes(task.state);
+  $$('[data-suction], #servo-send, #servo-quick button, #arm-reset, #relative-move').forEach((button) => { button.disabled = !manualEnabled; });
+  $('#pose-refresh').disabled = !manualEnabled;
+  const manualRoute = $('#manual-route');
+  if (manualRoute) manualRoute.textContent = health.control_node ? '控制链路：控制节点（ROS）' : '控制链路：直连硬件';
 
   const suctionNames = { '-1': '状态未知', 0: '吸气', 1: '喷气', 2: '关闭' };
   $('#suction-status').textContent = suctionNames[hardware.suction_state] ?? '状态未知';
@@ -439,6 +452,7 @@ function renderState(state) {
 
   if (health.last_frame_at) $('#camera-time').textContent = health.last_frame_at.replace('T', ' ').slice(0, 23);
   renderConfigFileStates();
+  renderConfigActions();
   renderTaskInteraction(state);
 }
 
@@ -458,7 +472,7 @@ function renderOperation(operation) {
   $('span', indicator).textContent = operation.status === 'success' ? `${operation.kind}完成` : `${operation.kind}未完成`;
   if (operation.status === 'success') {
     if (operation.result?.apply_error) {
-      toast(`${operation.kind}已落盘，但未能自动应用`, operation.result.apply_error, 'warning', 7500);
+      toast(`${operation.kind}已保存，但未能自动重启`, operation.result.apply_error, 'warning', 7500);
     } else {
       toast(`${operation.kind}完成`, operation.result?.message || '状态已更新');
     }
@@ -743,11 +757,45 @@ function bindConsole() {
   }));
   $('#reset-order').addEventListener('click', () => { app.order = [0, 1, 2, 3, 4, 5, 6]; renderOrder(); });
   $('#task-prepare').addEventListener('click', () => submitPrepare({ confirmRetry: true }));
-  $('#task-confirm').addEventListener('click', () => command('/api/task/confirm', {}, '识别结果已确认'));
+  let taskStopArmTimer = null;
+  $('#task-stop').addEventListener('click', async () => {
+    const state = app.state?.task?.state;
+    if (!['执行中', '已暂停'].includes(state)) return;
+    const button = $('#task-stop');
+    if (button.dataset.armed === '1') {
+      clearTimeout(taskStopArmTimer);
+      button.dataset.armed = '0';
+      button.textContent = '停止';
+      try {
+        await command('/api/task/stop', {});
+        toast('停止执行已提交', '任务将中止，感知将停止');
+      } catch (_) {}
+    } else {
+      button.dataset.armed = '1';
+      button.textContent = '再点一次确认停止';
+      taskStopArmTimer = setTimeout(() => {
+        button.dataset.armed = '0';
+        button.textContent = '停止';
+      }, 1500);
+    }
+  });
   $('#task-start').addEventListener('click', async () => {
-    const count = app.state?.task?.task_count || 0;
-    if (await confirmAction('开始执行全部任务？', `即将执行 ${count} 个目标。请确认工作区无人员、障碍物和松动物品。`)) {
-      command('/api/task/start', {}, '执行任务已提交');
+    const state = app.state?.task?.state;
+    if (state === '可以执行') {
+      const count = app.state?.task?.task_count || 0;
+      if (await confirmAction('开始执行全部任务？', `即将执行 ${count} 个目标。请确认工作区无人员、障碍物和松动物品。`)) {
+        command('/api/task/start', {}, '执行任务已提交');
+      }
+    } else if (state === '执行中') {
+      try {
+        await command('/api/task/pause', {});
+        toast('已暂停', '当前运动完成后停止，点击“继续”恢复');
+      } catch (_) {}
+    } else if (state === '已暂停') {
+      try {
+        await command('/api/task/resume', {});
+        toast('已继续', '任务恢复执行');
+      } catch (_) {}
     }
   });
   $('#refresh-images').addEventListener('click', refreshDebugImages);
@@ -828,6 +876,28 @@ function bindManual() {
       command('/api/control/reset', { confirmed_pose: true }, '机械臂复位已提交');
     }
   });
+  $('#relative-move').addEventListener('click', async () => {
+    const dx = Number($('#move-dx').value);
+    const dy = Number($('#move-dy').value);
+    const dz = Number($('#move-dz').value);
+    const speed = Number($('#move-speed').value);
+    if (![dx, dy, dz].every(Number.isFinite)) return toast('增量无效', 'dx/dy/dz 必须是数值', 'error');
+    if (dx === 0 && dy === 0 && dz === 0) return toast('增量无效', 'dx/dy/dz 不能同时为 0', 'warning');
+    if (!Number.isFinite(speed) || speed <= 0) return toast('速度无效', '速度必须大于 0', 'error');
+    let tcp;
+    try {
+      const result = await api('/api/control/pose');
+      tcp = result.tcp_pose;
+    } catch (error) {
+      return toast('无法读取当前位姿', formatError(error), 'error');
+    }
+    const target = tcp.slice();
+    target[0] += dx; target[1] += dy; target[2] += dz;
+    const detail = `当前 TCP：${formatPose(tcp)}\n增量：ΔX=${dx} ΔY=${dy} ΔZ=${dz} mm\n目标 TCP：${formatPose(target)}\n速度：${speed} mm/s`;
+    if (await confirmAction('增量移动机械臂？', '将以当前 TCP 为基准平移并保持姿态不变。请确认运动空间安全。', detail)) {
+      command('/api/control/move-relative', { dx, dy, dz, speed }, '增量移动已提交');
+    }
+  });
   $('#clear-stop').addEventListener('click', async () => {
     if (await confirmAction('解除停止锁？', '请先在现场确认机械臂已经停稳、原因已经排除，且工作区重新安全。解除后也必须重新启动感知并识别。')) {
       command('/api/control/clear-stop', {}, '解除停止锁已提交');
@@ -885,6 +955,21 @@ function renderConfigFiles() {
     container.append(button);
   });
   renderConfigFileStates();
+  renderConfigActions();
+}
+
+function scopeRunning(scope) {
+  const process = app.state?.process || {};
+  if (scope === 'hardware') return Boolean(process.hardware?.running);
+  if (scope === 'perception') return Boolean(process.runtime?.running);
+  return false;
+}
+
+function scopeExternal(scope) {
+  const process = app.state?.process || {};
+  if (scope === 'hardware') return Boolean(process.hardware?.external || process.runtime?.external);
+  if (scope === 'perception') return Boolean(process.runtime?.external);
+  return false;
 }
 
 function renderConfigFileStates() {
@@ -892,8 +977,49 @@ function renderConfigFileStates() {
   $$('.config-file-card').forEach((button) => {
     button.classList.toggle('active', button.dataset.fileId === app.currentConfigId);
     const file = app.configFiles.find((item) => item.file_id === button.dataset.fileId);
-    button.classList.toggle('pending', Boolean(file && pending.has(file.restart_scope)));
+    const scope = file?.restart_scope;
+    // 只有“正在运行且持有旧参数”的作用域才显示待重启；外部节点需手动重启。
+    const pendingScope = Boolean(scope && pending.has(scope) && scopeRunning(scope));
+    button.classList.toggle('pending', pendingScope);
+    button.classList.toggle('pending-external', pendingScope && scopeExternal(scope));
   });
+}
+
+function renderConfigActions() {
+  const applyButton = $('#config-apply');
+  const process = app.state?.process || {};
+  const stopOperation = app.state?.operation?.stop;
+  const active = app.state?.operation?.active || (stopOperation?.status === 'running' ? stopOperation : null);
+  const task = app.state?.task || {};
+  const stopped = Boolean(app.state?.hardware?.stop_latched);
+  const file = app.currentConfigId
+    ? app.configFiles.find((item) => item.file_id === app.currentConfigId)
+    : null;
+  const scope = file?.restart_scope;
+
+  let reason = '';
+  let enabled = true;
+  if (!file) {
+    enabled = false;
+    reason = '尚未选择配置';
+  } else if (active) {
+    enabled = false;
+    reason = `正在${active.kind}，请等待结束`;
+  } else if (stopped) {
+    enabled = false;
+    reason = '停止锁已锁定，先解除停止锁';
+  } else if (['准备识别', '执行中'].includes(task.state)) {
+    enabled = false;
+    reason = '识别或任务执行期间不能保存参数';
+  } else if (scope === 'hardware') {
+    if (!process.hardware?.running) { enabled = false; reason = '硬件未启动，没有节点可重启'; }
+    else if (scopeExternal('hardware')) { enabled = false; reason = '节点由外部进程启动，控制台不能重启它'; }
+  } else if (scope === 'perception') {
+    if (!process.runtime?.running) { enabled = false; reason = '感知未启动，没有节点可重启'; }
+    else if (scopeExternal('perception')) { enabled = false; reason = '感知节点由外部进程启动，控制台不能重启它'; }
+  }
+  applyButton.disabled = !enabled;
+  applyButton.title = reason;
 }
 
 async function loadAllConfigDocuments(force = false) {
@@ -920,6 +1046,7 @@ async function selectConfig(fileId, force = false) {
     $('#config-title').textContent = document.label;
     $('#config-description').textContent = document.description;
     renderConfigFileStates();
+    renderConfigActions();
     await loadHistory();
   } catch (error) { toast('配置读取失败', formatError(error), 'error'); }
 }
@@ -927,7 +1054,10 @@ async function selectConfig(fileId, force = false) {
 async function saveCurrentConfig(apply) {
   if (!app.currentConfigId || !configEditor.document) return;
   const changes = configEditor.changedFields();
-  if (!changes.length) return toast('当前没有修改', '', 'warning');
+  const scope = app.configFiles.find((item) => item.file_id === app.currentConfigId)?.restart_scope;
+  // “保存并重启”在没有未保存修改、但该作用域仍有待重启时，也允许提交一次重启。
+  const applyPendingRestart = apply && (app.state?.config?.pending_restart || []).includes(scope);
+  if (!changes.length && !applyPendingRestart) return toast('当前没有修改', '', 'warning');
   let confirmDangerous = false;
   if (configEditor.hasDangerousChanges()) {
     confirmDangerous = await confirmAction(
@@ -947,10 +1077,10 @@ async function saveCurrentConfig(apply) {
         apply,
       },
     });
-    toast(apply ? '保存并应用已提交' : '保存已提交', `操作编号 ${result.operation_id.slice(0, 8)}`);
+    toast(apply ? '保存并重启已提交' : '仅保存已提交', `操作编号 ${result.operation_id.slice(0, 8)}`);
   } catch (error) {
     if (error.code === 'revision_conflict') {
-      toast('文件版本冲突', '配置已被 VS Code 或其它程序修改，请重新加载后再编辑。', 'error', 7000);
+      toast('文件版本冲突', '配置已被 VS Code 或其它程序修改，请重新读取后再编辑。', 'error', 7000);
     } else {
       toast('配置未保存', formatError(error), 'error', 7000);
     }
@@ -1052,7 +1182,7 @@ async function deletePreset(preset) {
 
 function bindConfig() {
   $('#config-reload').addEventListener('click', async () => {
-    if (configEditor.changedFields().length && !await confirmAction('重新加载文件？', '页面上的未保存修改将丢失。')) return;
+    if (configEditor.changedFields().length && !await confirmAction('重新读取文件？', '页面上的未保存修改将丢失。')) return;
     if (app.currentConfigId) await selectConfig(app.currentConfigId, true);
   });
   $('#config-diff').addEventListener('click', () => showDiff('当前未保存修改', configEditor.differenceText()));
@@ -1207,16 +1337,26 @@ function scheduleLogRender() {
   requestAnimationFrame(() => { app.logRenderScheduled = false; renderLogs(); });
 }
 
+function sourceChannel(source) {
+  const value = source || '';
+  if (value.startsWith('launch:hardware') || value === '/camera_node' || value === '/control_node') return 'hardware';
+  if (value.startsWith('launch:runtime') || value === '/image_process_node' || value === '/competition_node') return 'perception';
+  if (value === '手动控制') return 'manual';
+  return 'system';
+}
+
 function renderLogs() {
   const level = $('#log-level').value;
+  const channel = app.selectedLogChannel;
   const query = $('#log-search').value.trim().toLowerCase();
   const container = $('#log-list');
   const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
   const filtered = app.logs.filter((entry) => {
     const normalized = ['fatal', 'error'].includes(entry.level) ? 'error' : entry.level;
     const levelMatch = level === 'all' || normalized === level;
+    const channelMatch = channel === 'all' || sourceChannel(entry.source) === channel;
     const queryMatch = !query || `${entry.source} ${entry.message}`.toLowerCase().includes(query);
-    return levelMatch && queryMatch;
+    return levelMatch && channelMatch && queryMatch;
   }).slice(-700);
   const fragment = document.createDocumentFragment();
   filtered.forEach((entry) => {
@@ -1235,6 +1375,11 @@ function bindLogs() {
   $('#log-level').addEventListener('change', renderLogs);
   $('#log-search').addEventListener('input', renderLogs);
   $('#log-clear').addEventListener('click', () => { app.logs = []; renderLogs(); });
+  $$('.log-tabs button').forEach((button) => button.addEventListener('click', () => {
+    app.selectedLogChannel = button.dataset.logChannel;
+    $$('.log-tabs button').forEach((item) => item.classList.toggle('active', item === button));
+    renderLogs();
+  }));
 }
 
 function bindExit() {

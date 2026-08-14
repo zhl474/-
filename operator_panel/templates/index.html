@@ -75,7 +75,7 @@
               </div>
               <div class="process-row">
                 <div class="process-unit">
-                  <div><strong>硬件层</strong><small>相机 + 机械臂控制节点</small></div>
+                  <div><strong>硬件层</strong><small>相机 + 机械臂控制节点</small><small><code>roslaunch competition hardware.launch</code></small></div>
                   <div class="button-group">
                     <button id="hardware-start" class="button primary" type="button">启动硬件</button>
                     <button id="hardware-stop" class="button ghost" type="button">停止硬件</button>
@@ -83,7 +83,7 @@
                 </div>
                 <div class="process-divider"></div>
                 <div class="process-unit">
-                  <div><strong>感知模式</strong><small>模式切换会使识别结果失效</small></div>
+                  <div><strong>感知模式</strong><small>模式切换会使识别结果失效</small><small><code>roslaunch competition perception.launch</code></small></div>
                   <div class="segmented" id="runtime-mode">
                     <button data-mode="formal" type="button">正式</button>
                     <button data-mode="calibration" type="button">标定</button>
@@ -122,7 +122,7 @@
               </div>
               <div class="task-actions">
                 <button id="task-prepare" class="button primary large" type="button">开始识别</button>
-                <button id="task-confirm" class="button secondary large" type="button">确认结果</button>
+                <button id="task-stop" class="button danger-outline large" type="button">停止</button>
                 <button id="task-start" class="button success large" type="button">开始执行</button>
               </div>
               <div class="task-message" id="task-message">请先启动硬件和感知模式。</div>
@@ -179,7 +179,7 @@
       <section id="view-manual" class="view">
         <div class="view-heading">
           <h1 class="page-title">手动控制</h1>
-          <div class="safety-note">只在硬件就绪、任务空闲且停止锁未锁定时开放</div>
+          <div class="safety-note">执行中、有操作在跑或停止锁锁定时禁用；不依赖相机或 ROS 节点<br><span id="manual-route" class="mono">控制链路：—</span></div>
         </div>
         <div class="manual-grid">
           <article class="card manual-card suction-card">
@@ -222,6 +222,21 @@
             <button id="arm-reset" class="button warning full" type="button">确认位姿并复位</button>
           </article>
 
+          <article class="card manual-card move-card">
+            <div class="card-heading"><div><span class="tool-icon">移</span><h2>增量移动</h2></div><span class="risk-tag">运动操作</span></div>
+            <p>以当前 TCP 为基准沿基坐标平移 dx / dy / dz（mm），姿态保持不变。</p>
+            <div class="delta-inputs">
+              <label><small>ΔX（mm）</small><input id="move-dx" type="number" step="0.1" value="0"></label>
+              <label><small>ΔY（mm）</small><input id="move-dy" type="number" step="0.1" value="0"></label>
+              <label><small>ΔZ（mm）</small><input id="move-dz" type="number" step="0.1" value="0"></label>
+            </div>
+            <label class="field-label" for="move-speed">运动速度（mm/s）</label>
+            <div class="input-action">
+              <input id="move-speed" type="number" min="1" step="1" value="50">
+              <button id="relative-move" class="button warning" type="button">预览并移动</button>
+            </div>
+          </article>
+
           <article class="card stop-card">
             <div>
               <span class="tool-icon stop-icon">停</span>
@@ -255,10 +270,10 @@
               </div>
               <div class="toolbar-actions">
                 <span id="dirty-count" class="dirty-count">无修改</span>
-                <button id="config-reload" class="button ghost" type="button">重新加载</button>
+                <button id="config-reload" class="button ghost" type="button">重新读取文件</button>
                 <button id="config-diff" class="button ghost" type="button">查看差异</button>
-                <button id="config-save" class="button secondary" type="button">保存</button>
-                <button id="config-apply" class="button primary" type="button">保存并应用</button>
+                <button id="config-save" class="button secondary" type="button">仅保存</button>
+                <button id="config-apply" class="button primary" type="button">保存并重启</button>
               </div>
             </article>
             <div id="config-search-results" class="search-results" hidden></div>
@@ -389,6 +404,13 @@
           </div>
         </div>
         <article class="log-panel">
+          <div class="log-tabs" role="tablist" aria-label="日志来源">
+            <button type="button" data-log-channel="all" class="active">全部</button>
+            <button type="button" data-log-channel="hardware">硬件</button>
+            <button type="button" data-log-channel="perception">感知</button>
+            <button type="button" data-log-channel="manual">手动控制</button>
+            <button type="button" data-log-channel="system">系统</button>
+          </div>
           <div class="log-header"><span>时间</span><span>级别</span><span>来源</span><span>消息</span></div>
           <div id="log-list" class="log-list"></div>
         </article>

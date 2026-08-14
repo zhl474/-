@@ -64,6 +64,30 @@ class TaskAbortToken:
             raise TaskAbortedError("任务已收到停止请求")
 
 
+class TaskPauseToken:
+    """线程安全的任务暂停令牌：暂停时阻塞，恢复或中止时解除。"""
+
+    def __init__(self):
+        self._paused = threading.Event()
+
+    def pause(self):
+        self._paused.set()
+
+    def resume(self):
+        self._paused.clear()
+
+    @property
+    def paused(self):
+        return self._paused.is_set()
+
+    def wait_while_paused(self, abort_token=None):
+        """暂停时阻塞，直到恢复；等待期间若中止令牌被请求则抛出中止异常。"""
+        while self._paused.is_set():
+            if abort_token is not None and abort_token.requested:
+                abort_token.raise_if_requested()
+            time.sleep(0.05)
+
+
 @dataclass(frozen=True)
 class ServoRotationEstimate:
     """一次舵机指令的预计运动区间，时间基于命令服务成功返回的时刻。"""
@@ -136,6 +160,7 @@ class TaskRunner:
         progress_callback=None,
         holding_callback=None,
         abort_token=None,
+        pause_token=None,
     ):
         self.clients = clients or RobotClients()
         self.config = execution_config or load_execution_config()
@@ -151,6 +176,7 @@ class TaskRunner:
         self.progress_callback = progress_callback
         self.holding_callback = holding_callback
         self.abort_token = abort_token or TaskAbortToken()
+        self.pause_token = pause_token
         self.execution_start_time = None
         self.visual_servo_enabled = self.config.visual_servo_enabled
         if self.config.calibration_mode and not self.visual_servo_enabled:
@@ -208,6 +234,11 @@ class TaskRunner:
     def _check_abort(self):
         self.abort_token.raise_if_requested()
 
+    def _check_pause(self):
+        """暂停时阻塞，直到恢复；等待期间仍响应中止令牌。"""
+        if self.pause_token is not None:
+            self.pause_token.wait_while_paused(self.abort_token)
+
     def _sleep_abortible(self, seconds):
         duration = max(0.0, float(seconds))
         self._check_abort()
@@ -230,6 +261,7 @@ class TaskRunner:
     def _timed_call(self, label, operation, *args, **kwargs):
         """在开启调试时记录一次任务步骤的端到端耗时。"""
         self._check_abort()
+        self._check_pause()
         if not self.config.timing_debug:
             result = operation(*args, **kwargs)
             self._check_abort()
@@ -280,6 +312,7 @@ class TaskRunner:
         def move_checked(pose, *args, **kwargs):
             """视觉伺服每轮运动前复核位姿，避免无效识别结果生成危险命令。"""
             self._check_abort()
+            self._check_pause()
             checked_pose = self._validate_motion_pose(pose, f"{log_label}修正位")
             result = self.clients.move_arm(checked_pose, *args, **kwargs)
             self._check_abort()
@@ -1125,6 +1158,7 @@ class CalibrationTaskRunner(TaskRunner):
         progress_callback=None,
         holding_callback=None,
         abort_token=None,
+        pause_token=None,
     ):
         base_config = execution_config or load_execution_config()
         forced_config = replace(base_config, calibration_mode=True)
@@ -1139,6 +1173,7 @@ class CalibrationTaskRunner(TaskRunner):
             progress_callback=progress_callback,
             holding_callback=holding_callback,
             abort_token=abort_token,
+            pause_token=pause_token,
         )
         print("\033[96m当前模式：独立标定采集（方块=拾取，托盘=抵达，不吸不吹）\033[0m")
 

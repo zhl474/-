@@ -27,3 +27,7 @@ data/
 .vscode/
 .idea/
 .DS_Store
+
+# local agent instructions (personal, not shared)
+AGENTS.local.md
+CLAUDE.local.md

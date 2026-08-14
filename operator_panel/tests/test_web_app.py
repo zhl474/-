@@ -87,6 +87,7 @@ class FakeCoordinator:
     def control_suction(self, *args, **kwargs): return self._accepted("suction", *args, **kwargs)
     def control_servo(self, *args, **kwargs): return self._accepted("servo", *args, **kwargs)
     def reset_arm(self, *args, **kwargs): return self._accepted("reset", *args, **kwargs)
+    def move_arm_relative(self, *args, **kwargs): return self._accepted("move_relative", *args, **kwargs)
     def get_pose(self): return {"tcp_pose": [0] * 6, "camera_pose": [0] * 6}
     def save_config(self, *args, **kwargs): return self._accepted("save_config", *args, **kwargs)
     def restore_history(self, *args): return self._accepted("restore_history", *args)
@@ -235,6 +236,7 @@ def test人工选择非法选项返回400且过期提示返回409(web):
         ("/api/control/suction", {"action": "off"}),
         ("/api/control/servo", {"angle_deg": 180}),
         ("/api/control/reset", {"confirmed_pose": True}),
+        ("/api/control/move-relative", {"dx": 1, "dy": 2, "dz": 3}),
         ("/api/system/exit", {}),
     ],
 )

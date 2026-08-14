@@ -205,7 +205,7 @@ code, .mono { font-family: var(--mono); }
 .manual-actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; margin-top: 22px; }
 .field-label { display: block; margin: 18px 0 5px; color: var(--muted); font-size: 11px; }
 .input-action { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
-.input-action input, .search-box input, .log-controls input, .field-control, .log-controls select { min-width: 0; padding: 9px 11px; border: 1px solid var(--line-strong); border-radius: 9px; color: var(--ink); background: white; }
+.input-action input, .delta-inputs input, .search-box input, .log-controls input, .field-control, .log-controls select { min-width: 0; padding: 9px 11px; border: 1px solid var(--line-strong); border-radius: 9px; color: var(--ink); background: white; }
 .quick-buttons { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; margin-top: 10px; }
 .quick-buttons button { padding: 6px 4px; border: 1px solid var(--line); border-radius: 7px; color: #55615c; background: #f7f9f8; font-size: 10px; cursor: pointer; }
 .pose-card { grid-column: 1 / -1; min-height: 190px; }
@@ -214,6 +214,10 @@ code, .mono { font-family: var(--mono); }
 .pose-values small, .pose-values code { display: block; }
 .pose-values code { margin-top: 7px; color: #2f4640; font-size: 12px; overflow-wrap: anywhere; }
 .pose-values button { position: absolute; top: 10px; right: 10px; border: 0; color: var(--green); background: transparent; font-size: 10px; cursor: pointer; }
+.delta-inputs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 18px; }
+.delta-inputs label { display: block; min-width: 0; }
+.delta-inputs small { display: block; color: var(--muted); font-size: 11px; }
+.delta-inputs input { width: 100%; margin-top: 5px; }
 .reset-pose { margin: 17px 0 13px; padding: 12px; border-radius: 9px; background: #f7f4ee; }
 .reset-pose small, .reset-pose code { display: block; }
 .reset-pose code { margin-top: 4px; font-size: 11px; }
@@ -236,6 +240,7 @@ code, .mono { font-family: var(--mono); }
 .config-file-card small { margin-top: 3px; color: var(--muted); font-size: 9px; }
 .config-file-card.active { border-color: #78bca5; color: var(--green-dark); background: var(--green-soft); }
 .config-file-card.pending::after { content: "待重启"; float: right; margin-top: -22px; padding: 2px 5px; border-radius: 5px; color: #71420b; background: var(--amber-soft); font-size: 8px; }
+.config-file-card.pending-external::after { content: "待重启·需手动重启"; }
 .preset-panel { padding: 13px; border: 1px solid var(--line); border-radius: 13px; background: white; }
 .preset-list { display: grid; gap: 6px; margin-top: 10px; }
 .preset-item { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center; padding: 7px 8px; border-radius: 8px; background: var(--surface-soft); }
@@ -368,10 +373,13 @@ code, .mono { font-family: var(--mono); }
 .switch span::after { content: ""; position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%; background: white; transition: .15s; }
 .switch input:checked + span { background: var(--green); }
 .switch input:checked + span::after { transform: translateX(12px); }
-.log-panel { height: calc(100vh - 190px); min-height: 430px; overflow: hidden; border-radius: 14px; color: #d9e6e1; background: #17231f; box-shadow: 0 15px 35px rgba(12,28,22,.16); }
+.log-panel { display: flex; flex-direction: column; height: calc(100vh - 190px); min-height: 430px; overflow: hidden; border-radius: 14px; color: #d9e6e1; background: #17231f; box-shadow: 0 15px 35px rgba(12,28,22,.16); }
+.log-tabs { display: flex; gap: 5px; padding: 8px 10px; border-bottom: 1px solid #30413a; }
+.log-tabs button { padding: 5px 10px; border: 0; border-radius: 7px; color: #8ca097; background: #22312b; font-size: 10px; cursor: pointer; }
+.log-tabs button.active { color: #d9e6e1; background: #2f4a3f; font-weight: 700; }
 .log-header, .log-row { display: grid; grid-template-columns: 160px 66px 190px 1fr; gap: 10px; }
 .log-header { padding: 10px 13px; color: #8ca097; border-bottom: 1px solid #30413a; font: 9px var(--mono); }
-.log-list { height: calc(100% - 36px); overflow: auto; font: 10px/1.45 var(--mono); }
+.log-list { flex: 1; min-height: 0; overflow: auto; font: 10px/1.45 var(--mono); }
 .log-row { padding: 6px 13px; border-bottom: 1px solid rgba(255,255,255,.035); }
 .log-row:hover { background: rgba(255,255,255,.035); }
 .log-row .time, .log-row .source { color: #8ea098; }

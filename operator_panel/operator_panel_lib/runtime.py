@@ -17,6 +17,7 @@ from werkzeug.serving import make_server
 from .config_manager import ConfigManager
 from .constants import PANEL_CONFIG_PATH
 from .coordinator import OperationCoordinator
+from .direct_hardware import DirectHardware
 from .event_bus import EventBus
 from .process_supervisor import ProcessSupervisor
 from .ros_gateway import RosGateway
@@ -71,6 +72,7 @@ class PanelRuntime:
         self.event_bus = EventBus(capacity=3000)
         self.store = StateStore(self.state_dir / "panel.sqlite3")
         self.config_manager = ConfigManager(self.store, self.state_dir)
+        self.direct = DirectHardware(self.config)
         self.ros = RosGateway(
             self.event_bus,
             preview_fps=self.config["preview"]["fps"],
@@ -87,6 +89,7 @@ class PanelRuntime:
             self.event_bus, self.supervisor, self.ros,
             self.config_manager, self.store, self.config,
             exit_callback=self.request_exit,
+            direct_hardware=self.direct,
         )
         self.ros.state_callback = self.coordinator.on_ros_health
         self.supervisor.state_callback = self.coordinator.on_process_state
@@ -152,6 +155,7 @@ class PanelRuntime:
 
     def cleanup(self):
         self.supervisor.stop_all_owned()
+        self.direct.release()
         self.ros.shutdown()
         if self.roscore_process is not None and self.roscore_process.poll() is None:
             try:

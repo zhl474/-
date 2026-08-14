@@ -830,7 +830,7 @@ class ConfigManager:
         before_text = self._read(entry["path"])
         before_revision = _revision(before_text)
         if str(expected_revision) != before_revision:
-            raise ConfigConflict("文件已被其它程序修改，请重新加载后再保存")
+            raise ConfigConflict("文件已被其它程序修改，请重新读取后再保存")
         current = self._load_text(before_text)
         before_data = _plain(current)
         self._merge_document(current, deepcopy(data))

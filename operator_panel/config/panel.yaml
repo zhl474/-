@@ -10,6 +10,12 @@ preview:
 manual_control:
   timed_blow_seconds: 1.0
   reset_speed: 50
+  relative_move_speed: 50
+  arm_ip: 192.168.58.2
+  arm_port: 20003
+  servo_port: /dev/servo_motor
+  servo_baudrate: 115200
+  minimum_z_mm: 165.0
 
 timeouts:
   ros_master_seconds: 10.0
