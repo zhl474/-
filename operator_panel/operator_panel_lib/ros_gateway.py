@@ -1,8 +1,10 @@
 """控制台与 ROS 话题、服务之间的集中适配层。"""
 
+from collections import deque
 from copy import deepcopy
 from datetime import datetime
 import math
+import os
 import threading
 import time
 
@@ -38,9 +40,11 @@ class RosGateway:
         self._last_frame_monotonic = 0.0
         self._last_frame_at = ""
         self._last_encoded_monotonic = 0.0
+        self._camera_frame_samples = deque(maxlen=180)
         self._nodes = set()
         self._services = set()
         self._master_online = False
+        self._ros_system = self._empty_ros_system()
         self._control_status = {
             "available": False,
             "stop_latched": False,
@@ -100,11 +104,73 @@ class RosGateway:
             "remaining_seconds": 0.0,
         }
 
+    @staticmethod
+    def _empty_ros_system(master_online=False):
+        """返回离线时也可直接展示的 ROS 系统结构。"""
+        return {
+            "master_online": bool(master_online),
+            "distro": str(os.environ.get("ROS_DISTRO", "未知") or "未知"),
+            "master_uri": str(
+                os.environ.get("ROS_MASTER_URI", "http://127.0.0.1:11311")
+            ),
+            "updated_at": "",
+            "node_count": 0,
+            "topic_count": 0,
+            "service_count": 0,
+            "nodes": [],
+            "topics": [],
+            "services": [],
+        }
+
+    @classmethod
+    def _build_ros_system(cls, master_online, nodes, system_state, topic_types, camera_hz):
+        """把 ROS Master 原始图数据整理成稳定、只读的网页结构。"""
+        if not master_online:
+            return cls._empty_ros_system(False)
+        publishers, subscribers, service_providers = system_state
+        publisher_map = {str(name): sorted(map(str, owners)) for name, owners in publishers}
+        subscriber_map = {str(name): sorted(map(str, owners)) for name, owners in subscribers}
+        type_map = {str(name): str(type_name) for name, type_name in topic_types}
+        topic_names = sorted(set(type_map) | set(publisher_map) | set(subscriber_map))
+        topics = []
+        for name in topic_names:
+            topics.append({
+                "name": name,
+                "type": type_map.get(name, "类型未知"),
+                "publishers": publisher_map.get(name, []),
+                "subscribers": subscriber_map.get(name, []),
+                "hz": round(float(camera_hz), 1) if name == "/camera/image_rect" else None,
+            })
+        services = [
+            {"name": str(name), "providers": sorted(map(str, providers))}
+            for name, providers in sorted(service_providers, key=lambda item: str(item[0]))
+        ]
+        result = cls._empty_ros_system(True)
+        result.update({
+            "updated_at": cls._now(),
+            "node_count": len(nodes),
+            "topic_count": len(topics),
+            "service_count": len(services),
+            "nodes": sorted(map(str, nodes)),
+            "topics": topics,
+            "services": services,
+        })
+        return result
+
+    def _camera_hz_locked(self, now=None):
+        """按最近五秒收到的 ROS 图像帧计算实际话题频率。"""
+        current = time.monotonic() if now is None else float(now)
+        recent = [stamp for stamp in self._camera_frame_samples if current - stamp <= 5.0]
+        if len(recent) < 2 or recent[-1] <= recent[0]:
+            return 0.0
+        return (len(recent) - 1) / (recent[-1] - recent[0])
+
     def _on_image(self, message):
         now = time.monotonic()
         with self._lock:
             self._last_frame_monotonic = now
             self._last_frame_at = self._now()
+            self._camera_frame_samples.append(now)
             if now - self._last_encoded_monotonic < self.preview_interval:
                 return
             self._last_encoded_monotonic = now
@@ -144,10 +210,26 @@ class RosGateway:
         master_online = bool(rosgraph.is_master_online())
         nodes = set(rosnode.get_node_names()) if master_online else set()
         services = set(rosservice.get_service_list()) if master_online else set()
+        if master_online:
+            master = rosgraph.Master("/operator_panel")
+            system_state = master.getSystemState()
+            topic_types = master.getTopicTypes()
+            with self._lock:
+                camera_hz = self._camera_hz_locked()
+            ros_system = self._build_ros_system(
+                True,
+                nodes,
+                system_state,
+                topic_types,
+                camera_hz,
+            )
+        else:
+            ros_system = self._empty_ros_system(False)
         with self._lock:
             self._master_online = master_online
             self._nodes = nodes
             self._services = services
+            self._ros_system = ros_system
         if "/control/get_status" in services:
             try:
                 status = self.get_control_status(timeout=0.8)
@@ -223,9 +305,21 @@ class RosGateway:
                 "last_frame_at": self._last_frame_at,
                 "control_services_ready": self.CONTROL_SERVICES.issubset(self._services),
                 "perception_services_ready": self.PERCEPTION_SERVICES.issubset(self._services),
+                "ros_node_count": self._ros_system["node_count"],
+                "ros_topic_count": self._ros_system["topic_count"],
+                "ros_service_count": self._ros_system["service_count"],
+                "camera_topic_hz": next((
+                    topic["hz"] for topic in self._ros_system["topics"]
+                    if topic["name"] == "/camera/image_rect"
+                ), 0.0),
                 "control": deepcopy(self._control_status),
                 "operator_prompt": deepcopy(self._operator_prompt),
             }
+
+    def ros_system_snapshot(self):
+        """返回从 ROS Master 实时采集的节点、话题与服务图。"""
+        with self._lock:
+            return deepcopy(self._ros_system)
 
     def image_bytes(self):
         with self._lock:

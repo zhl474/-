@@ -28,6 +28,8 @@ const app = {
   interactionSuppressed: new Set(),
   promptDeadline: 0,
   promptDeadlineId: '',
+  rosSystemLoading: false,
+  rosSystemLastLoaded: 0,
 };
 
 const configEditor = new ConfigEditor($('#config-editor'), (changes) => {
@@ -368,6 +370,7 @@ function renderState(state) {
   const runtimeText = process.runtime?.running ? (runtimeMode === 'calibration' ? '标定模式' : (runtimeMode === 'formal' ? '正式模式' : '外部节点')) : '未启动';
   setStatus('runtime', health.perception_services_ready, runtimeText, process.runtime?.running && !health.perception_services_ready);
   setStatus('holding', hardware.holding_block, hardware.holding_block ? '是' : '否', hardware.holding_block);
+  $('#camera-topic-hz').textContent = `${Number(health.camera_topic_hz || 0).toFixed(1)} Hz`;
 
   const stopChip = $('[data-status="stop"]');
   stopChip.classList.toggle('locked', Boolean(hardware.stop_latched));
@@ -477,7 +480,10 @@ async function refreshState() {
 function startEvents() {
   const source = eventStream();
   source.addEventListener('state', (event) => renderState(JSON.parse(event.data)));
-  source.addEventListener('health', () => refreshState());
+  source.addEventListener('health', () => {
+    refreshState();
+    if (app.selectedView === 'ros') loadRosSystem();
+  });
   source.addEventListener('process', () => refreshState());
   source.addEventListener('progress', (event) => {
     if (!app.state) return;
@@ -568,6 +574,139 @@ function renderOrder() {
   });
 }
 
+function rosEmpty(container, message) {
+  const paragraph = document.createElement('p');
+  paragraph.className = 'ros-empty';
+  paragraph.textContent = message;
+  container.replaceChildren(paragraph);
+}
+
+function renderRosTopology(data) {
+  const nodes = new Set(data.nodes || []);
+  const topics = new Set((data.topics || []).map((topic) => topic.name));
+  const services = (data.services || []).map((service) => service.name);
+  $$('[data-ros-node]').forEach((element) => {
+    element.classList.toggle('online', nodes.has(element.dataset.rosNode));
+  });
+  $$('[data-ros-topic]').forEach((element) => {
+    element.classList.toggle('online', topics.has(element.dataset.rosTopic));
+  });
+  $$('[data-ros-service-prefix]').forEach((element) => {
+    element.classList.toggle(
+      'online',
+      services.some((name) => name.startsWith(element.dataset.rosServicePrefix)),
+    );
+  });
+  $('.ros-stage.browser')?.classList.toggle('online', true);
+  const cameraTopic = (data.topics || []).find((topic) => topic.name === '/camera/image_rect');
+  $('#ros-flow-camera-hz').textContent = `${Number(cameraTopic?.hz || 0).toFixed(1)} Hz`;
+}
+
+function renderRosNodes(data) {
+  const container = $('#ros-node-list');
+  const nodes = data.nodes || [];
+  if (!nodes.length) return rosEmpty(container, 'ROS Master 当前没有节点');
+  const keyNodes = new Set(['/camera_node', '/control_node', '/image_process_node', '/operator_panel']);
+  const labels = {
+    '/camera_node': '相机图像发布',
+    '/control_node': '机械臂与工具控制',
+    '/image_process_node': '识别与任务规划',
+    '/operator_panel': '网页 ROS 网关',
+  };
+  const ordered = [...nodes].sort((a, b) => Number(keyNodes.has(b)) - Number(keyNodes.has(a)) || a.localeCompare(b));
+  const fragment = document.createDocumentFragment();
+  ordered.forEach((name) => {
+    const item = document.createElement('div');
+    item.className = `ros-item ${keyNodes.has(name) ? 'key' : ''}`;
+    const code = document.createElement('code'); code.textContent = name;
+    const detail = document.createElement('small'); detail.textContent = labels[name] || 'ROS 节点';
+    item.append(code, detail); fragment.append(item);
+  });
+  container.replaceChildren(fragment);
+}
+
+function renderRosTopics(data) {
+  const container = $('#ros-topic-list');
+  const topics = data.topics || [];
+  if (!topics.length) return rosEmpty(container, 'ROS Master 当前没有话题');
+  const keyTopics = new Set(['/camera/image_rect', '/rosout', '/rosout_agg']);
+  const ordered = [...topics].sort((a, b) => Number(keyTopics.has(b.name)) - Number(keyTopics.has(a.name)) || a.name.localeCompare(b.name));
+  const fragment = document.createDocumentFragment();
+  ordered.forEach((topic) => {
+    const row = document.createElement('div');
+    row.className = `ros-topic-row ${keyTopics.has(topic.name) ? 'key' : ''}`;
+    const identity = document.createElement('div');
+    const name = document.createElement('strong'); name.textContent = topic.name;
+    const hz = document.createElement('small');
+    hz.textContent = topic.hz === null || topic.hz === undefined ? '未测频率' : `实测 ${Number(topic.hz).toFixed(1)} Hz`;
+    identity.append(name, hz);
+    const type = document.createElement('div');
+    const typeCode = document.createElement('code'); typeCode.textContent = topic.type || '类型未知';
+    const typeLabel = document.createElement('small'); typeLabel.textContent = '消息类型';
+    type.append(typeCode, typeLabel);
+    const endpoints = document.createElement('div');
+    const publishers = document.createElement('small');
+    publishers.textContent = `发布：${(topic.publishers || []).join('、') || '无'}`;
+    const subscribers = document.createElement('small');
+    subscribers.textContent = `订阅：${(topic.subscribers || []).join('、') || '无'}`;
+    endpoints.append(publishers, subscribers);
+    row.append(identity, type, endpoints); fragment.append(row);
+  });
+  container.replaceChildren(fragment);
+}
+
+function renderRosServices(data) {
+  const container = $('#ros-service-list');
+  const services = data.services || [];
+  if (!services.length) return rosEmpty(container, 'ROS Master 当前没有服务');
+  const isKey = (name) => ['/camera/', '/perception/', '/control/'].some((prefix) => name.startsWith(prefix));
+  const ordered = [...services].sort((a, b) => Number(isKey(b.name)) - Number(isKey(a.name)) || a.name.localeCompare(b.name));
+  const fragment = document.createDocumentFragment();
+  ordered.forEach((service) => {
+    const item = document.createElement('div');
+    item.className = `ros-item ${isKey(service.name) ? 'key' : ''}`;
+    const code = document.createElement('code'); code.textContent = service.name;
+    const detail = document.createElement('small');
+    detail.textContent = `提供：${(service.providers || []).join('、') || '未知节点'}`;
+    item.append(code, detail); fragment.append(item);
+  });
+  container.replaceChildren(fragment);
+}
+
+function renderRosSystem(data) {
+  const online = Boolean(data.master_online);
+  $('#ros-proof-master').textContent = online ? '在线' : '离线';
+  $('#ros-proof-master-uri').textContent = data.master_uri || '未设置';
+  $('#ros-proof-distro').textContent = data.distro || '未知';
+  $('#ros-proof-node-count').textContent = Number(data.node_count || 0);
+  $('#ros-proof-topic-count').textContent = Number(data.topic_count || 0);
+  $('#ros-proof-service-count').textContent = Number(data.service_count || 0);
+  const updated = data.updated_at ? data.updated_at.replace('T', ' ').slice(0, 23) : '';
+  $('#ros-proof-updated').textContent = updated ? `ROS 图更新时间 ${updated}` : '等待 ROS Master';
+  const badge = $('#ros-proof-state');
+  badge.textContent = online ? '实时连接' : 'ROS 离线';
+  badge.className = `state-badge ${online ? 'active' : 'error'}`;
+  renderRosTopology(data);
+  renderRosNodes(data);
+  renderRosTopics(data);
+  renderRosServices(data);
+}
+
+async function loadRosSystem(force = false) {
+  const now = Date.now();
+  if (app.rosSystemLoading || (!force && now - app.rosSystemLastLoaded < 900)) return;
+  app.rosSystemLoading = true;
+  try {
+    const data = await api('/api/ros-system');
+    app.rosSystemLastLoaded = Date.now();
+    renderRosSystem(data);
+  } catch (error) {
+    toast('ROS 系统状态读取失败', formatError(error), 'error');
+  } finally {
+    app.rosSystemLoading = false;
+  }
+}
+
 function bindNavigation() {
   $$('.nav-item').forEach((button) => button.addEventListener('click', () => {
     app.selectedView = button.dataset.view;
@@ -576,7 +715,12 @@ function bindNavigation() {
     if (app.selectedView === 'config') initializeConfigCenter();
     if (app.selectedView === 'readonly') loadReadOnly();
     if (app.selectedView === 'manual') loadExecutionConfig();
+    if (app.selectedView === 'ros') loadRosSystem(true);
   }));
+}
+
+function bindRosSystem() {
+  $('#ros-proof-refresh').addEventListener('click', () => loadRosSystem(true));
 }
 
 function bindConsole() {
@@ -1135,6 +1279,7 @@ function bindTaskInteraction() {
 
 async function initialize() {
   bindNavigation();
+  bindRosSystem();
   bindConsole();
   bindManual();
   bindConfig();

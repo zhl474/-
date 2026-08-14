@@ -2660,7 +2660,8 @@ def _make_dynamic_routing_processor(module, mode):
     processor._save_high_block_debug_images = lambda *_args: None
     processor._build_observed_blocks_for_task = lambda *_args: [object()]
     processor._build_placement_targets = lambda *_args: ["固定目标"]
-    processor._plan_formal_tasks = lambda *_args: (["固定任务"], "固定规划")
+    processor._plan_required_tasks = lambda *_args: (["固定任务"], "固定规划")
+    processor._plan_advanced_tasks = lambda *_args: (["进阶任务"], "进阶固定顺序")
     processor.dynamic_reports = []
     processor._save_dynamic_board_report = lambda *_args, **kwargs: (
         processor.dynamic_reports.append(kwargs)
@@ -2774,7 +2775,7 @@ def test_dynamic_execute_returns_confirmed_dynamic_tasks_without_building_fixed_
     processor._build_placement_targets = lambda *_args: (_ for _ in ()).throw(
         AssertionError("execute 成功后不应构造固定目标")
     )
-    processor._plan_formal_tasks = lambda *_args: (_ for _ in ()).throw(
+    processor._plan_required_tasks = lambda *_args: (_ for _ in ()).throw(
         AssertionError("execute 成功后不应进入固定规划")
     )
 
@@ -2792,12 +2793,86 @@ def test_advanced_task_bypasses_dynamic_selection_even_in_execute_mode(monkeypat
     processor._run_dynamic_board_selection = lambda *_args: (_ for _ in ()).throw(
         AssertionError("进阶任务不应调用动态盘面选择")
     )
+    processor._plan_required_tasks = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("进阶任务不应调用必选任务顺序优化")
+    )
 
     response = processor._prepare_task_locked(types.SimpleNamespace(advanced=True))
 
     assert response.success is True
-    assert processor.task_targets == ["固定任务"]
+    assert processor.task_targets == ["进阶任务"]
     assert processor.dynamic_reports == []
+
+
+def test_advanced_task_only_uses_hungarian_assignment(monkeypatch):
+    module = _load_process_module_with_stubs(
+        monkeypatch,
+        "process_advanced_hungarian_only",
+    )
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    processor = object.__new__(module.ImageProcessor)
+    processor.board_theta = 12.0
+    processor.last_task_plan_result = object()
+    observed_blocks = [object(), object()]
+    placement_targets = [
+        types.SimpleNamespace(index=0, category="T"),
+        types.SimpleNamespace(index=1, category="line"),
+    ]
+    assigned_tasks = [
+        types.SimpleNamespace(index=0, category="T"),
+        types.SimpleNamespace(index=1, category="line"),
+    ]
+    calls = []
+
+    def assign(blocks, targets, board_angle_deg):
+        calls.append((blocks, targets, board_angle_deg))
+        return assigned_tasks
+
+    monkeypatch.setattr(image_node_module, "assign_blocks_to_targets", assign)
+    monkeypatch.setattr(
+        image_node_module,
+        "optimize_task_sequence",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("进阶任务不应调用 V1 顺序优化")
+        ),
+    )
+
+    tasks, message = processor._plan_advanced_tasks(
+        observed_blocks,
+        placement_targets,
+    )
+
+    assert tasks == assigned_tasks
+    assert calls == [(observed_blocks, placement_targets, 12.0)]
+    assert processor.last_task_plan_result is None
+    assert "固定顺序" in message
+    assert "旧匈牙利" in message
+
+
+def test_advanced_task_rejects_changed_judge_order(monkeypatch):
+    module = _load_process_module_with_stubs(
+        monkeypatch,
+        "process_advanced_order_guard",
+    )
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    processor = object.__new__(module.ImageProcessor)
+    processor.board_theta = 0.0
+    placement_targets = [
+        types.SimpleNamespace(index=0, category="T"),
+        types.SimpleNamespace(index=1, category="line"),
+    ]
+    changed_tasks = [
+        types.SimpleNamespace(index=0, category="line"),
+        types.SimpleNamespace(index=1, category="T"),
+    ]
+    monkeypatch.setattr(
+        image_node_module,
+        "assign_blocks_to_targets",
+        lambda *_args, **_kwargs: changed_tasks,
+    )
+
+    with pytest.raises(RuntimeError, match="改变了裁判指定的摆放顺序"):
+        processor._plan_advanced_tasks([object(), object()], placement_targets)
 
 
 @pytest.mark.parametrize(

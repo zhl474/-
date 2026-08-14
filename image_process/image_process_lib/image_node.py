@@ -1859,8 +1859,8 @@ class ImageProcessor:
         except Exception as exc:
             rospy.logwarn("任务规划报告写入失败，不影响本轮任务: %s", exc)
 
-    def _plan_formal_tasks(self, observed_blocks, placement_targets):
-        """按 legacy/shadow/execute 规则生成本轮正式任务列表。"""
+    def _plan_required_tasks(self, observed_blocks, placement_targets):
+        """按 legacy/shadow/execute 规则生成本轮必选任务列表。"""
         legacy_tasks = assign_blocks_to_targets(
             observed_blocks,
             placement_targets,
@@ -1912,6 +1912,35 @@ class ImageProcessor:
             )
             return list(decision.tasks), "V1 shadow（执行旧匈牙利方案）"
         return list(decision.tasks), "V1 execute 优化规划"
+
+    def _plan_advanced_tasks(self, observed_blocks, placement_targets):
+        """只匹配同类实体，并严格保留进阶任务动态库给出的目标顺序。"""
+        expected_indices = tuple(range(len(placement_targets)))
+        target_indices = tuple(int(target.index) for target in placement_targets)
+        if target_indices != expected_indices:
+            raise RuntimeError(
+                "进阶任务目标序号没有严格按动态库输出顺序连续编号"
+            )
+
+        tasks = assign_blocks_to_targets(
+            observed_blocks,
+            placement_targets,
+            board_angle_deg=self.board_theta,
+        )
+        task_indices = tuple(int(task.index) for task in tasks)
+        expected_categories = tuple(
+            normalize_category_name(target.category)
+            for target in placement_targets
+        )
+        actual_categories = tuple(
+            normalize_category_name(task.category)
+            for task in tasks
+        )
+        if task_indices != expected_indices or actual_categories != expected_categories:
+            raise RuntimeError("进阶任务规划结果改变了裁判指定的摆放顺序")
+
+        self.last_task_plan_result = None
+        return list(tasks), "进阶任务固定顺序，旧匈牙利实体分配"
 
     def _placement_specs(self, layout):
         """先计算全部托盘目标像素，供一次批量深度查询使用。"""
@@ -2479,7 +2508,7 @@ class ImageProcessor:
                                 layout,
                                 image.shape[:2],
                             )
-                            self.task_targets, fixed_message = self._plan_formal_tasks(
+                            self.task_targets, fixed_message = self._plan_required_tasks(
                                 observed_blocks,
                                 placement_targets,
                             )
@@ -2509,16 +2538,26 @@ class ImageProcessor:
                             confirmation_attempts=confirmation_attempts,
                         )
                 else:
-                    # disabled、shadow 和进阶任务均使用原固定规划链路。
+                    # 进阶任务严格保留动态库顺序；必选任务才允许进入 V1 优化。
                     try:
                         placement_targets = self._build_placement_targets(
                             layout,
                             image.shape[:2],
                         )
-                        self.task_targets, planner_message = self._plan_formal_tasks(
-                            observed_blocks,
-                            placement_targets,
-                        )
+                        if request.advanced:
+                            self.task_targets, planner_message = (
+                                self._plan_advanced_tasks(
+                                    observed_blocks,
+                                    placement_targets,
+                                )
+                            )
+                        else:
+                            self.task_targets, planner_message = (
+                                self._plan_required_tasks(
+                                    observed_blocks,
+                                    placement_targets,
+                                )
+                            )
                     except Exception as fixed_exc:
                         if dynamic_mode == "shadow":
                             dynamic_text = (

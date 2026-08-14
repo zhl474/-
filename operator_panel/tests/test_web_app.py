@@ -38,6 +38,26 @@ class FakeRos:
     def image_bytes(self):
         return b"\xff\xd8\xff\xd9", "now"
 
+    def ros_system_snapshot(self):
+        return {
+            "master_online": True,
+            "distro": "noetic",
+            "master_uri": "http://127.0.0.1:11311",
+            "node_count": 1,
+            "topic_count": 1,
+            "service_count": 0,
+            "nodes": ["/operator_panel"],
+            "topics": [{
+                "name": "/camera/image_rect",
+                "type": "sensor_msgs/Image",
+                "publishers": ["/camera_node"],
+                "subscribers": ["/operator_panel"],
+                "hz": 30.0,
+            }],
+            "services": [],
+            "updated_at": "now",
+        }
+
 
 class FakeCoordinator:
     def __init__(self):
@@ -108,12 +128,24 @@ def test首页和状态接口只接受本机Host(web):
     assert client.get("/api/state", base_url="http://evil.example").status_code == 403
 
 
-def test首页使用简洁的五个页面标题(web):
+def testROS系统接口返回Master实时图(web):
+    client, _coordinator, _bus, _tmp = web
+    response = client.get("/api/ros-system", **url("/api/ros-system"))
+
+    assert response.status_code == 200
+    assert response.get_json()["nodes"] == ["/operator_panel"]
+    assert response.get_json()["topics"][0]["type"] == "sensor_msgs/Image"
+
+
+def test首页使用简洁标题并展示ROS身份(web):
     client, _coordinator, _bus, _tmp = web
     html = client.get("/", **url("/")).get_data(as_text=True)
 
-    for title in ("运行控制台", "手动控制", "参数中心", "只读配置与标定", "运行日志"):
+    for title in ("运行控制台", "手动控制", "参数中心", "只读配置与标定", "ROS 系统", "运行日志"):
         assert f'<h1 class="page-title">{title}</h1>' in html
+    assert "ROS 单臂俄罗斯方块控制台" in html
+    assert "/camera/image_rect" in html
+    assert "sensor_msgs/Image" in html
     assert 'id="image-zoom-dialog"' in html
     assert 'id="task-interaction-dialog"' in html
     assert "从识别到抓放，一条清晰的操作链" not in html

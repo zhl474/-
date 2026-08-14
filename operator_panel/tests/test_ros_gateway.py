@@ -48,6 +48,44 @@ def test日志级别按ROS等级转换():
     assert event["message"] == "运动异常"
 
 
+def testROS系统图整理节点话题服务并显示相机实测频率(monkeypatch):
+    monkeypatch.setenv("ROS_DISTRO", "noetic")
+    monkeypatch.setenv("ROS_MASTER_URI", "http://127.0.0.1:11311")
+
+    result = RosGateway._build_ros_system(
+        True,
+        {"/operator_panel", "/camera_node", "/image_process_node"},
+        (
+            [["/camera/image_rect", ["/camera_node"]]],
+            [["/camera/image_rect", ["/image_process_node", "/operator_panel"]]],
+            [["/perception/prepare_task", ["/image_process_node"]]],
+        ),
+        [["/camera/image_rect", "sensor_msgs/Image"]],
+        29.74,
+    )
+
+    assert result["distro"] == "noetic"
+    assert result["node_count"] == 3
+    assert result["topic_count"] == 1
+    assert result["service_count"] == 1
+    assert result["topics"] == [{
+        "name": "/camera/image_rect",
+        "type": "sensor_msgs/Image",
+        "publishers": ["/camera_node"],
+        "subscribers": ["/image_process_node", "/operator_panel"],
+        "hz": 29.7,
+    }]
+    assert result["services"][0]["providers"] == ["/image_process_node"]
+
+
+def test相机话题频率只统计最近五秒帧(monkeypatch):
+    gateway = RosGateway(EventBus())
+    gateway._camera_frame_samples.extend([1.0, 4.9, 9.0, 9.5, 10.0])
+    monkeypatch.setattr("operator_panel_lib.ros_gateway.time.monotonic", lambda: 10.0)
+
+    assert gateway._camera_hz_locked() == 2.0
+
+
 def test人工选择ROS服务读取与回答(monkeypatch):
     service_module = types.ModuleType("image_process.srv")
 

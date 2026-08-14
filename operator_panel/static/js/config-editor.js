@@ -47,6 +47,7 @@ export class ConfigEditor {
     this.original = clone(document.data);
     this.data = clone(document.data);
     this.render();
+    this.onChange?.(this.changedFields());
   }
 
   changedFields() {

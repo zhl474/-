@@ -1,5 +1,5 @@
 # 是否输出 MoveL 动作的运动、保稳阶段耗时。调试完成后可改为 false。
-move_arm_timing_debug: true
+move_arm_timing_debug: false
 
 # 网页“停止运动”调用控制器 StopMotion 后的确认参数。
 stop_motion:
@@ -13,7 +13,7 @@ arm_stability:
   timeout_seconds: 5.0
   poll_interval_seconds: 0.005
   duration_seconds: 0.01
-  linear_speed_threshold_mm_s: 3.0
+  linear_speed_threshold_mm_s: 2.0
   angular_speed_threshold_deg_s: 3.0
   position_tolerance_mm: 1.0
   orientation_tolerance_deg: 0.5

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="operator-token" content="{{ page_token }}">
-  <title>单臂俄罗斯方块 · 项目驾驶舱</title>
+  <title>ROS 单臂俄罗斯方块控制台</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
 </head>
 <body>
@@ -22,15 +22,15 @@
     <div class="brand">
       <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
       <div>
-        <strong>项目驾驶舱</strong>
-        <small>单臂俄罗斯方块 · 本机 127.0.0.1</small>
+        <strong>ROS 单臂俄罗斯方块控制台</strong>
+        <small>ROS Noetic · 本机 127.0.0.1</small>
       </div>
     </div>
     <div class="status-strip" id="status-strip">
-      <span class="status-chip" data-status="ros"><i></i>ROS <b>检查中</b></span>
-      <span class="status-chip" data-status="camera"><i></i>相机 <b>未连接</b></span>
-      <span class="status-chip" data-status="arm"><i></i>机械臂 <b>未连接</b></span>
-      <span class="status-chip" data-status="runtime"><i></i>感知 <b>未启动</b></span>
+      <span class="status-chip" data-status="ros"><i></i>ROS Master <b>检查中</b></span>
+      <span class="status-chip" data-status="camera"><i></i>相机节点 <b>未连接</b></span>
+      <span class="status-chip" data-status="arm"><i></i>控制节点 <b>未连接</b></span>
+      <span class="status-chip" data-status="runtime"><i></i>感知节点 <b>未启动</b></span>
       <span class="status-chip" data-status="holding"><i></i>持块 <b>否</b></span>
       <span class="status-chip danger" data-status="stop"><i></i>停止锁 <b>未锁定</b></span>
     </div>
@@ -46,7 +46,8 @@
         <button class="nav-item" data-view="manual" type="button"><span>02</span>手动控制</button>
         <button class="nav-item" data-view="config" type="button"><span>03</span>参数中心</button>
         <button class="nav-item" data-view="readonly" type="button"><span>04</span>只读与标定</button>
-        <button class="nav-item" data-view="logs" type="button"><span>05</span>运行日志</button>
+        <button class="nav-item" data-view="ros" type="button"><span>05</span>ROS 系统</button>
+        <button class="nav-item" data-view="logs" type="button"><span>06</span>运行日志</button>
       </nav>
       <div class="sidebar-bottom">
         <div class="pending-box">
@@ -144,7 +145,11 @@
           <div class="visual-column">
             <article class="card camera-card">
               <div class="card-heading">
-                <div><h2>相机预览</h2><small>独立 JPEG 缓存 · 最多 2 FPS</small></div>
+                <div>
+                  <h2>ROS 图像预览</h2>
+                  <small><code>/camera/image_rect</code> · <code>sensor_msgs/Image</code> · 原始 <b id="camera-topic-hz">0.0 Hz</b></small>
+                  <small>网页独立 JPEG 缓存 · 最多 2 FPS</small>
+                </div>
                 <span id="camera-time" class="mono">尚无画面</span>
               </div>
               <div class="image-frame camera-frame">
@@ -294,6 +299,83 @@
             </div>
           </div>
         </article>
+      </section>
+
+      <section id="view-ros" class="view">
+        <div class="view-heading">
+          <h1 class="page-title">ROS 系统</h1>
+          <div class="ros-heading-actions">
+            <span id="ros-proof-updated" class="mono muted">等待 ROS Master</span>
+            <button id="ros-proof-refresh" class="button ghost compact" type="button">刷新 ROS 图</button>
+          </div>
+        </div>
+
+        <div class="ros-overview">
+          <article class="card ros-proof-card">
+            <small>ROS Master</small>
+            <strong id="ros-proof-master">检查中</strong>
+            <code id="ros-proof-master-uri">http://127.0.0.1:11311</code>
+          </article>
+          <article class="card ros-proof-card">
+            <small>ROS 发行版</small>
+            <strong id="ros-proof-distro">Noetic</strong>
+            <span>网页后端节点：<code>/operator_panel</code></span>
+          </article>
+          <article class="card ros-proof-card">
+            <small>实时节点</small>
+            <strong id="ros-proof-node-count">0</strong>
+            <span>由 ROS Master 实时返回</span>
+          </article>
+          <article class="card ros-proof-card">
+            <small>话题 / 服务</small>
+            <strong><span id="ros-proof-topic-count">0</span> / <span id="ros-proof-service-count">0</span></strong>
+            <span>通信接口实时统计</span>
+          </article>
+        </div>
+
+        <article class="card ros-topology-card">
+          <div class="card-heading">
+            <div><h2>ROS 通信拓扑</h2><small>节点及接口状态来自当前 ROS Master；绿色表示当前存在</small></div>
+            <span id="ros-proof-state" class="state-badge">等待连接</span>
+          </div>
+          <div class="ros-flow" aria-label="ROS 通信拓扑">
+            <div class="ros-flow-lane">
+              <span class="ros-flow-label">图像链路</span>
+              <div class="ros-stage" data-ros-node="/camera_node"><small>ROS 节点</small><strong>/camera_node</strong></div>
+              <span class="ros-arrow">→</span>
+              <div class="ros-stage topic" data-ros-topic="/camera/image_rect"><small>sensor_msgs/Image</small><strong>/camera/image_rect</strong><em id="ros-flow-camera-hz">0.0 Hz</em></div>
+              <span class="ros-arrow">→</span>
+              <div class="ros-stage" data-ros-node="/image_process_node"><small>ROS 节点</small><strong>/image_process_node</strong></div>
+            </div>
+            <div class="ros-flow-lane">
+              <span class="ros-flow-label">操作链路</span>
+              <div class="ros-stage browser"><small>操作界面</small><strong>本机网页</strong></div>
+              <span class="ros-arrow">→</span>
+              <div class="ros-stage" data-ros-node="/operator_panel"><small>rospy 节点</small><strong>/operator_panel</strong></div>
+              <span class="ros-arrow">→</span>
+              <div class="ros-stage service" data-ros-service-prefix="/perception/"><small>ROS 服务</small><strong>/perception/*</strong></div>
+              <span class="ros-arrow">+</span>
+              <div class="ros-stage service" data-ros-service-prefix="/control/"><small>ROS 服务</small><strong>/control/*</strong></div>
+              <span class="ros-arrow">→</span>
+              <div class="ros-stage" data-ros-node="/control_node"><small>ROS 节点</small><strong>/control_node</strong></div>
+            </div>
+          </div>
+        </article>
+
+        <div class="ros-data-grid">
+          <article class="card ros-data-card">
+            <div class="card-heading"><div><h2>节点</h2><small>当前注册到 ROS Master 的全部节点</small></div></div>
+            <div id="ros-node-list" class="ros-item-list"><p class="muted">尚未读取</p></div>
+          </article>
+          <article class="card ros-data-card topics">
+            <div class="card-heading"><div><h2>话题</h2><small>类型、发布节点与订阅节点</small></div></div>
+            <div id="ros-topic-list" class="ros-table-list"><p class="muted">尚未读取</p></div>
+          </article>
+          <article class="card ros-data-card">
+            <div class="card-heading"><div><h2>服务</h2><small>服务名称与提供节点</small></div></div>
+            <div id="ros-service-list" class="ros-item-list"><p class="muted">尚未读取</p></div>
+          </article>
+        </div>
       </section>
 
       <section id="view-logs" class="view">

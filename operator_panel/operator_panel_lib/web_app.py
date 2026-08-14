@@ -125,6 +125,10 @@ def create_app(coordinator, event_bus, config_manager, ros_gateway, panel_config
     def get_state():
         return jsonify(coordinator.snapshot())
 
+    @app.get("/api/ros-system")
+    def get_ros_system():
+        return jsonify(ros_gateway.ros_system_snapshot())
+
     @app.get("/api/operations/<operation_id>")
     def get_operation(operation_id):
         operation = coordinator.operation(operation_id)
