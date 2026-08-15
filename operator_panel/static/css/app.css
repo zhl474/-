@@ -410,11 +410,20 @@ code, .mono { font-family: var(--mono); }
 .toast small { margin-top: 2px; color: var(--muted); }
 @keyframes toast-in { from { opacity: 0; transform: translateX(12px); } }
 
-.image-zoom-dialog { box-sizing: border-box; width: 96vw; max-width: none; height: 92vh; max-height: none; padding: 40px 48px 48px; overflow: hidden; border: 0; border-radius: 16px; color: white; background: #0d1714; box-shadow: 0 30px 100px rgba(0,0,0,.55); }
-.image-zoom-dialog[open] { display: grid; grid-template-rows: minmax(0, 1fr) auto; place-items: center; gap: 10px; }
+.image-zoom-dialog { box-sizing: border-box; width: 96vw; max-width: none; height: 92vh; max-height: none; padding: 40px 48px 44px; overflow: hidden; border: 0; border-radius: 16px; color: white; background: #0d1714; box-shadow: 0 30px 100px rgba(0,0,0,.55); }
+.image-zoom-dialog[open] { display: grid; grid-template-rows: minmax(0, 1fr) auto; place-items: stretch; gap: 10px; }
 .image-zoom-dialog::backdrop { background: rgba(5,12,10,.88); backdrop-filter: blur(3px); }
-.image-zoom-dialog img { display: block; width: 100%; height: 100%; min-height: 0; object-fit: contain; cursor: zoom-out; user-select: none; }
-.image-zoom-dialog p { margin: 0; color: #c6d3ce; font-size: 12px; }
+.image-zoom-stage { position: relative; width: 100%; height: 100%; min-height: 0; overflow: hidden; border-radius: 10px; background: #060b09; }
+.image-zoom-canvas { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; user-select: none; }
+.image-zoom-info { display: grid; gap: 5px; min-width: 0; }
+.image-zoom-info p { margin: 0; color: #c6d3ce; font-size: 12px; }
+#image-zoom-title { color: white; font-size: 13px; font-weight: 700; }
+.image-zoom-readout { display: flex; align-items: center; gap: 16px; min-width: 0; color: #d9e5e0; font: 12px var(--mono); }
+.image-zoom-readout span { white-space: nowrap; }
+.image-zoom-readout .image-zoom-locked { color: #ffd166; }
+.image-zoom-grid-button { margin-left: auto; padding: 4px 9px; border: 1px solid rgba(255,255,255,.2); border-radius: 7px; color: #c6d3ce; background: rgba(255,255,255,.07); font-size: 10px; cursor: pointer; }
+.image-zoom-grid-button.active { color: #0d1714; background: #7fe0c3; }
+.image-zoom-hint { opacity: .72; font-size: 10px !important; }
 .image-zoom-close { position: absolute; z-index: 2; top: 10px; right: 14px; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 50%; color: white; background: rgba(255,255,255,.13); font-size: 25px; line-height: 1; cursor: pointer; }
 .image-zoom-close:hover { background: rgba(255,255,255,.24); }
 

@@ -849,13 +849,16 @@ class ImageProcessor:
             "capture_timeout_sec": self.calibration_depth_capture_timeout_sec,
             "block_max_mad_mm": self.block_depth_max_mad_mm,
             "block_plane_max_rmse_mm": self.block_plane_max_rmse_mm,
-            "tray_tcp_below_block_observation_mm": self.tray_tcp_below_block_observation_mm,
         }
         for name, value in positive_depth_values.items():
             if not np.isfinite(value) or value <= 0.0:
                 raise ValueError(
                     f"calibration_depth.{name} 必须是大于 0 的有限数值"
                 )
+        if not np.isfinite(self.tray_tcp_below_block_observation_mm):
+            raise ValueError(
+                "calibration_depth.tray_tcp_below_block_observation_mm 必须是有限数值"
+            )
 
         self.high_tcp_localizer = None
         self.depth_rough_localizer = None

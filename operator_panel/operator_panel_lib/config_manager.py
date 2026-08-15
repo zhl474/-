@@ -293,7 +293,7 @@ FIELD_OVERRIDES = {
         "label": "方块平面 RMSE 上限",
     },
     "perception.calibration_depth.tray_tcp_below_block_observation_mm": {
-        "label": "托盘相对方块观察高度差", "unit": "mm", "risk": "danger",
+        "label": "托盘相对方块观察有符号高度差", "unit": "mm", "risk": "danger",
     },
     "perception.high_tcp_localization": {
         "label": "高位 TCP 定位",
@@ -817,9 +817,12 @@ class ConfigManager:
             raise ConfigError("calibration_depth.min_valid_frames 不能大于 frame_count")
         for key in (
             "capture_timeout_sec", "block_max_mad_mm", "block_plane_max_rmse_mm",
-            "tray_tcp_below_block_observation_mm",
         ):
             _finite_number(depth[key], f"calibration_depth.{key}", positive=True)
+        _finite_number(
+            depth["tray_tcp_below_block_observation_mm"],
+            "calibration_depth.tray_tcp_below_block_observation_mm",
+        )
 
         high_match = _require_mapping(_nested(data, "high_template_match"), "high_template_match")
         for key in ("enabled", "legacy_fallback_enabled"):

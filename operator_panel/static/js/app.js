@@ -37,6 +37,35 @@ const app = {
   usbOccupancyLastLoaded: 0,
 };
 
+const imageViewer = {
+  dialog: null,
+  stage: null,
+  canvas: null,
+  ctx: null,
+  sourceElement: null,
+  image: null,
+  offscreen: document.createElement('canvas'),
+  offCtx: null,
+  sourceUrl: '',
+  loadToken: 0,
+  fitScale: 1,
+  scale: 1,
+  offsetX: 0,
+  offsetY: 0,
+  mouseX: null,
+  mouseY: null,
+  mouseInside: false,
+  dragging: false,
+  moved: false,
+  dragStartX: 0,
+  dragStartY: 0,
+  dragOffsetX: 0,
+  dragOffsetY: 0,
+  locked: null,
+  watchTimer: null,
+  showGrid: true,
+};
+
 const configEditor = new ConfigEditor($('#config-editor'), (changes) => {
   const badge = $('#dirty-count');
   badge.textContent = changes.length ? `${changes.length} 项未保存` : '无修改';
@@ -155,16 +184,365 @@ function appendInteractionButton(label, style, handler) {
   return button;
 }
 
+function imageViewerFitScale() {
+  if (!imageViewer.image || !imageViewer.stage) return 1;
+  const width = imageViewer.stage.clientWidth;
+  const height = imageViewer.stage.clientHeight;
+  if (width < 2 || height < 2) return 1;
+  return Math.min(
+    width / imageViewer.image.width,
+    height / imageViewer.image.height,
+  );
+}
+
+function imageViewerRefit() {
+  if (!imageViewer.image || !imageViewer.stage) return;
+  const scale = imageViewerFitScale();
+  imageViewer.fitScale = scale;
+  imageViewer.scale = scale;
+  imageViewer.offsetX = (
+    imageViewer.stage.clientWidth - imageViewer.image.width * scale
+  ) / 2;
+  imageViewer.offsetY = (
+    imageViewer.stage.clientHeight - imageViewer.image.height * scale
+  ) / 2;
+}
+
+function imageViewerResizeCanvas() {
+  if (!imageViewer.canvas || !imageViewer.stage || !imageViewer.ctx) return;
+  const rect = imageViewer.stage.getBoundingClientRect();
+  const cssWidth = Math.max(1, rect.width);
+  const cssHeight = Math.max(1, rect.height);
+  const dpr = window.devicePixelRatio || 1;
+  const pixelWidth = Math.max(1, Math.round(cssWidth * dpr));
+  const pixelHeight = Math.max(1, Math.round(cssHeight * dpr));
+  if (
+    imageViewer.canvas.width !== pixelWidth
+    || imageViewer.canvas.height !== pixelHeight
+  ) {
+    imageViewer.canvas.width = pixelWidth;
+    imageViewer.canvas.height = pixelHeight;
+  }
+  imageViewer.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (!imageViewer.image) {
+    imageViewer.ctx.clearRect(0, 0, cssWidth, cssHeight);
+    return;
+  }
+  const previousFit = imageViewer.fitScale;
+  const wasFit = previousFit > 0
+    && Math.abs(imageViewer.scale - previousFit) / previousFit < 0.01;
+  imageViewer.fitScale = imageViewerFitScale();
+  if (wasFit || imageViewer.scale < imageViewer.fitScale) {
+    imageViewerRefit();
+  }
+  imageViewerDraw();
+}
+
+function imageViewerPointFromEvent(event) {
+  if (!imageViewer.canvas) return null;
+  const rect = imageViewer.canvas.getBoundingClientRect();
+  return {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  };
+}
+
+function imageViewerImagePoint(point) {
+  if (!imageViewer.image || !point) return null;
+  const x = Math.floor((point.x - imageViewer.offsetX) / imageViewer.scale);
+  const y = Math.floor((point.y - imageViewer.offsetY) / imageViewer.scale);
+  if (x < 0 || y < 0 || x >= imageViewer.image.width || y >= imageViewer.image.height) {
+    return null;
+  }
+  return { x, y };
+}
+
+function imageViewerPixelAt(imageX, imageY) {
+  if (!imageViewer.offCtx || !imageViewer.image) return null;
+  if (
+    imageX < 0 || imageY < 0
+    || imageX >= imageViewer.image.width
+    || imageY >= imageViewer.image.height
+  ) {
+    return null;
+  }
+  const data = imageViewer.offCtx.getImageData(imageX, imageY, 1, 1).data;
+  return { r: data[0], g: data[1], b: data[2] };
+}
+
+function imageViewerUpdateStatus() {
+  const coords = $('#image-zoom-coords');
+  const locked = $('#image-zoom-locked');
+  if (!coords) return;
+  const point = imageViewer.mouseInside
+    ? { x: imageViewer.mouseX, y: imageViewer.mouseY }
+    : null;
+  const imagePoint = imageViewerImagePoint(point);
+  if (!imagePoint) {
+    coords.textContent = 'x=—　y=—　RGB=—';
+  } else {
+    const rgb = imageViewerPixelAt(imagePoint.x, imagePoint.y);
+    coords.textContent = rgb
+      ? `x=${imagePoint.x}　y=${imagePoint.y}　RGB=(${rgb.r}, ${rgb.g}, ${rgb.b})`
+      : `x=${imagePoint.x}　y=${imagePoint.y}　RGB=—`;
+  }
+  if (locked) {
+    const lock = imageViewer.locked;
+    if (!lock) {
+      locked.textContent = '未锁定';
+      locked.className = '';
+      return;
+    }
+    const rgb = imageViewerPixelAt(lock.x, lock.y);
+    locked.textContent = rgb
+      ? `锁定 x=${lock.x}　y=${lock.y}　RGB=(${rgb.r}, ${rgb.g}, ${rgb.b})`
+      : `锁定 x=${lock.x}　y=${lock.y}`;
+    locked.className = 'image-zoom-locked';
+  }
+}
+
+function imageViewerDraw() {
+  if (!imageViewer.ctx || !imageViewer.stage) return;
+  const cssWidth = imageViewer.stage.clientWidth;
+  const cssHeight = imageViewer.stage.clientHeight;
+  if (cssWidth < 2 || cssHeight < 2) return;
+  imageViewer.ctx.clearRect(0, 0, cssWidth, cssHeight);
+  if (!imageViewer.image) {
+    imageViewerUpdateStatus();
+    return;
+  }
+
+  const { ctx, image } = imageViewer;
+  const dpr = window.devicePixelRatio || 1;
+  const fitScale = imageViewer.fitScale || 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.imageSmoothingEnabled = imageViewer.scale < 1
+    || Math.abs(imageViewer.scale - fitScale) / fitScale < 0.01;
+  ctx.drawImage(
+    image,
+    imageViewer.offsetX,
+    imageViewer.offsetY,
+    image.width * imageViewer.scale,
+    image.height * imageViewer.scale,
+  );
+
+  if (imageViewer.showGrid && imageViewer.scale >= 8) {
+    const left = Math.max(0, Math.floor((0 - imageViewer.offsetX) / imageViewer.scale));
+    const right = Math.min(
+      image.width - 1,
+      Math.ceil((cssWidth - imageViewer.offsetX) / imageViewer.scale),
+    );
+    const top = Math.max(0, Math.floor((0 - imageViewer.offsetY) / imageViewer.scale));
+    const bottom = Math.min(
+      image.height - 1,
+      Math.ceil((cssHeight - imageViewer.offsetY) / imageViewer.scale),
+    );
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = left; x <= right; x += 1) {
+      const screenX = imageViewer.offsetX + x * imageViewer.scale;
+      ctx.moveTo(screenX, 0);
+      ctx.lineTo(screenX, cssHeight);
+    }
+    for (let y = top; y <= bottom; y += 1) {
+      const screenY = imageViewer.offsetY + y * imageViewer.scale;
+      ctx.moveTo(0, screenY);
+      ctx.lineTo(cssWidth, screenY);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  const hover = imageViewer.mouseInside
+    ? imageViewerImagePoint({ x: imageViewer.mouseX, y: imageViewer.mouseY })
+    : null;
+  if (hover) {
+    const centerX = imageViewer.offsetX + (hover.x + 0.5) * imageViewer.scale;
+    const centerY = imageViewer.offsetY + (hover.y + 0.5) * imageViewer.scale;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(0, 229, 255, 0.95)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(centerX, 0);
+    ctx.lineTo(centerX, cssHeight);
+    ctx.moveTo(0, centerY);
+    ctx.lineTo(cssWidth, centerY);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(0, 229, 255, 0.9)';
+    ctx.strokeRect(
+      imageViewer.offsetX + hover.x * imageViewer.scale,
+      imageViewer.offsetY + hover.y * imageViewer.scale,
+      Math.max(1, imageViewer.scale),
+      Math.max(1, imageViewer.scale),
+    );
+    ctx.restore();
+  }
+
+  const lock = imageViewer.locked;
+  if (
+    lock
+    && lock.x >= 0 && lock.y >= 0
+    && lock.x < image.width && lock.y < image.height
+  ) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255, 209, 102, 0.95)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(
+      imageViewer.offsetX + lock.x * imageViewer.scale,
+      imageViewer.offsetY + lock.y * imageViewer.scale,
+      Math.max(1, imageViewer.scale),
+      Math.max(1, imageViewer.scale),
+    );
+    ctx.restore();
+  }
+}
+
+function imageViewerZoomAt(point, factor) {
+  if (!imageViewer.image || !point) return;
+  const previous = imageViewer.scale;
+  const next = Math.min(
+    80,
+    Math.max(imageViewer.fitScale * 0.2, previous * factor),
+  );
+  if (Math.abs(next - previous) < 1e-6) return;
+  const imageX = (point.x - imageViewer.offsetX) / previous;
+  const imageY = (point.y - imageViewer.offsetY) / previous;
+  imageViewer.scale = next;
+  imageViewer.offsetX = point.x - imageX * next;
+  imageViewer.offsetY = point.y - imageY * next;
+  imageViewerDraw();
+  imageViewerUpdateStatus();
+}
+
+function imageViewerSetScale(nextScale, point) {
+  if (!imageViewer.image || !point) return;
+  const previous = imageViewer.scale;
+  const next = Math.min(
+    80,
+    Math.max(imageViewer.fitScale * 0.2, nextScale),
+  );
+  if (Math.abs(next - previous) < 1e-6) return;
+  const imageX = (point.x - imageViewer.offsetX) / previous;
+  const imageY = (point.y - imageViewer.offsetY) / previous;
+  imageViewer.scale = next;
+  imageViewer.offsetX = point.x - imageX * next;
+  imageViewer.offsetY = point.y - imageY * next;
+  imageViewerDraw();
+  imageViewerUpdateStatus();
+}
+
+function imageViewerLoadImage(source, preserveTransform = false) {
+  if (!source) return;
+  const token = ++imageViewer.loadToken;
+  imageViewer.sourceUrl = source;
+  const nextImage = new Image();
+  nextImage.onload = () => {
+    if (token !== imageViewer.loadToken) return;
+    const previous = imageViewer.image;
+    const sameSize = Boolean(
+      previous
+      && previous.width === nextImage.width
+      && previous.height === nextImage.height,
+    );
+    imageViewer.image = nextImage;
+    imageViewer.offscreen.width = nextImage.width;
+    imageViewer.offscreen.height = nextImage.height;
+    if (!imageViewer.offCtx) {
+      imageViewer.offCtx = imageViewer.offscreen.getContext('2d', {
+        willReadFrequently: true,
+      });
+    }
+    imageViewer.offCtx.clearRect(0, 0, nextImage.width, nextImage.height);
+    imageViewer.offCtx.drawImage(nextImage, 0, 0);
+    imageViewer.fitScale = imageViewerFitScale();
+    if (!preserveTransform || !sameSize) imageViewerRefit();
+    imageViewerDraw();
+    imageViewerUpdateStatus();
+  };
+  nextImage.onerror = () => {
+    if (token !== imageViewer.loadToken) return;
+    toast(
+      '像素查看器加载失败',
+      '该图片可能尚未生成，或浏览器无法解码当前 JPEG',
+      'warning',
+    );
+  };
+  nextImage.src = source;
+}
+
+function imageViewerStartWatching() {
+  if (imageViewer.watchTimer) clearInterval(imageViewer.watchTimer);
+  imageViewer.watchTimer = setInterval(() => {
+    const element = imageViewer.sourceElement;
+    const source = element?.currentSrc || element?.src;
+    if (source && source !== imageViewer.sourceUrl) {
+      imageViewerLoadImage(source, true);
+    }
+  }, 400);
+}
+
+function imageViewerClose() {
+  if (imageViewer.watchTimer) {
+    clearInterval(imageViewer.watchTimer);
+    imageViewer.watchTimer = null;
+  }
+  imageViewer.loadToken += 1;
+  imageViewer.sourceElement = null;
+  imageViewer.sourceUrl = '';
+  imageViewer.image = null;
+  imageViewer.locked = null;
+  imageViewer.mouseInside = false;
+  imageViewer.dragging = false;
+  imageViewer.moved = false;
+  imageViewer.mouseX = null;
+  imageViewer.mouseY = null;
+  imageViewer.fitScale = 1;
+  imageViewer.scale = 1;
+  imageViewer.offsetX = 0;
+  imageViewer.offsetY = 0;
+  imageViewer.offscreen.width = 1;
+  imageViewer.offscreen.height = 1;
+  if (imageViewer.offCtx) {
+    imageViewer.offCtx.clearRect(0, 0, 1, 1);
+  }
+  if (imageViewer.ctx && imageViewer.stage) {
+    imageViewer.ctx.clearRect(
+      0, 0,
+      imageViewer.stage.clientWidth,
+      imageViewer.stage.clientHeight,
+    );
+  }
+  const coords = $('#image-zoom-coords');
+  const locked = $('#image-zoom-locked');
+  if (coords) coords.textContent = 'x=—　y=—　RGB=—';
+  if (locked) {
+    locked.textContent = '未锁定';
+    locked.className = '';
+  }
+}
+
 function openImageZoom(image, titleText) {
   const source = image?.currentSrc || image?.src;
   if (!source || !image?.hasAttribute('src')) {
     toast('调试图尚未生成', '可以稍后点击页面中的“刷新”重试', 'warning');
     return false;
   }
-  $('#image-zoom-preview').src = source;
+  if (!imageViewer.dialog) {
+    toast('像素查看器未初始化', '请刷新页面后重试', 'error');
+    return false;
+  }
+  imageViewer.sourceElement = image;
+  imageViewer.locked = null;
+  imageViewer.mouseInside = false;
+  imageViewer.mouseX = null;
+  imageViewer.mouseY = null;
   $('#image-zoom-title').textContent = titleText;
-  const dialog = $('#image-zoom-dialog');
-  if (!dialog.open) dialog.showModal();
+  if (!imageViewer.dialog.open) imageViewer.dialog.showModal();
+  imageViewerLoadImage(source, false);
+  imageViewerStartWatching();
+  requestAnimationFrame(() => imageViewerResizeCanvas());
   return true;
 }
 
@@ -662,7 +1040,19 @@ function refreshDebugImages() {
 
 function bindImageZoom() {
   const dialog = $('#image-zoom-dialog');
-  const preview = $('#image-zoom-preview');
+  const stage = $('#image-zoom-stage');
+  const canvas = $('#image-zoom-canvas');
+  const gridButton = $('#image-zoom-grid-toggle');
+
+  imageViewer.dialog = dialog;
+  imageViewer.stage = stage;
+  imageViewer.canvas = canvas;
+  imageViewer.ctx = canvas.getContext('2d');
+  imageViewer.offscreen.width = 1;
+  imageViewer.offscreen.height = 1;
+  imageViewer.offCtx = imageViewer.offscreen.getContext('2d', {
+    willReadFrequently: true,
+  });
 
   $$('#camera-image, #debug-image').forEach((image) => {
     image.title = '双击放大';
@@ -682,11 +1072,146 @@ function bindImageZoom() {
   });
 
   $('#image-zoom-close').addEventListener('click', () => dialog.close());
-  preview.addEventListener('dblclick', () => dialog.close());
   dialog.addEventListener('click', (event) => {
     if (event.target === dialog) dialog.close();
   });
-  dialog.addEventListener('close', () => preview.removeAttribute('src'));
+  dialog.addEventListener('close', () => imageViewerClose());
+
+  gridButton.addEventListener('click', () => {
+    imageViewer.showGrid = !imageViewer.showGrid;
+    gridButton.textContent = imageViewer.showGrid ? '像素网格：开' : '像素网格：关';
+    gridButton.classList.toggle('active', imageViewer.showGrid);
+    imageViewerDraw();
+  });
+
+  canvas.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || !imageViewer.image) return;
+    const point = imageViewerPointFromEvent(event);
+    if (!point) return;
+    imageViewer.dragging = true;
+    imageViewer.moved = false;
+    imageViewer.dragStartX = point.x;
+    imageViewer.dragStartY = point.y;
+    imageViewer.dragOffsetX = imageViewer.offsetX;
+    imageViewer.dragOffsetY = imageViewer.offsetY;
+    try {
+      canvas.setPointerCapture(event.pointerId);
+    } catch (_) {}
+  });
+
+  canvas.addEventListener('pointermove', (event) => {
+    const point = imageViewerPointFromEvent(event);
+    if (point) {
+      imageViewer.mouseX = point.x;
+      imageViewer.mouseY = point.y;
+      imageViewer.mouseInside = point.x >= 0 && point.y >= 0
+        && point.x <= imageViewer.stage.clientWidth
+        && point.y <= imageViewer.stage.clientHeight;
+      if (imageViewer.dragging) {
+        const dx = point.x - imageViewer.dragStartX;
+        const dy = point.y - imageViewer.dragStartY;
+        if (Math.hypot(dx, dy) > 3) imageViewer.moved = true;
+        if (imageViewer.moved) {
+          imageViewer.offsetX = imageViewer.dragOffsetX + dx;
+          imageViewer.offsetY = imageViewer.dragOffsetY + dy;
+        }
+      }
+    }
+    imageViewerDraw();
+    imageViewerUpdateStatus();
+  });
+
+  canvas.addEventListener('pointerup', (event) => {
+    if (event.button !== 0) return;
+    const point = imageViewerPointFromEvent(event);
+    if (point) {
+      imageViewer.mouseX = point.x;
+      imageViewer.mouseY = point.y;
+      imageViewer.mouseInside = point.x >= 0 && point.y >= 0
+        && point.x <= imageViewer.stage.clientWidth
+        && point.y <= imageViewer.stage.clientHeight;
+      if (imageViewer.dragging && !imageViewer.moved) {
+        const imagePoint = imageViewerImagePoint(point);
+        if (imagePoint) {
+          imageViewer.locked = { x: imagePoint.x, y: imagePoint.y };
+        }
+      }
+    }
+    imageViewer.dragging = false;
+    imageViewer.moved = false;
+    imageViewerDraw();
+    imageViewerUpdateStatus();
+  });
+
+  canvas.addEventListener('pointercancel', () => {
+    imageViewer.dragging = false;
+    imageViewer.moved = false;
+  });
+  canvas.addEventListener('pointerleave', () => {
+    imageViewer.mouseInside = false;
+    imageViewer.mouseX = null;
+    imageViewer.mouseY = null;
+    imageViewerDraw();
+    imageViewerUpdateStatus();
+  });
+
+  canvas.addEventListener('wheel', (event) => {
+    if (!event.ctrlKey || !imageViewer.image) return;
+    event.preventDefault();
+    const point = imageViewerPointFromEvent(event);
+    const factor = event.deltaY < 0 ? 1.18 : 1 / 1.18;
+    imageViewerZoomAt(point, factor);
+  }, { passive: false });
+
+  canvas.addEventListener('dblclick', (event) => {
+    if (!imageViewer.image) return;
+    event.preventDefault();
+    const point = imageViewerPointFromEvent(event);
+    const fitScale = imageViewer.fitScale || 1;
+    const isFit = Math.abs(imageViewer.scale - fitScale)
+      <= Math.max(0.001, fitScale * 0.01);
+    if (isFit) imageViewerSetScale(1, point);
+    else imageViewerRefit();
+  });
+
+  dialog.addEventListener('keydown', (event) => {
+    if (!imageViewer.image) return;
+    if (event.key === '0') {
+      event.preventDefault();
+      imageViewerRefit();
+      imageViewerDraw();
+      imageViewerUpdateStatus();
+    } else if (event.key === '1') {
+      event.preventDefault();
+      const point = imageViewer.mouseInside
+        ? { x: imageViewer.mouseX, y: imageViewer.mouseY }
+        : {
+          x: imageViewer.stage.clientWidth / 2,
+          y: imageViewer.stage.clientHeight / 2,
+        };
+      imageViewerSetScale(1, point);
+    } else if (event.key === '+' || event.key === '=') {
+      event.preventDefault();
+      const point = {
+        x: imageViewer.stage.clientWidth / 2,
+        y: imageViewer.stage.clientHeight / 2,
+      };
+      imageViewerZoomAt(point, 1.18);
+    } else if (event.key === '-') {
+      event.preventDefault();
+      const point = {
+        x: imageViewer.stage.clientWidth / 2,
+        y: imageViewer.stage.clientHeight / 2,
+      };
+      imageViewerZoomAt(point, 1 / 1.18);
+    }
+  });
+
+  const resizeObserver = new ResizeObserver(() => imageViewerResizeCanvas());
+  resizeObserver.observe(stage);
+  window.addEventListener('resize', () => {
+    if (dialog.open) imageViewerResizeCanvas();
+  });
 }
 
 function renderOrder() {

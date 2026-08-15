@@ -87,8 +87,8 @@ calibration_depth:
   # 禁止继续生成托盘粗定位位姿和执行后续低位运动。
   block_plane_max_rmse_mm: 1.0
 
-  # 托盘释放 TCP 平面低于方块低位观察 TCP 平面的控制高度，不是物理表面高度差。
-  # 对任意相同机器人 XY：Z_tray(X,Y)=Z_block_observation(X,Y)-该值。
+  # 托盘 TCP 平面相对于方块低位观察 TCP 平面的有符号高度差，不是物理表面高度差。
+  # 对任意相同机器人 XY：Z_tray(X,Y)=Z_block_observation(X,Y)-该值；正数表示托盘更低，负数表示托盘更高。
   # 托盘深度只提供粗定位 X/Y，其深度 Z 无论如何波动都不会改变这里计算出的托盘 TCP Z。
   tray_tcp_below_block_observation_mm: 7.0
 

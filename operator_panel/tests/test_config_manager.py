@@ -162,6 +162,26 @@ def test数值有限值枚举和跨字段校验(manager):
         manager.save_config("camera", invalid_camera, camera["revision"])
 
 
+def test托盘相对观察高度差允许负值(manager):
+    perception = manager.get_config("perception")
+    data = deepcopy(perception["data"])
+    data["calibration_depth"]["tray_tcp_below_block_observation_mm"] = -7.0
+
+    result = manager.save_config(
+        "perception",
+        data,
+        perception["revision"],
+        confirm_dangerous=True,
+    )
+
+    assert result["changed"] is True
+    assert (
+        manager.get_config("perception")["data"]["calibration_depth"]
+        ["tray_tcp_below_block_observation_mm"]
+        == -7.0
+    )
+
+
 def test动态盘面execute与视觉伺服执行跨文件校验(manager):
     execution = manager.get_config("execution")
     if execution["data"]["servo"]["enabled"]:

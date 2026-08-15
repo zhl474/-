@@ -459,8 +459,18 @@
 
   <dialog id="image-zoom-dialog" class="image-zoom-dialog" aria-labelledby="image-zoom-title">
     <button id="image-zoom-close" class="image-zoom-close" type="button" aria-label="关闭大图">×</button>
-    <img id="image-zoom-preview" alt="放大的预览图">
-    <p id="image-zoom-title"></p>
+    <div id="image-zoom-stage" class="image-zoom-stage">
+      <canvas id="image-zoom-canvas" class="image-zoom-canvas"></canvas>
+    </div>
+    <div class="image-zoom-info">
+      <p id="image-zoom-title" class="image-zoom-title"></p>
+      <div class="image-zoom-readout">
+        <span id="image-zoom-coords">x=—　y=—　RGB=—</span>
+        <span id="image-zoom-locked">未锁定</span>
+        <button id="image-zoom-grid-toggle" class="image-zoom-grid-button" type="button">像素网格：开</button>
+      </div>
+      <p class="image-zoom-hint">Ctrl+滚轮缩放 · 拖拽平移 · 单击锁定 · 双击适应/100% · 0 适应 · 1 显示 100%</p>
+    </div>
   </dialog>
 
   <dialog id="task-interaction-dialog" class="task-interaction-dialog" aria-labelledby="task-interaction-title">
