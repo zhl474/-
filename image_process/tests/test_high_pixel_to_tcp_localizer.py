@@ -317,7 +317,7 @@ def test_structured_assessment_reports_actual_tcp_and_all_violated_axes(tmp_path
 
     assert assessment.predicted_tcp_xyz == (-440.0, -260.0, 160.0)
     assert assessment.safety_tcp_xyz == pytest.approx((-534.1, -273.8, 160.0))
-    assert assessment.safety_min_xyz == (-444.224, -263.279, 165.0)
+    assert assessment.safety_min_xyz == (-444.224, -263.279, 163.0)
     assert assessment.safety_max_xyz[:2] == (-148.17, 315.925)
     assert np.isposinf(assessment.safety_max_xyz[2])
     assert assessment.violated_axes == ("X", "Y", "Z")

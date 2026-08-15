@@ -947,7 +947,7 @@ def test_image_node_selects_high_tcp_safety_offset_from_servo_mode(
     assert received["tcp_min_xyz"] == (
         localization_config["safe_x_range_mm"][0],
         localization_config["safe_y_range_mm"][0],
-        165.0,
+        163.0,
     )
     assert received["tcp_max_xyz"] == (
         localization_config["safe_x_range_mm"][1],

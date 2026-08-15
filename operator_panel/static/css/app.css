@@ -137,6 +137,17 @@ code, .mono { font-family: var(--mono); }
 .readiness-line span::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: #bdc5c2; }
 .readiness-line span.ready { color: var(--green-dark); }
 .readiness-line span.ready::before { background: var(--green); }
+.usb-occupancy { margin-top: 14px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-soft); }
+.usb-occupancy .inline-heading { margin-bottom: 6px; }
+.usb-occupancy small { display: block; margin-top: 6px; color: var(--muted); font-size: 9px; }
+.usb-status { margin-top: 5px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.usb-status::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: #bdc5c2; vertical-align: 1px; }
+.usb-status.free { color: var(--green-dark); }
+.usb-status.free::before { background: var(--green); }
+.usb-status.warn { color: #82520b; }
+.usb-status.warn::before { background: var(--amber); }
+.usb-status.blocked { color: var(--red-dark); }
+.usb-status.blocked::before { background: var(--red); }
 
 .button { border: 1px solid transparent; border-radius: 9px; padding: 8px 14px; font-weight: 650; cursor: pointer; transition: .15s ease; }
 .button:hover { transform: translateY(-1px); }

@@ -17,6 +17,7 @@ import xmlrpc.client
 import numpy as np
 import serial
 from akai_fr import AkaiElectricSucker, AkaiFr
+from competition_lib.config import load_execution_config
 
 from .constants import HAND_EYE_MATRIX_PATH
 
@@ -76,7 +77,6 @@ class DirectHardware:
         self.arm_port = int(manual["arm_port"])
         self.servo_port = str(manual["servo_port"])
         self.servo_baudrate = int(manual["servo_baudrate"])
-        self.minimum_z_mm = float(manual["minimum_z_mm"])
         self.stop_rpc_timeout = 2.0
         self._arm = None
         self._sucker = None
@@ -214,9 +214,17 @@ class DirectHardware:
         if speed <= 0:
             raise DirectHardwareError("机械臂速度必须大于 0")
 
+        try:
+            minimum_tcp_z_mm = float(load_execution_config().minimum_tcp_z_mm)
+        except Exception as exc:
+            raise DirectHardwareError(
+                f"无法读取唯一 TCP 高度配置 motion.minimum_tcp_z_mm：{exc}"
+            ) from exc
+
         z_was_clamped = False
-        if pose[2] < self.minimum_z_mm:
-            pose[2] = self.minimum_z_mm
+        requested_z = pose[2]
+        if pose[2] < minimum_tcp_z_mm:
+            pose[2] = minimum_tcp_z_mm
             z_was_clamped = True
 
         arm = self._ensure_arm()
@@ -240,13 +248,12 @@ class DirectHardware:
             self._wait_until_stable(arm, pose, motion_started_at)
 
         if z_was_clamped:
-            message = (
-                f"目标 Z 低于安全下限 {self.minimum_z_mm:.2f} mm，"
-                "已自动调整后完成运动"
+            raise DirectHardwareError(
+                f"请求 Z={requested_z:.2f} mm 低于安全下限 "
+                f"{minimum_tcp_z_mm:.2f} mm，已调整到 {pose[2]:.2f} mm，"
+                "已完成运动，但本次运动判定失败"
             )
-        else:
-            message = "机械臂运动完成"
-        return {"success": True, "message": message, "pose": pose}
+        return {"success": True, "message": "机械臂运动完成", "pose": pose}
 
     def _wait_until_stable(self, arm, target_pose, motion_started_at):
         """等待机械臂到达目标并停稳，照 controller.py 的 _wait_until_arm_stable。"""

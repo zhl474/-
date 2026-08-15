@@ -18,11 +18,11 @@ shooting_pose: [-250.4151306152343, 22.14801216125488, 380.3343505859375, -180, 
 motion:
   # 普通大范围 MoveL 的速度参数，例如复位、粗定位、抬起和移动到摆放区。
   # 具体物理单位由机械臂 SDK 定义；数值越大运动越快。
-  arm_speed: 100
+  arm_speed: 50
 
   # 抓取和摆放下探时的 MoveL 速度参数。
   # 下探比普通移动慢，用于降低碰撞和压坏方块的风险。
-  pick_speed: 100
+  pick_speed: 50
 
   # 视觉伺服每轮 XY 修正时的 MoveL 速度参数。
   # 太大可能过冲或画面未稳定，太小会增加每轮闭环耗时。
@@ -30,14 +30,14 @@ motion:
 
   # 高度策略得到方块上表面的基坐标系绝对 Z 后，
   # 吸盘实际抓取高度相对该表面的偏移，单位 mm。
-  pick_surface_offset_mm: 163.5
+  pick_surface_offset_mm: 153.0
 
   # 最终抓取位上方的动态预抓取间隙，单位 mm。
   # 预抓取位会在这里等待机械臂停稳，随后仅下探该距离吸取方块。
   pick_approach_clearance_mm: 3.0
 
   # 从方块相机伺服位斜向移动到吸盘预抓取位时的 MoveL 速度参数。
-  pick_approach_speed: 100
+  pick_approach_speed: 50
 
   # 抓取后竖直抬升点的 MoveL 圆滑半径，单位 mm。
   # 大于 0 时机械臂不会在抬升点停下，而会圆滑拐向托盘区域；0 表示关闭圆滑。
@@ -58,9 +58,10 @@ motion:
   # 必须小于 place_descent_offset_mm，否则圆滑会吞掉整段抬升。
   place_lift_blend_radius_mm: 2.0
 
-  # 所有正式 TCP 运动命令允许的最低绝对 Z，必须与控制节点 minimum_z 保持一致。
+  # 所有正式 TCP 运动命令允许的最低绝对 Z。
+  # 这是最低安全高度的唯一配置来源；controller、感知节点和网页直连硬件都读取本字段。
   # 总控会在发出命令前主动拒绝低于该值的观察位和最终抓放位，避免依赖控制层静默钳制。
-  minimum_tcp_z_mm: 165.0
+  minimum_tcp_z_mm: 163.0
 
 servo:
   # true：执行方块和托盘低位视觉伺服；false：使用高位粗定位结果开环抓放。

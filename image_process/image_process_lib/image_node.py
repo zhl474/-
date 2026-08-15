@@ -521,7 +521,17 @@ class ImageProcessor:
         if len(self.shooting_angle) != 6 or not np.all(np.isfinite(self.shooting_angle)):
             raise ValueError("shooting_pose 必须包含 6 个有限数值")
         motion_config = execution_config.get("motion", {})
-        self.minimum_tcp_z_mm = float(motion_config.get("minimum_tcp_z_mm", 165.0))
+        if not isinstance(motion_config, dict) or "minimum_tcp_z_mm" not in motion_config:
+            raise ValueError(
+                "execution.yaml 缺少唯一安全高度字段 motion.minimum_tcp_z_mm"
+            )
+        raw_minimum_tcp_z_mm = motion_config["minimum_tcp_z_mm"]
+        if isinstance(raw_minimum_tcp_z_mm, bool):
+            raise ValueError("minimum_tcp_z_mm 必须是大于 0 的有限数值")
+        try:
+            self.minimum_tcp_z_mm = float(raw_minimum_tcp_z_mm)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("minimum_tcp_z_mm 必须是大于 0 的有限数值") from exc
         self.pick_surface_offset_mm = float(motion_config.get("pick_surface_offset_mm", 0.0))
         self.pick_approach_clearance_mm = float(
             motion_config.get("pick_approach_clearance_mm", 0.0)

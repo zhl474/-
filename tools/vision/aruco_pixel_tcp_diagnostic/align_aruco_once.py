@@ -203,14 +203,14 @@ def move_checked(
     services,
     pose,
     speed,
-    minimum_z_mm,
+    minimum_tcp_z_mm,
     safe_x_range_mm,
     safe_y_range_mm,
     wait_until_stable=True,
 ):
     """安全检查通过后发送运动命令。"""
     ok, reason = validate_motion_pose(
-        pose, minimum_z_mm, safe_x_range_mm, safe_y_range_mm
+        pose, minimum_tcp_z_mm, safe_x_range_mm, safe_y_range_mm
     )
     if not ok:
         raise RuntimeError(f"运动位姿安全检查未通过：{reason}")
@@ -240,19 +240,19 @@ def run_alignment(low_tcp_z_mm=None, assume_yes=False):
     safe_x_range_mm = high_localization.get("safe_x_range_mm", [-1e9, 1e9])
     safe_y_range_mm = high_localization.get("safe_y_range_mm", [-1e9, 1e9])
     shooting_pose = list(execution_config.shooting_pose)
-    minimum_z_mm = float(execution_config.minimum_tcp_z_mm)
+    minimum_tcp_z_mm = float(execution_config.minimum_tcp_z_mm)
 
     ok, reason = validate_motion_pose(
-        shooting_pose, minimum_z_mm, safe_x_range_mm, safe_y_range_mm
+        shooting_pose, minimum_tcp_z_mm, safe_x_range_mm, safe_y_range_mm
     )
     if not ok:
         raise RuntimeError(f"高位拍摄位姿安全检查未通过：{reason}")
     low_tcp_z_mm = float(
         LOW_TCP_Z_MM if low_tcp_z_mm is None else low_tcp_z_mm
     )
-    if not np.isfinite(low_tcp_z_mm) or low_tcp_z_mm < minimum_z_mm:
+    if not np.isfinite(low_tcp_z_mm) or low_tcp_z_mm < minimum_tcp_z_mm:
         raise RuntimeError(
-            f"低位 TCP Z={low_tcp_z_mm}mm 低于安全下限 {minimum_z_mm}mm"
+            f"低位 TCP Z={low_tcp_z_mm}mm 低于安全下限 {minimum_tcp_z_mm}mm"
         )
 
     if REQUIRE_START_CONFIRMATION and not assume_yes:
@@ -275,7 +275,7 @@ def run_alignment(low_tcp_z_mm=None, assume_yes=False):
         services,
         shooting_pose,
         execution_config.arm_speed,
-        minimum_z_mm,
+        minimum_tcp_z_mm,
         safe_x_range_mm,
         safe_y_range_mm,
     )
@@ -327,7 +327,7 @@ def run_alignment(low_tcp_z_mm=None, assume_yes=False):
         services,
         low_pose,
         execution_config.arm_speed,
-        minimum_z_mm,
+        minimum_tcp_z_mm,
         safe_x_range_mm,
         safe_y_range_mm,
     )
@@ -349,7 +349,7 @@ def run_alignment(low_tcp_z_mm=None, assume_yes=False):
             services,
             pose,
             speed,
-            minimum_z_mm,
+            minimum_tcp_z_mm,
             safe_x_range_mm,
             safe_y_range_mm,
             wait_until_stable=wait_until_stable,

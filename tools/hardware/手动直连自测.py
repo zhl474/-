@@ -23,7 +23,6 @@ ARM_IP = "192.168.58.2"
 ARM_PORT = 20003
 SERVO_PORT = "/dev/servo_motor"
 SERVO_BAUDRATE = 115200
-MINIMUM_Z_MM = 165.0
 
 # 只读开关（默认开，不改变硬件状态）。
 RUN_GET_POSE = True            # 读 TCP 位姿
@@ -50,7 +49,6 @@ def _panel_config():
             "arm_port": ARM_PORT,
             "servo_port": SERVO_PORT,
             "servo_baudrate": SERVO_BAUDRATE,
-            "minimum_z_mm": MINIMUM_Z_MM,
         }
     }
 

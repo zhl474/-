@@ -134,6 +134,10 @@ def create_app(coordinator, event_bus, config_manager, ros_gateway, panel_config
     def get_ros_system():
         return jsonify(ros_gateway.ros_system_snapshot())
 
+    @app.get("/api/hardware/usb-occupancy")
+    def get_usb_occupancy():
+        return jsonify(coordinator.usb_occupancy())
+
     @app.get("/api/operations/<operation_id>")
     def get_operation(operation_id):
         operation = coordinator.operation(operation_id)

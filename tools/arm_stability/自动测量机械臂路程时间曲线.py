@@ -10,11 +10,19 @@ import json
 import math
 import os
 import statistics
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
+
+# 将项目 src 加入导入路径，使实机工具和正式节点使用同一份执行配置。
+SRC_DIR = Path(__file__).resolve().parents[2]
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 from akai_fr import AkaiFr
+from competition_lib.config import load_execution_config
 
 
 # ========================= 直接修改的实机参数 =========================
@@ -58,7 +66,8 @@ ACCELERATION_SCALE = 100
 
 TOOL_ID = 0
 USER_ID = 0
-MINIMUM_TCP_Z_MM = 165.0
+# 项目正式运动允许的最低 TCP 绝对高度，单位 mm；只从唯一执行配置读取。
+MINIMUM_TCP_Z_MM = load_execution_config().minimum_tcp_z_mm
 
 # 测试全部完成后是否使用低速 MoveL 回到 A 点。
 RETURN_TO_A_AFTER_TEST = True

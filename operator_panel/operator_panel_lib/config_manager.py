@@ -706,8 +706,10 @@ class ConfigManager:
             raise ConfigError("motion.place_lift_blend_radius_mm 必须小于等于 1000")
         if descent_offset > 0 and lift_blend >= descent_offset:
             raise ConfigError("motion.place_lift_blend_radius_mm 必须小于 motion.place_descent_offset_mm")
-        minimum_z = _finite_number(motion["minimum_tcp_z_mm"], "motion.minimum_tcp_z_mm", positive=True)
-        if float(pose[2]) < minimum_z:
+        minimum_tcp_z_mm = _finite_number(
+            motion["minimum_tcp_z_mm"], "motion.minimum_tcp_z_mm", positive=True
+        )
+        if float(pose[2]) < minimum_tcp_z_mm:
             raise ConfigError("shooting_pose 的 Z 低于 minimum_tcp_z_mm")
         servo = _require_mapping(_nested(data, "servo"), "servo")
         for key in ("enabled", "timing_debug"):
@@ -727,11 +729,6 @@ class ConfigManager:
         _finite_number(motor["velocity_deg_per_sec"], "tool_motor.velocity_deg_per_sec", positive=True)
         if not 0 <= initial <= 360 or not 0 <= lower < upper <= 360:
             raise ConfigError("舵机初始角度或安全边界必须位于 0～360°，且下界小于上界")
-        launch_text = self._read(SRC_DIR / "competition" / "launch" / "hardware.launch")
-        match = re.search(r'name="minimum_z"\s+value="([0-9.]+)"', launch_text)
-        if match and not math.isclose(minimum_z, float(match.group(1)), abs_tol=1e-9):
-            raise ConfigError("motion.minimum_tcp_z_mm 必须与 hardware.launch 的 minimum_z 一致")
-
     def _validate_visual_servo(self, data):
         matrix = _require_sequence(_nested(data, "pixel_to_robot_matrix"), 2, "pixel_to_robot_matrix")
         for row_index, row in enumerate(matrix):

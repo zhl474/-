@@ -31,6 +31,10 @@ const app = {
   promptDeadlineId: '',
   rosSystemLoading: false,
   rosSystemLastLoaded: 0,
+  usbOccupancy: null,
+  usbOccupancyLoading: false,
+  usbOccupancyPromise: null,
+  usbOccupancyLastLoaded: 0,
 };
 
 const configEditor = new ConfigEditor($('#config-editor'), (changes) => {
@@ -355,6 +359,103 @@ function updateInteractionCountdown() {
   if (remaining <= 0) setInteractionButtonsDisabled(true);
 }
 
+function formatUsbOccupant(occupant) {
+  const pid = occupant?.pid ?? '?';
+  const command = occupant?.cmdline || `PID ${pid}`;
+  const shortCommand = command.length > 110 ? `${command.slice(0, 109)}…` : command;
+  return `PID ${pid}（${shortCommand}）`;
+}
+
+function usbBlockedMessage(data) {
+  if (!data) return '';
+  const labels = { camera: '相机', servo: '舵机' };
+  const parts = [];
+  for (const key of ['camera', 'servo']) {
+    const device = data[key];
+    if (!device) continue;
+    const status = device.status;
+    if (status === 'missing' || status === 'unknown') {
+      parts.push(`${labels[key]}：${device.message || '状态未知'}`);
+      continue;
+    }
+    if (status === 'occupied') {
+      const external = (device.occupants || [])
+        .filter((occupant) => !['self', 'panel'].includes(occupant.owner));
+      if (external.length) {
+        parts.push(`${labels[key]}被 ${external.map(formatUsbOccupant).join('；')} 占用`);
+      }
+    }
+  }
+  return parts.join('；');
+}
+
+function renderUsbOccupancy(data, errorMessage = '') {
+  const labels = { camera: '相机', servo: '舵机' };
+  for (const [key, label] of Object.entries(labels)) {
+    const element = $(`#usb-${key}-status`);
+    if (!element) continue;
+    if (!data) {
+      element.textContent = `${label}：${errorMessage || '读取失败'}`;
+      element.className = 'usb-status warn';
+      continue;
+    }
+    const device = data[key] || {};
+    const occupants = device.occupants || [];
+    const external = occupants.some(
+      (occupant) => !['self', 'panel'].includes(occupant.owner),
+    );
+    let className = '';
+    if (device.status === 'free') {
+      className = device.inspection_limited ? 'warn' : 'free';
+    } else if (device.status === 'occupied') {
+      className = external ? 'blocked' : 'free';
+    } else {
+      className = 'warn';
+    }
+
+    let text;
+    if (device.status === 'occupied' && occupants.length && !external) {
+      text = `${label}：控制台内部占用（正常）`;
+    } else {
+      text = `${label}：${device.message || '状态未知'}`;
+    }
+    element.textContent = text;
+    element.className = `usb-status ${className}`;
+    element.title = occupants.length
+      ? occupants.map(formatUsbOccupant).join('\n')
+      : (device.message || '');
+  }
+  const checkedAt = $('#usb-checked-at');
+  if (checkedAt) {
+    checkedAt.textContent = data?.checked_at
+      ? `检查时间：${data.checked_at.replace('T', ' ').slice(0, 19)}`
+      : '';
+  }
+}
+
+async function loadUsbOccupancy(force = false) {
+  if (app.usbOccupancyLoading) return app.usbOccupancyPromise;
+  if (!force && Date.now() - app.usbOccupancyLastLoaded < 3000) {
+    return app.usbOccupancy;
+  }
+  app.usbOccupancyLoading = true;
+  app.usbOccupancyPromise = (async () => {
+    try {
+      app.usbOccupancy = await api('/api/hardware/usb-occupancy');
+      app.usbOccupancyLastLoaded = Date.now();
+      renderUsbOccupancy(app.usbOccupancy);
+      return app.usbOccupancy;
+    } catch (error) {
+      renderUsbOccupancy(null, formatError(error));
+      return null;
+    } finally {
+      app.usbOccupancyLoading = false;
+      app.usbOccupancyPromise = null;
+    }
+  })();
+  return app.usbOccupancyPromise;
+}
+
 function renderState(state) {
   app.state = state;
   const health = state.health || {};
@@ -412,6 +513,9 @@ function renderState(state) {
   $$('#runtime-mode button').forEach((button) => button.classList.toggle('active', process.runtime?.running && button.dataset.mode === runtimeMode));
   const busy = Boolean(active);
   const stopped = Boolean(hardware.stop_latched);
+  if (!process.hardware?.running && Date.now() - app.usbOccupancyLastLoaded > 5000) {
+    loadUsbOccupancy();
+  }
   // 停止锁期间仍允许只重建硬件服务，以便同步 StopMotion 并解除锁；感知和动作继续禁用。
   $('#hardware-start').disabled = busy || Boolean(process.hardware?.running);
   $('#hardware-stop').disabled = busy || !process.hardware?.owned || ['准备识别', '执行中'].includes(task.state);
@@ -763,7 +867,18 @@ function bindRosSystem() {
 }
 
 function bindConsole() {
-  $('#hardware-start').addEventListener('click', () => command('/api/process/hardware/start', {}, '正在启动硬件'));
+  $('#hardware-start').addEventListener('click', async () => {
+    const occupancy = await loadUsbOccupancy(true);
+    if (occupancy) {
+      const blocked = usbBlockedMessage(occupancy);
+      if (blocked) {
+        toast('硬件启动已取消', blocked, 'error', 9000);
+        return;
+      }
+    }
+    command('/api/process/hardware/start', {}, '正在启动硬件');
+  });
+  $('#usb-refresh').addEventListener('click', () => loadUsbOccupancy(true));
   $('#hardware-stop').addEventListener('click', async () => {
     if (await confirmAction('停止硬件？', '将先停止感知，再结束控制台自己启动的相机与控制节点。外部节点不会被结束。')) {
       command('/api/process/hardware/stop', {}, '正在停止硬件');
@@ -1536,7 +1651,11 @@ async function initialize() {
   bindImageZoom();
   bindTaskInteraction();
   renderOrder();
-  await Promise.all([refreshState(), loadExecutionConfig()]);
+  await Promise.all([
+    refreshState(),
+    loadExecutionConfig(),
+    loadUsbOccupancy(true),
+  ]);
   startEvents();
 }
 

@@ -10,6 +10,7 @@ import xmlrpc.client
 import numpy as np
 import rospy
 import serial
+import yaml
 from serial.tools import list_ports
 
 from akai_fr import AkaiElectricSucker, AkaiFr
@@ -34,6 +35,36 @@ from control.srv import (
 PACKAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC_DIR = os.path.abspath(os.path.join(PACKAGE_DIR, ".."))
 DEFAULT_HAND_EYE_MATRIX = os.path.join(SRC_DIR, "camera", "config", "T_wrist2camera.npy")
+EXECUTION_CONFIG_PATH = os.path.join(SRC_DIR, "competition", "config", "execution.yaml")
+
+
+def _load_minimum_tcp_z_mm(config_path=EXECUTION_CONFIG_PATH):
+    """从唯一执行配置读取 TCP 最低安全高度，不提供硬编码后备值。"""
+    try:
+        with open(config_path, "r", encoding="utf-8") as config_file:
+            execution_config = yaml.safe_load(config_file) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise RuntimeError(
+            f"无法读取唯一 TCP 高度配置 {config_path}: {exc}"
+        ) from exc
+
+    if not isinstance(execution_config, dict):
+        raise ValueError("execution.yaml 顶层必须是字典")
+    motion_config = execution_config.get("motion")
+    if not isinstance(motion_config, dict) or "minimum_tcp_z_mm" not in motion_config:
+        raise ValueError(
+            "execution.yaml 缺少唯一安全高度字段 motion.minimum_tcp_z_mm"
+        )
+    raw_value = motion_config["minimum_tcp_z_mm"]
+    if isinstance(raw_value, bool):
+        raise ValueError("motion.minimum_tcp_z_mm 必须是大于 0 的有限数值")
+    try:
+        minimum_tcp_z_mm = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("motion.minimum_tcp_z_mm 必须是大于 0 的有限数值") from exc
+    if not math.isfinite(minimum_tcp_z_mm) or minimum_tcp_z_mm <= 0.0:
+        raise ValueError("motion.minimum_tcp_z_mm 必须是大于 0 的有限数值")
+    return minimum_tcp_z_mm
 
 
 class _TimeoutTransport(xmlrpc.client.Transport):
@@ -53,7 +84,12 @@ class ControlNode:
     SUCTION_UNKNOWN = -1
 
     def __init__(self):
-        self.minimum_z = float(rospy.get_param("~minimum_z", 165.0))
+        self.minimum_tcp_z_mm = _load_minimum_tcp_z_mm()
+        rospy.loginfo(
+            "已从唯一执行配置读取 TCP 最低安全高度：%.3f mm（%s）",
+            self.minimum_tcp_z_mm,
+            EXECUTION_CONFIG_PATH,
+        )
         self.move_arm_timing_debug = bool(rospy.get_param("~move_arm_timing_debug", False))
         stability = rospy.get_param("~arm_stability", {})
         self.stable_timeout = float(stability.get("timeout_seconds", 5.0))
@@ -359,15 +395,15 @@ class ControlNode:
                 message="圆滑过渡点不会精确到位，不能同时等待该点停稳",
             )
         sdk_blend_radius_mm = blend_radius_mm if blend_enabled else -1.0
-        if pose[2] < self.minimum_z:
+        if pose[2] < self.minimum_tcp_z_mm:
             requested_z = pose[2]
-            pose[2] = self.minimum_z
+            pose[2] = self.minimum_tcp_z_mm
             z_was_clamped = True
             # 使用错误级别日志，让终端以红色突出显示安全钳制警告。
             rospy.logerr(
                 "安全警告：目标 Z=%.2f mm 低于安全下限 %.2f mm，已自动调整为 %.2f mm 后继续运动",
                 requested_z,
-                self.minimum_z,
+                self.minimum_tcp_z_mm,
                 pose[2],
             )
         try:
@@ -418,10 +454,11 @@ class ControlNode:
             if z_was_clamped:
                 motion_status = "已提交圆滑过渡运动" if blend_enabled else "已完成运动"
                 return MoveArmResponse(
-                    success=True,
+                    success=False,
                     message=(
-                        f"目标 Z={requested_z:.2f} mm 低于安全下限 {self.minimum_z:.2f} mm，"
-                        f"已自动调整为 {pose[2]:.2f} mm，{motion_status}"
+                        f"请求 Z={requested_z:.2f} mm 低于安全下限 "
+                        f"{self.minimum_tcp_z_mm:.2f} mm，已调整到 {pose[2]:.2f} mm，"
+                        f"{motion_status}，但本次运动判定失败"
                     ),
                 )
             if blend_enabled:

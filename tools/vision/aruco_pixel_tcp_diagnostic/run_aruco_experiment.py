@@ -616,16 +616,18 @@ def main():
     safe_y_range_mm = high_localization.get("safe_y_range_mm", [-1e9, 1e9])
 
     shooting_pose = list(execution_config.shooting_pose)
-    minimum_z_mm = float(execution_config.minimum_tcp_z_mm)
+    minimum_tcp_z_mm = float(execution_config.minimum_tcp_z_mm)
     pixel_to_robot_matrix = visual_config["pixel_to_robot_matrix"]
 
     ok, reason = validate_motion_pose(
-        shooting_pose, minimum_z_mm, safe_x_range_mm, safe_y_range_mm
+        shooting_pose, minimum_tcp_z_mm, safe_x_range_mm, safe_y_range_mm
     )
     if not ok:
         raise RuntimeError(f"高位拍摄位姿安全检查未通过: {reason}")
-    if not np.isfinite(LOW_TCP_Z_MM) or LOW_TCP_Z_MM < minimum_z_mm:
-        raise RuntimeError(f"低位 TCP Z={LOW_TCP_Z_MM}mm 低于安全下限 {minimum_z_mm}mm")
+    if not np.isfinite(LOW_TCP_Z_MM) or LOW_TCP_Z_MM < minimum_tcp_z_mm:
+        raise RuntimeError(
+            f"低位 TCP Z={LOW_TCP_Z_MM}mm 低于安全下限 {minimum_tcp_z_mm}mm"
+        )
 
     parameters = {
         "aruco字典": ARUCO_DICT_NAME,
@@ -651,7 +653,7 @@ def main():
         "视觉伺服矩阵": pixel_to_robot_matrix,
         "安全X范围毫米": safe_x_range_mm,
         "安全Y范围毫米": safe_y_range_mm,
-        "最低TCPZ毫米": minimum_z_mm,
+        "最低TCPZ毫米": minimum_tcp_z_mm,
         "误差阈值像素": SERVO_ERROR_THRESHOLD_PX,
         "最大步长毫米": execution_config.max_step_mm,
         "最小步长毫米": execution_config.min_step_mm,
@@ -720,7 +722,7 @@ def main():
             continue_run = run_one_sample(
                 sample_no, experiment, services, reader, detector, localizer,
                 execution_config, visual_config,
-                shooting_pose, minimum_z_mm, safe_x_range_mm, safe_y_range_mm,
+                shooting_pose, minimum_tcp_z_mm, safe_x_range_mm, safe_y_range_mm,
             )
             if not continue_run:
                 print("控制服务异常，停止实验")
@@ -749,7 +751,7 @@ def run_one_sample(
     execution_config,
     visual_config,
     shooting_pose,
-    minimum_z_mm,
+    minimum_tcp_z_mm,
     safe_x_range_mm,
     safe_y_range_mm,
 ):
@@ -845,7 +847,7 @@ def run_one_sample(
 
         # ---- 移动到低位 ----
         move_checked(services, low_pose, execution_config.arm_speed,
-                     minimum_z_mm, safe_x_range_mm, safe_y_range_mm)
+                     minimum_tcp_z_mm, safe_x_range_mm, safe_y_range_mm)
         print(f"[{sample_no}] 已运动到低位粗定位位姿 {[round(v, 2) for v in low_pose]}")
 
         # ---- 低位首帧（无论成败都保存，用于诊断低位相机看到了什么）----
@@ -942,7 +944,7 @@ def run_one_sample(
 
             def move_pose_func(pose, speed, wait_sec=0.0, wait_until_stable=True):
                 move_checked(
-                    services, pose, speed, minimum_z_mm, safe_x_range_mm, safe_y_range_mm,
+                    services, pose, speed, minimum_tcp_z_mm, safe_x_range_mm, safe_y_range_mm,
                     wait_until_stable=wait_until_stable,
                 )
 
@@ -1135,7 +1137,7 @@ def open_video_writer(video_path, fps, frame_size):
 
 
 def move_checked(
-    services, pose, speed, minimum_z_mm, safe_x_range_mm, safe_y_range_mm,
+    services, pose, speed, minimum_tcp_z_mm, safe_x_range_mm, safe_y_range_mm,
     wait_until_stable=True,
 ):
     """发送运动前执行安全检查；每次伺服修正也经过此函数。
@@ -1144,7 +1146,9 @@ def move_checked(
     （controller.yaml arm_stability：速度≤3mm/s、位姿误差≤1mm/0.5°）后才返回，
     视觉伺服每轮修正前必须确认机械臂真正停稳。
     """
-    ok, reason = validate_motion_pose(pose, minimum_z_mm, safe_x_range_mm, safe_y_range_mm)
+    ok, reason = validate_motion_pose(
+        pose, minimum_tcp_z_mm, safe_x_range_mm, safe_y_range_mm
+    )
     if not ok:
         raise RuntimeError(f"运动位姿安全检查未通过: {reason}")
     services.move_to(pose, speed, wait_until_stable=bool(wait_until_stable))

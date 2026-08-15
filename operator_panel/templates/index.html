@@ -94,6 +94,15 @@
                 <span data-ready="frame">新相机帧</span>
                 <span data-ready="model">感知服务</span>
               </div>
+              <div class="usb-occupancy">
+                <div class="inline-heading">
+                  <strong>USB 设备占用</strong>
+                  <button id="usb-refresh" class="text-button" type="button">重新检查</button>
+                </div>
+                <div id="usb-camera-status" class="usb-status">相机：检查中…</div>
+                <div id="usb-servo-status" class="usb-status">舵机：检查中…</div>
+                <small id="usb-checked-at"></small>
+              </div>
             </article>
 
             <article class="card task-card">

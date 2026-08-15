@@ -88,8 +88,13 @@ def _nonnegative_finite_float(value, name: str) -> float:
 
 def _positive_finite_float(value, name: str) -> float:
     """严格读取有限正浮点数，供动态预抓取间隙等运动参数使用。"""
-    number = _nonnegative_finite_float(value, name)
-    if number <= 0:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} 必须是大于 0 的有限数值")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} 必须是大于 0 的有限数值") from None
+    if not np.isfinite(number) or number <= 0:
         raise ValueError(f"{name} 必须是大于 0 的有限数值")
     return number
 
@@ -160,7 +165,10 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
             motion["place_lift_blend_radius_mm"],
             "motion.place_lift_blend_radius_mm",
         ),
-        minimum_tcp_z_mm=float(motion["minimum_tcp_z_mm"]),
+        minimum_tcp_z_mm=_positive_finite_float(
+            motion["minimum_tcp_z_mm"],
+            "motion.minimum_tcp_z_mm",
+        ),
         timing_debug=bool(servo.get("timing_debug", False)),
         block_error_threshold_px=block_error_threshold_px,
         tray_error_threshold_px=tray_error_threshold_px,

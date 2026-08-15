@@ -57,11 +57,23 @@ def _load_controller(monkeypatch):
     return module
 
 
-def test_low_pose_is_clamped_and_still_calls_robot(monkeypatch):
+def test_controller_reads_the_single_execution_height_without_fallback(monkeypatch, tmp_path):
+    module = _load_controller(monkeypatch)
+    config_path = tmp_path / "execution.yaml"
+    config_path.write_text("motion:\n  minimum_tcp_z_mm: 164.0\n", encoding="utf-8")
+
+    assert module._load_minimum_tcp_z_mm(config_path) == pytest.approx(164.0)
+
+    config_path.write_text("motion:\n  pick_speed: 50\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="缺少唯一安全高度字段"):
+        module._load_minimum_tcp_z_mm(config_path)
+
+
+def test_low_pose_is_clamped_but_reports_failure(monkeypatch):
     module = _load_controller(monkeypatch)
     calls = []
     node = object.__new__(module.ControlNode)
-    node.minimum_z = 165.0
+    node.minimum_tcp_z_mm = 163.0
     node.arm = types.SimpleNamespace(
         set_speed=lambda _speed: calls.append("set_speed"),
         arm=types.SimpleNamespace(
@@ -79,20 +91,22 @@ def test_low_pose_is_clamped_and_still_calls_robot(monkeypatch):
 
     response = node.move_arm(request)
 
-    assert response.success is True
+    assert response.success is False
     assert calls == [
         "set_speed",
-        ("MoveL", [0.0, 0.0, 165.0, 0.0, 0.0, 0.0]),
-        ("wait_stable", [0.0, 0.0, 165.0, 0.0, 0.0, 0.0]),
+        ("MoveL", [0.0, 0.0, 163.0, 0.0, 0.0, 0.0]),
+        ("wait_stable", [0.0, 0.0, 163.0, 0.0, 0.0, 0.0]),
     ]
-    assert "已自动调整为 165.00 mm" in response.message
+    assert "请求 Z=100.00 mm 低于安全下限 163.00 mm" in response.message
+    assert "已调整到 163.00 mm" in response.message
+    assert "本次运动判定失败" in response.message
 
 
 def test_non_finite_pose_never_calls_robot(monkeypatch):
     module = _load_controller(monkeypatch)
     calls = []
     node = object.__new__(module.ControlNode)
-    node.minimum_z = 165.0
+    node.minimum_tcp_z_mm = 163.0
     node.arm = types.SimpleNamespace(
         set_speed=lambda _speed: calls.append("set_speed"),
         arm=types.SimpleNamespace(MoveL=lambda *_args, **_kwargs: calls.append("MoveL")),
@@ -230,7 +244,7 @@ def test_move_arm_logs_motion_and_stabilization_timing(monkeypatch):
         GetActualTCPPose=lambda: (0, list(target_pose)),
     )
     node = object.__new__(module.ControlNode)
-    node.minimum_z = 165.0
+    node.minimum_tcp_z_mm = 163.0
     node.move_arm_timing_debug = True
     node.arm = types.SimpleNamespace(set_speed=lambda _speed: None, arm=xmlrpc_arm)
     node.stable_timeout = 5.0
@@ -260,7 +274,7 @@ def test_move_arm_does_not_log_timing_when_debug_is_disabled(monkeypatch):
     module.rospy.loginfo = lambda *args: log_calls.append(args)
 
     node = object.__new__(module.ControlNode)
-    node.minimum_z = 165.0
+    node.minimum_tcp_z_mm = 163.0
     node.move_arm_timing_debug = False
     node.arm = types.SimpleNamespace(
         set_speed=lambda _speed: None,
@@ -280,7 +294,7 @@ def test_move_arm_does_not_log_timing_when_debug_is_disabled(monkeypatch):
 def test_move_arm_rejects_nonzero_movel_error(monkeypatch):
     module = _load_controller(monkeypatch)
     node = object.__new__(module.ControlNode)
-    node.minimum_z = 165.0
+    node.minimum_tcp_z_mm = 163.0
     node.arm = types.SimpleNamespace(
         set_speed=lambda _speed: None,
         arm=types.SimpleNamespace(MoveL=lambda *_args, **_kwargs: 14),
@@ -304,7 +318,7 @@ def test_move_arm_skips_stability_wait_when_not_requested(monkeypatch):
     log_calls = []
     module.rospy.loginfo = lambda *args: log_calls.append(args)
     node = object.__new__(module.ControlNode)
-    node.minimum_z = 165.0
+    node.minimum_tcp_z_mm = 163.0
     node.move_arm_timing_debug = True
     node.arm = types.SimpleNamespace(
         set_speed=lambda _speed: calls.append("set_speed"),
@@ -326,7 +340,7 @@ def test_move_arm_passes_blocking_radius_for_normal_motion(monkeypatch):
     module = _load_controller(monkeypatch)
     move_kwargs = []
     node = object.__new__(module.ControlNode)
-    node.minimum_z = 165.0
+    node.minimum_tcp_z_mm = 163.0
     node.arm = types.SimpleNamespace(
         set_speed=lambda _speed: None,
         arm=types.SimpleNamespace(
@@ -352,7 +366,7 @@ def test_move_arm_submits_nonblocking_blended_motion(monkeypatch):
     module = _load_controller(monkeypatch)
     move_kwargs = []
     node = object.__new__(module.ControlNode)
-    node.minimum_z = 165.0
+    node.minimum_tcp_z_mm = 163.0
     node.arm = types.SimpleNamespace(
         set_speed=lambda _speed: None,
         arm=types.SimpleNamespace(
@@ -382,7 +396,7 @@ def test_move_arm_rejects_invalid_enabled_blend_radius(monkeypatch, invalid_radi
     module = _load_controller(monkeypatch)
     calls = []
     node = object.__new__(module.ControlNode)
-    node.minimum_z = 165.0
+    node.minimum_tcp_z_mm = 163.0
     node.arm = types.SimpleNamespace(
         set_speed=lambda _speed: calls.append("set_speed"),
         arm=types.SimpleNamespace(MoveL=lambda *_args, **_kwargs: calls.append("MoveL")),
@@ -406,7 +420,7 @@ def test_move_arm_rejects_waiting_at_blended_waypoint(monkeypatch):
     module = _load_controller(monkeypatch)
     calls = []
     node = object.__new__(module.ControlNode)
-    node.minimum_z = 165.0
+    node.minimum_tcp_z_mm = 163.0
     node.arm = types.SimpleNamespace(
         set_speed=lambda _speed: calls.append("set_speed"),
         arm=types.SimpleNamespace(MoveL=lambda *_args, **_kwargs: calls.append("MoveL")),
@@ -544,7 +558,7 @@ def test_move_that_overlaps_stop_returns_failure_before_next_action(monkeypatch)
     module = _load_controller(monkeypatch)
     node = object.__new__(module.ControlNode)
     node.stop_latched = False
-    node.minimum_z = 165.0
+    node.minimum_tcp_z_mm = 163.0
     node.arm = types.SimpleNamespace()
     node.arm.set_speed = lambda _speed: None
 
@@ -567,7 +581,7 @@ def test_stop_latch_rejects_arm_and_servo_but_allows_suction(monkeypatch):
     hardware_calls = []
     node = object.__new__(module.ControlNode)
     node.stop_latched = True
-    node.minimum_z = 165.0
+    node.minimum_tcp_z_mm = 163.0
     node.arm = types.SimpleNamespace(
         set_speed=lambda _speed: hardware_calls.append("set_speed"),
         arm=types.SimpleNamespace(MoveL=lambda *_args, **_kwargs: hardware_calls.append("MoveL")),

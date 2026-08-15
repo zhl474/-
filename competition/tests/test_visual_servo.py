@@ -34,7 +34,7 @@ def test_current_execution_and_servo_configs_are_valid():
     assert execution.place_descent_offset_mm >= 0
     assert execution.place_descent_blend_radius_mm >= 0
     assert execution.place_lift_blend_radius_mm >= 0
-    assert execution.minimum_tcp_z_mm == 165.0
+    assert execution.minimum_tcp_z_mm == 163.0
     assert isinstance(execution.calibration_mode, bool)
     assert isinstance(execution.visual_servo_enabled, bool)
     assert execution.block_error_threshold_px == 1.0
@@ -213,12 +213,12 @@ def test_执行配置拒绝非布尔视觉伺服开关(
         load_execution_config(config_path)
 
 
-@pytest.mark.parametrize("invalid_minimum_z", [0.0, -1.0])
-def test_execution_config_rejects_non_positive_minimum_tcp_z(tmp_path, invalid_minimum_z):
+@pytest.mark.parametrize("invalid_minimum_tcp_z_mm", [0.0, -1.0])
+def test_execution_config_rejects_non_positive_minimum_tcp_z(tmp_path, invalid_minimum_tcp_z_mm):
     config_data = yaml.safe_load(
         Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
     )
-    config_data["motion"]["minimum_tcp_z_mm"] = invalid_minimum_z
+    config_data["motion"]["minimum_tcp_z_mm"] = invalid_minimum_tcp_z_mm
     config_path = tmp_path / "无效最低高度.yaml"
     config_path.write_text(
         yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),

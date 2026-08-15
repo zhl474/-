@@ -18,7 +18,6 @@ PANEL_CONFIG = {
         "arm_port": 20003,
         "servo_port": "/dev/servo_motor",
         "servo_baudrate": 115200,
-        "minimum_z_mm": 165.0,
     }
 }
 
@@ -186,6 +185,21 @@ def test复位MoveL失败时翻译错误码(hardware):
 
     with pytest.raises(DirectHardwareError, match="关节命令点错误"):
         direct.move_arm(RESET_POSE, 50, wait_until_stable=False)
+
+
+def test低于统一安全高度时抬高但操作失败(hardware):
+    direct = hardware
+
+    with pytest.raises(DirectHardwareError, match="本次运动判定失败"):
+        direct.move_arm(
+            [-250.415, 22.148, 162.0, -180.0, 0.0, 90.0],
+            50,
+            wait_until_stable=False,
+        )
+
+    arm = FakeAkaiFr.instances[0]
+    move = [call for call in arm.arm.calls if call[0] == "MoveL"][0]
+    assert move[1][2] == pytest.approx(163.0)
 
 
 def test复位前运动未停稳时拒绝(hardware):

@@ -19,6 +19,7 @@ from .constants import (
     BLOCK_CATEGORY_NAMES,
     WRITABLE_CONFIG_FILES,
 )
+from .usb_occupancy import probe_usb_occupancy
 
 
 class OperationBusy(RuntimeError):
@@ -47,6 +48,7 @@ class OperationCoordinator:
         panel_config,
         exit_callback=None,
         direct_hardware=None,
+        usb_probe=None,
     ):
         self.event_bus = event_bus
         self.supervisor = supervisor
@@ -56,6 +58,7 @@ class OperationCoordinator:
         self.panel_config = panel_config
         self.exit_callback = exit_callback
         self.direct = direct_hardware
+        self.usb_probe = usb_probe or probe_usb_occupancy
         self._lock = threading.RLock()
         self._stop_channel_lock = threading.Lock()
         self._active_operation = None
@@ -397,6 +400,80 @@ class OperationCoordinator:
             self._invalidate_recognition_locked(reason)
         self._publish_state()
 
+    def usb_occupancy(self):
+        """返回相机与舵机 USB 占用探测结果，并标注占用者归属。"""
+        occupancy = deepcopy(self.usb_probe())
+        try:
+            hardware_owned = bool(
+                self.supervisor.snapshot().get("hardware", {}).get("owned")
+            )
+        except Exception:
+            hardware_owned = False
+        for device in occupancy.values():
+            if not isinstance(device, dict):
+                continue
+            for occupant in device.get("occupants", []):
+                if not isinstance(occupant, dict):
+                    continue
+                command = str(occupant.get("cmdline", ""))
+                if occupant.get("is_self"):
+                    owner = "self"
+                elif hardware_owned and (
+                    (
+                        device.get("key") == "camera"
+                        and "camera_node.py" in command
+                    )
+                    or (
+                        device.get("key") == "servo"
+                        and "controller.py" in command
+                    )
+                ):
+                    owner = "panel"
+                else:
+                    owner = "external"
+                occupant["owner"] = owner
+        return occupancy
+
+    @staticmethod
+    def _format_usb_occupants(occupants):
+        parts = []
+        for occupant in occupants:
+            command = str(occupant.get("cmdline") or "")
+            if not command:
+                command = f"PID {occupant.get('pid')}"
+            elif len(command) > 160:
+                command = command[:159] + "…"
+            parts.append(f"PID {occupant.get('pid')}（{command}）")
+        return "；".join(parts)
+
+    def _preflight_usb_devices(self, occupancy):
+        """启动硬件前快速拒绝明确的 USB 设备缺失或外部占用。"""
+        blockers = []
+        for key in ("camera", "servo"):
+            device = occupancy.get(key) or {}
+            label = str(device.get("label") or key)
+            status = str(device.get("status") or "unknown")
+            if status in {"missing", "unknown"}:
+                blockers.append(
+                    f"{label}：{device.get('message') or '状态未知'}"
+                )
+                continue
+            if status != "occupied":
+                continue
+            external = [
+                occupant
+                for occupant in device.get("occupants", [])
+                if occupant.get("owner") == "external"
+            ]
+            if external:
+                blockers.append(
+                    f"{label}被 {self._format_usb_occupants(external)} 占用"
+                )
+        if blockers:
+            raise OperationRejected(
+                "硬件 USB 设备检查未通过：" + "；".join(blockers)
+            )
+
     def start_hardware(self):
         def action():
             with self._lock:
@@ -413,6 +490,8 @@ class OperationCoordinator:
             # 启动 hardware.launch 前先释放直连层长驻的舵机串口，否则 control_node 打不开串口。
             if self.direct is not None:
                 self.direct.release_servo()
+            # 相机/舵机被外部占用时快速失败，避免等待 hardware_start_seconds 超时。
+            self._preflight_usb_devices(self.usb_occupancy())
             self.supervisor.start_hardware()
             try:
                 timeout = self.panel_config["timeouts"]["hardware_start_seconds"]
@@ -1362,10 +1441,10 @@ class OperationCoordinator:
             raise OperationRejected("低位 TCP Z 必须是有限数值")
 
         execution = self.config_manager.get_config("execution")["data"]
-        minimum_z = float(execution["motion"]["minimum_tcp_z_mm"])
-        if low_z < minimum_z:
+        minimum_tcp_z_mm = float(execution["motion"]["minimum_tcp_z_mm"])
+        if low_z < minimum_tcp_z_mm:
             raise OperationRejected(
-                f"低位 TCP Z={low_z:g}mm 低于安全下限 {minimum_z:g}mm"
+                f"低位 TCP Z={low_z:g}mm 低于安全下限 {minimum_tcp_z_mm:g}mm"
             )
 
         def action():

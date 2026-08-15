@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 import numpy as np
+import yaml
 
 from image_process_lib.pixel_to_tcp_calibration import (
     PixelToTcpCalibration,
@@ -14,10 +15,38 @@ from image_process_lib.pixel_to_tcp_calibration import (
 )
 
 
-DEFAULT_TCP_MIN_XYZ = (-444.224, -263.279, 165.0)
+PACKAGE_DIR = Path(__file__).resolve().parents[1]
+EXECUTION_CONFIG_PATH = PACKAGE_DIR.parent / "competition" / "config" / "execution.yaml"
+DEFAULT_TCP_MIN_XY = (-444.224, -263.279)
 DEFAULT_TCP_MAX_XYZ = (-148.17, 315.925, None)
 _SUBJECT_LABELS = {"block": "方块", "tray": "托盘"}
 _AXIS_NAMES = ("X", "Y", "Z")
+
+
+def _load_default_tcp_min_xyz() -> tuple[float, float, float]:
+    """读取默认 TCP 安全边界的 Z，避免独立定位器保留另一份最低高度。"""
+    try:
+        with EXECUTION_CONFIG_PATH.open("r", encoding="utf-8") as config_file:
+            execution_config = yaml.safe_load(config_file) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise ValueError(
+            f"无法读取唯一 TCP 高度配置 {EXECUTION_CONFIG_PATH}: {exc}"
+        ) from exc
+    motion_config = execution_config.get("motion")
+    if not isinstance(motion_config, dict) or "minimum_tcp_z_mm" not in motion_config:
+        raise ValueError(
+            "execution.yaml 缺少唯一安全高度字段 motion.minimum_tcp_z_mm"
+        )
+    raw_minimum_tcp_z_mm = motion_config["minimum_tcp_z_mm"]
+    if isinstance(raw_minimum_tcp_z_mm, bool):
+        raise ValueError("motion.minimum_tcp_z_mm 必须是大于 0 的有限数值")
+    try:
+        minimum_tcp_z_mm = float(raw_minimum_tcp_z_mm)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("motion.minimum_tcp_z_mm 必须是大于 0 的有限数值") from exc
+    if not np.isfinite(minimum_tcp_z_mm) or minimum_tcp_z_mm <= 0.0:
+        raise ValueError("motion.minimum_tcp_z_mm 必须是大于 0 的有限数值")
+    return (*DEFAULT_TCP_MIN_XY, minimum_tcp_z_mm)
 
 
 @dataclass(frozen=True)
@@ -85,12 +114,14 @@ class HighPixelToTcpLocalizer:
         block_calibration_path: str | Path,
         tray_calibration_path: str | Path,
         shooting_pose: Sequence[float],
-        tcp_min_xyz: Sequence[float] = DEFAULT_TCP_MIN_XYZ,
+        tcp_min_xyz: Optional[Sequence[float]] = None,
         tcp_max_xyz: Sequence[Optional[float]] = DEFAULT_TCP_MAX_XYZ,
         safety_xy_offset: Sequence[float] = (0.0, 0.0),
     ) -> None:
         shooting = _finite_vector(shooting_pose, 6, "高位拍摄位姿")
         self._shooting_rpy = shooting[3:6].copy()
+        if tcp_min_xyz is None:
+            tcp_min_xyz = _load_default_tcp_min_xyz()
         self._tcp_min_xyz, self._tcp_max_xyz = _validate_safety_bounds(
             tcp_min_xyz,
             tcp_max_xyz,

@@ -597,7 +597,7 @@ def zero_error_tcp_xy(
 
 def validate_motion_pose(
     pose: Sequence[float],
-    minimum_z_mm: float,
+    minimum_tcp_z_mm: float,
     safe_x_range_mm: Sequence[float],
     safe_y_range_mm: Sequence[float],
 ) -> Tuple[bool, str]:
@@ -606,8 +606,8 @@ def validate_motion_pose(
         return False, f"位姿必须包含 6 个数值，实际 {len(pose)}"
     if not all(np.isfinite(float(value)) for value in pose):
         return False, "位姿包含 NaN 或无穷值"
-    if pose[2] < float(minimum_z_mm):
-        return False, f"TCP Z={pose[2]:.3f}mm 低于安全下限 {minimum_z_mm}mm"
+    if pose[2] < float(minimum_tcp_z_mm):
+        return False, f"TCP Z={pose[2]:.3f}mm 低于安全下限 {minimum_tcp_z_mm}mm"
     x_min, x_max = sorted(float(value) for value in safe_x_range_mm)
     y_min, y_max = sorted(float(value) for value in safe_y_range_mm)
     if not (x_min <= pose[0] <= x_max):

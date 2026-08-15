@@ -75,6 +75,7 @@ class FakeCoordinator:
 
     def start_hardware(self): return self._accepted("start_hardware")
     def stop_hardware(self): return self._accepted("stop_hardware")
+    def usb_occupancy(self): return {"camera": {"status": "free"}, "servo": {"status": "free"}}
     def start_runtime(self, *args): return self._accepted("start_runtime", *args)
     def stop_runtime(self): return self._accepted("stop_runtime")
     def prepare_task(self, **kwargs): return self._accepted("prepare_task", **kwargs)
@@ -130,6 +131,16 @@ def test首页和状态接口只接受本机Host(web):
     assert client.get("/", **url("/")).status_code == 200
     assert client.get("/api/state", **url("/api/state")).get_json()["task"]["state"] == "空闲"
     assert client.get("/api/state", base_url="http://evil.example").status_code == 403
+
+
+def testUSB占用接口返回只读探测结果(web):
+    client, _coordinator, _bus, _tmp = web
+    response = client.get("/api/hardware/usb-occupancy", **url("x"))
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["camera"]["status"] == "free"
+    assert payload["servo"]["status"] == "free"
 
 
 def testROS系统接口返回Master实时图(web):

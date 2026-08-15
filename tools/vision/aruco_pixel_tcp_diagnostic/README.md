@@ -38,7 +38,8 @@ tools/vision/aruco_pixel_tcp_diagnostic/
 3. 高位连续采集 7 帧 ID=0 中央棋盘角点，逐轴取中位数；保存最接近中位数的一帧原图与调试图。
 4. 对高位中心调用 `/camera/stable_world_points`（15 帧、至少 10 帧有效、2 秒超时），记录世界 XYZ、有效帧数、深度中位数与 MAD；MAD > 1.0 mm 判为深度失败。
 5. 复用 `DepthRoughLocalizer.tcp_xy_from_world()` 得到粗 XY，组合固定 Z=220 mm 与固定 RPY（高位姿态的 RPY）。
-6. 安全检查（6 维有限、Z≥165、XY 在 `perception.yaml` 安全范围内）通过后运动到低位。
+6. 安全检查（6 维有限、Z 不低于 `competition/config/execution.yaml` 的
+   `motion.minimum_tcp_z_mm`、XY 在 `perception.yaml` 安全范围内）通过后运动到低位。
 7. 低位闭环：误差 = `中央精中心 - 图像中心`，复用正式 `run_offset_visual_servo_alignment()` 与 `pixel_to_robot_matrix`（阈值/步长/轮数/稳定帧/丢失帧全部对齐 `execution.yaml`）。每次修正位姿再次执行安全检查。
 8. 对准成功后不再移动，额外采集 20 帧静止样本；有效比例 ≥80% 时生成零误差等效 TCP：
    `实测TCP_XY + pixel_to_robot_matrix @ 静止均值误差`（不应用限幅）。

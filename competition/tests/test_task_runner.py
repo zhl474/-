@@ -568,7 +568,7 @@ def test_place_rejects_low_descent_height_before_final_move(monkeypatch):
         execution_config=_execution_config(),
         visual_config=load_visual_servo_config(),
     )
-    # 摆放位 Z=167 本身合法，但下探 5mm 后 162 < minimum_tcp_z_mm(165)。
+    # 摆放位 Z=167 本身合法，但下探 5mm 后 162 < minimum_tcp_z_mm(163)。
     runner._align = lambda *_args, **_kwargs: (
         True,
         [11, 12, 167, -180, 0, 90],

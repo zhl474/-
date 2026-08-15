@@ -15,7 +15,6 @@ manual_control:
   arm_port: 20003
   servo_port: /dev/servo_motor
   servo_baudrate: 115200
-  minimum_z_mm: 165.0
 
 timeouts:
   ros_master_seconds: 10.0

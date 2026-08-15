@@ -12,7 +12,8 @@ WRITABLE_CONFIG_FILES = {
     "execution": {
         "label": "比赛执行参数",
         "path": SRC_DIR / "competition" / "config" / "execution.yaml",
-        "restart_scope": "perception",
+        # execution.yaml 同时由感知节点、任务执行器和 controller 使用，修改后重启整套硬件/感知链路。
+        "restart_scope": "hardware",
         "description": "拍摄位姿、运动速度、抓放高度、视觉伺服和舵机边界",
     },
     "visual_servo": {

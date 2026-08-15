@@ -100,7 +100,7 @@ high_tcp_localization:
 
 pick_height:
   # 正式模式由观察 TCP Z 减该值得到表面 Z；标定模式由表面深度加该值得到观察 TCP Z。
-  block_observation_height_mm: 192.0
+  block_observation_height_mm: 167.0
 
 fallback:
   # 该回退仅属于方块上表面分割，不参与高位 TCP 粗定位。

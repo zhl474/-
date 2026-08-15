@@ -155,12 +155,36 @@ class FakeStore:
         pass
 
 
-def make_coordinator(stop_success=True):
+def _free_usb_occupancy():
+    return {
+        "camera": {
+            "key": "camera",
+            "label": "Orbbec Gemini 335 相机",
+            "status": "free",
+            "present": True,
+            "nodes": ["/dev/bus/usb/002/006"],
+            "occupants": [],
+            "message": "设备在线，当前未发现占用进程",
+        },
+        "servo": {
+            "key": "servo",
+            "label": "HL-340 USB 转串口（舵机）",
+            "status": "free",
+            "present": True,
+            "nodes": ["/dev/servo_motor"],
+            "occupants": [],
+            "message": "设备在线，当前未发现占用进程",
+        },
+    }
+
+
+def make_coordinator(stop_success=True, usb_probe=None):
     bus = EventBus()
     supervisor = FakeSupervisor()
     ros = FakeRos(stop_success=stop_success)
     coordinator = OperationCoordinator(
-        bus, supervisor, ros, FakeConfigManager(), FakeStore(), PANEL_CONFIG
+        bus, supervisor, ros, FakeConfigManager(), FakeStore(), PANEL_CONFIG,
+        usb_probe=usb_probe or _free_usb_occupancy,
     )
     return coordinator, supervisor, ros
 
@@ -460,7 +484,7 @@ class FakeDirect:
         return True
 
 
-def make_coordinator_with_direct():
+def make_coordinator_with_direct(usb_probe=None):
     bus = EventBus()
     supervisor = FakeSupervisor()
     ros = FakeRos()
@@ -468,6 +492,7 @@ def make_coordinator_with_direct():
     coordinator = OperationCoordinator(
         bus, supervisor, ros, FakeConfigManager(), FakeStore(), PANEL_CONFIG,
         direct_hardware=direct,
+        usb_probe=usb_probe or _free_usb_occupancy,
     )
     return coordinator, supervisor, ros, direct
 
@@ -688,13 +713,13 @@ def test继续在手動操作进行中时拒绝():
         coordinator.resume_task()
 
 
-def _with_execution_motion_config(coordinator, minimum_z_mm=165.0):
+def _with_execution_motion_config(coordinator, minimum_tcp_z_mm=163.0):
     """给 FakeConfigManager 的 execution 数据补齐 motion 段。"""
     base_get_config = coordinator.config_manager.get_config
 
     def get_config(file_id):
         result = base_get_config(file_id)
-        result["data"]["motion"] = {"minimum_tcp_z_mm": minimum_z_mm}
+        result["data"]["motion"] = {"minimum_tcp_z_mm": minimum_tcp_z_mm}
         return result
 
     coordinator.config_manager.get_config = get_config
@@ -708,7 +733,7 @@ def testArUco对准未确认时拒绝():
 
 def testArUco对准拒绝低于安全下限的Z():
     coordinator, _supervisor, _ros = make_coordinator()
-    _with_execution_motion_config(coordinator, minimum_z_mm=165.0)
+    _with_execution_motion_config(coordinator, minimum_tcp_z_mm=163.0)
 
     with pytest.raises(OperationRejected, match="安全下限"):
         coordinator.aruco_align(100.0, confirmed=True)
@@ -716,7 +741,7 @@ def testArUco对准拒绝低于安全下限的Z():
 
 def testArUco对准作为串行操作执行并使识别失效(monkeypatch):
     coordinator, _supervisor, _ros = make_coordinator()
-    _with_execution_motion_config(coordinator, minimum_z_mm=165.0)
+    _with_execution_motion_config(coordinator, minimum_tcp_z_mm=163.0)
     with coordinator._lock:
         coordinator._state["task"].update({
             "state": "等待确认",
@@ -799,3 +824,107 @@ def testArUco对准子进程输出被解析并转发日志(tmp_path, monkeypatch
     ]
     assert "已到达高位拍摄位姿" in log_messages
     assert "ArUco 对准成功。" in log_messages
+
+
+def test启动硬件前相机被外部进程占用时快速拒绝(monkeypatch):
+    occupancy = _free_usb_occupancy()
+    occupancy["camera"].update({
+        "status": "occupied",
+        "message": "被占用",
+        "occupants": [{
+            "pid": 12345,
+            "cmdline": "python camera_profile_probe.py",
+            "is_self": False,
+        }],
+    })
+    coordinator, supervisor, _ros = make_coordinator(usb_probe=lambda: occupancy)
+    started = threading.Event()
+    monkeypatch.setattr(supervisor, "start_hardware", lambda: started.set())
+
+    operation = coordinator.start_hardware()
+    completed = wait_operation(coordinator, operation["operation_id"])
+
+    assert completed["status"] == "error"
+    assert "相机" in completed["error"]
+    assert "PID 12345" in completed["error"]
+    assert not started.is_set()
+
+
+def test启动硬件前设备缺失时快速拒绝():
+    occupancy = _free_usb_occupancy()
+    occupancy["camera"].update({
+        "status": "missing",
+        "present": False,
+        "message": "本机 USB 总线上未发现相机",
+    })
+    coordinator, _supervisor, _ros = make_coordinator(usb_probe=lambda: occupancy)
+
+    operation = coordinator.start_hardware()
+    completed = wait_operation(coordinator, operation["operation_id"])
+
+    assert completed["status"] == "error"
+    assert "本机 USB 总线上未发现相机" in completed["error"]
+
+
+def testUSB占用结果会标注自身与控制台硬件节点():
+    occupancy = _free_usb_occupancy()
+    occupancy["camera"].update({
+        "status": "occupied",
+        "occupants": [{
+            "pid": 200,
+            "cmdline": "python camera_node.py __name:=camera_node",
+            "is_self": False,
+        }],
+    })
+    occupancy["servo"].update({
+        "status": "occupied",
+        "occupants": [{
+            "pid": 300,
+            "cmdline": "python controller.py __name:=control_node",
+            "is_self": False,
+        }],
+    })
+    coordinator, _supervisor, _ros = make_coordinator(usb_probe=lambda: occupancy)
+
+    result = coordinator.usb_occupancy()
+
+    assert result["camera"]["occupants"][0]["owner"] == "panel"
+    assert result["servo"]["occupants"][0]["owner"] == "panel"
+
+
+def test执行配置应用硬件范围会重启硬件和感知(monkeypatch):
+    coordinator, supervisor, ros = make_coordinator()
+    events = []
+
+    # execution.yaml 由硬件 controller 和 perception 同时读取，验证两套节点都被重启。
+    for method_name in ("stop_runtime", "stop_hardware", "start_hardware"):
+        original = getattr(supervisor, method_name)
+
+        def wrapped(*args, _original=original, _name=method_name, **kwargs):
+            events.append(_name)
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(supervisor, method_name, wrapped)
+
+    def start_runtime(mode):
+        events.append(f"start_runtime:{mode}")
+        supervisor.state["runtime"]["running"] = True
+        supervisor.state["runtime"]["mode"] = mode
+
+    monkeypatch.setattr(supervisor, "start_runtime", start_runtime, raising=False)
+    monkeypatch.setattr(
+        ros,
+        "wait_perception_ready",
+        lambda _timeout: events.append("perception_ready"),
+        raising=False,
+    )
+
+    coordinator._apply_restart({"hardware"})
+
+    assert events == [
+        "stop_runtime",
+        "stop_hardware",
+        "start_hardware",
+        "start_runtime:formal",
+        "perception_ready",
+    ]

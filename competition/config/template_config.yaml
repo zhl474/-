@@ -2,11 +2,11 @@ template_sizes:
   active_profile: high
   profiles:
     high:
-      block_px: 36
+      block_px: 37
       connector_px: 5
     low:
-      block_px: 83
-      connector_px: 11
+      block_px: 90
+      connector_px: 12
 
 color_segmentation:
   seed_search_half_size: 40

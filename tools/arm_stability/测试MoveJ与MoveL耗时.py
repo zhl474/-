@@ -2,9 +2,18 @@
 """在相同 TCP 起终点和关节构型下，单次测试 MoveJ 或 MoveL 的耗时。"""
 
 import math
+import sys
 import time
+from pathlib import Path
+
+
+# 将项目 src 加入导入路径，使实机工具和正式节点使用同一份执行配置。
+SRC_DIR = Path(__file__).resolve().parents[2]
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 from akai_fr import AkaiFr
+from competition_lib.config import load_execution_config
 
 
 # ========================= 直接修改的实机参数 =========================
@@ -24,8 +33,8 @@ ACCELERATION_SCALE = 100
 
 TOOL_ID = 0
 USER_ID = 0
-# 项目正式运动允许的最低 TCP 绝对高度，单位 mm。
-MINIMUM_TCP_Z_MM = 165.0
+# 项目正式运动允许的最低 TCP 绝对高度，单位 mm；只从唯一执行配置读取。
+MINIMUM_TCP_Z_MM = load_execution_config().minimum_tcp_z_mm
 
 # MoveJ/MoveL 阻塞调用返回后，最多等待多少秒确认真正停稳。
 STABLE_TIMEOUT_SECONDS = 5.0

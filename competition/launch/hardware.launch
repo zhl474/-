@@ -5,6 +5,5 @@
     <rosparam command="load" file="$(find control)/config/controller.yaml"/>
     <param name="servo_port" value="/dev/servo_motor"/>
     <param name="servo_baudrate" value="115200"/>
-    <param name="minimum_z" value="165.0"/>
   </node>
 </launch>
