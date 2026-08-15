@@ -25,10 +25,11 @@ from .coordinator import OperationBusy, OperationRejected
 
 
 def create_app(coordinator, event_bus, config_manager, ros_gateway, panel_config, page_token=None):
-    """创建仅监听本机的 Web 应用；所有依赖均可在测试中替换。"""
+    """创建 Web 应用；默认仅信任本机，通配监听时信任任意带正确端口的访问来源。"""
     token = page_token or secrets.token_urlsafe(32)
     host = str(panel_config["server"]["host"])
     port = int(panel_config["server"]["port"])
+    listen_all = host == "0.0.0.0"
     allowed_origin = f"http://{host}:{port}"
     allowed_hosts = {f"{host}:{port}", host}
     app = Flask(
@@ -47,10 +48,14 @@ def create_app(coordinator, event_bus, config_manager, ros_gateway, panel_config
     @app.before_request
     def protect_local_writes():
         host_header = request.host.split("@")[-1]
-        if host_header not in allowed_hosts:
+        host_ok = host_header in allowed_hosts or (
+            listen_all and host_header.endswith(f":{port}")
+        )
+        if not host_ok:
             return jsonify({"error": "非法 Host，请通过本机控制台地址访问", "code": "invalid_host"}), 403
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-            if request.headers.get("Origin") != allowed_origin:
+            expected_origin = f"http://{host_header}" if listen_all else allowed_origin
+            if request.headers.get("Origin") != expected_origin:
                 return jsonify({"error": "写操作只接受本机页面 Origin", "code": "invalid_origin"}), 403
             supplied = request.headers.get("X-Operator-Token", "")
             if not supplied or not secrets.compare_digest(
@@ -252,6 +257,21 @@ def create_app(coordinator, event_bus, config_manager, ros_gateway, panel_config
             confirm_outside_safe=payload.get("confirm_outside_safe", False),
         )), 202
 
+    @app.post("/api/control/servo-sweep/start")
+    def start_servo_sweep():
+        payload = body()
+        return jsonify(coordinator.servo_sweep_start(
+            payload.get("min_deg"),
+            payload.get("max_deg"),
+            payload.get("wait_seconds"),
+            payload.get("repeat_count"),
+            confirm_outside_safe=payload.get("confirm_outside_safe", False),
+        )), 202
+
+    @app.post("/api/control/servo-sweep/stop")
+    def stop_servo_sweep():
+        return jsonify(coordinator.servo_sweep_stop()), 202
+
     @app.post("/api/control/reset")
     def reset_arm():
         return jsonify(coordinator.reset_arm(
@@ -266,6 +286,14 @@ def create_app(coordinator, event_bus, config_manager, ros_gateway, panel_config
             payload.get("dy"),
             payload.get("dz"),
             speed=payload.get("speed"),
+        )), 202
+
+    @app.post("/api/tools/aruco-align")
+    def start_aruco_align():
+        payload = body()
+        return jsonify(coordinator.aruco_align(
+            payload.get("low_tcp_z_mm"),
+            confirmed=payload.get("confirmed", False),
         )), 202
 
     @app.get("/api/control/pose")

@@ -135,6 +135,9 @@ FIELD_OVERRIDES = {
     "execution.motion.place_descent_blend_radius_mm": {
         "label": "摆放下探圆滑半径", "risk": "danger", "unit": "mm",
     },
+    "execution.motion.place_lift_blend_radius_mm": {
+        "label": "摆放后抬升圆滑半径", "risk": "danger", "unit": "mm",
+    },
     "execution.tool_motor.initial_angle_deg": {
         "label": "舵机初始角度", "unit": "°", "risk": "warning", "min": 0, "max": 360,
     },
@@ -698,6 +701,11 @@ class ConfigManager:
             raise ConfigError("motion.place_descent_blend_radius_mm 必须小于等于 1000")
         if descent_offset > 0 and descent_blend >= descent_offset:
             raise ConfigError("motion.place_descent_blend_radius_mm 必须小于 motion.place_descent_offset_mm")
+        lift_blend = _finite_number(motion["place_lift_blend_radius_mm"], "motion.place_lift_blend_radius_mm", nonnegative=True)
+        if lift_blend > 1000:
+            raise ConfigError("motion.place_lift_blend_radius_mm 必须小于等于 1000")
+        if descent_offset > 0 and lift_blend >= descent_offset:
+            raise ConfigError("motion.place_lift_blend_radius_mm 必须小于 motion.place_descent_offset_mm")
         minimum_z = _finite_number(motion["minimum_tcp_z_mm"], "motion.minimum_tcp_z_mm", positive=True)
         if float(pose[2]) < minimum_z:
             raise ConfigError("shooting_pose 的 Z 低于 minimum_tcp_z_mm")

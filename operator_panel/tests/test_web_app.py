@@ -86,8 +86,11 @@ class FakeCoordinator:
     def clear_stop(self): return self._accepted("clear_stop")
     def control_suction(self, *args, **kwargs): return self._accepted("suction", *args, **kwargs)
     def control_servo(self, *args, **kwargs): return self._accepted("servo", *args, **kwargs)
+    def servo_sweep_start(self, *args, **kwargs): return self._accepted("servo_sweep_start", *args, **kwargs)
+    def servo_sweep_stop(self): return self._accepted("servo_sweep_stop")
     def reset_arm(self, *args, **kwargs): return self._accepted("reset", *args, **kwargs)
     def move_arm_relative(self, *args, **kwargs): return self._accepted("move_relative", *args, **kwargs)
+    def aruco_align(self, *args, **kwargs): return self._accepted("aruco_align", *args, **kwargs)
     def get_pose(self): return {"tcp_pose": [0] * 6, "camera_pose": [0] * 6}
     def save_config(self, *args, **kwargs): return self._accepted("save_config", *args, **kwargs)
     def restore_history(self, *args): return self._accepted("restore_history", *args)
@@ -235,8 +238,11 @@ def test人工选择非法选项返回400且过期提示返回409(web):
         ("/api/control/clear-stop", {}),
         ("/api/control/suction", {"action": "off"}),
         ("/api/control/servo", {"angle_deg": 180}),
+        ("/api/control/servo-sweep/start", {"min_deg": 0, "max_deg": 360, "wait_seconds": 2, "repeat_count": 0}),
+        ("/api/control/servo-sweep/stop", {}),
         ("/api/control/reset", {"confirmed_pose": True}),
         ("/api/control/move-relative", {"dx": 1, "dy": 2, "dz": 3}),
+        ("/api/tools/aruco-align", {"low_tcp_z_mm": 220.0, "confirmed": True}),
         ("/api/system/exit", {}),
     ],
 )
@@ -244,6 +250,22 @@ def test主要写接口可由合法页面调用(web, path, payload):
     client, _coordinator, _bus, _tmp = web
     response = client.post(path, json=payload, headers=write_headers(), **url(path))
     assert response.status_code in (200, 202)
+
+
+def testArUco对准接口转发低位Z和确认标记(web):
+    client, coordinator, _bus, _tmp = web
+    response = client.post(
+        "/api/tools/aruco-align",
+        json={"low_tcp_z_mm": 220.0, "confirmed": True},
+        headers=write_headers(),
+        **url("/api/tools/aruco-align"),
+    )
+
+    assert response.status_code == 202
+    name, args, kwargs = coordinator.calls[-1]
+    assert name == "aruco_align"
+    assert args == (220.0,)
+    assert kwargs == {"confirmed": True}
 
 
 def test配置ID和图片ID均为固定白名单(web):
@@ -266,3 +288,43 @@ def testSSE发送重连间隔和状态事件(web):
     event_chunk = next(iterator)
     assert b"event: state" in event_chunk
     response.close()
+
+
+@pytest.fixture
+def wildcard_web(tmp_path):
+    config = {
+        "server": {"host": "0.0.0.0", "port": 8765},
+        "output": {"debug_output_dir": str(tmp_path)},
+    }
+    coordinator = FakeCoordinator()
+    bus = EventBus()
+    app = create_app(
+        coordinator, bus, FakeConfigManager(), FakeRos(), config, page_token="测试令牌"
+    )
+    app.config["TESTING"] = True
+    return app.test_client(), coordinator, bus
+
+
+def test通配监听接受任意主机名访问(wildcard_web):
+    client, _coordinator, _bus = wildcard_web
+    response = client.get("/api/state", base_url="http://10.42.0.1:8765")
+    assert response.status_code == 200
+    assert client.get("/", base_url="http://10.42.0.1:8765").status_code == 200
+
+
+def test通配监听写操作要求Origin与访问地址一致(wildcard_web):
+    client, coordinator, _bus = wildcard_web
+    remote = {"base_url": "http://10.42.0.1:8765"}
+    assert client.post(
+        "/api/process/hardware/start", json={}, headers={
+            "Origin": "http://10.42.0.1:8765", "X-Operator-Token": "测试令牌",
+        }, **remote,
+    ).status_code == 202
+    # 不同 Origin 仍被拒绝，避免被其他网页跨站借用
+    assert client.post(
+        "/api/process/hardware/start", json={}, headers={
+            "Origin": "http://evil.example:8765", "X-Operator-Token": "测试令牌",
+        }, **remote,
+    ).status_code == 403
+    # 错误端口的主机名仍被拒绝
+    assert client.get("/api/state", base_url="http://10.42.0.1:9999").status_code == 403

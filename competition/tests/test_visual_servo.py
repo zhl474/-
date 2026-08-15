@@ -30,8 +30,10 @@ def test_current_execution_and_servo_configs_are_valid():
     # 运行参数允许由控制台按现场需要调整，这里只验证加载和取值范围。
     assert execution.pick_approach_speed > 0
     assert execution.pick_retreat_blend_radius_mm == 5.0
-    assert execution.place_descent_offset_mm == 5.0
-    assert execution.place_descent_blend_radius_mm == 2.0
+    # 下探/抬升参数可由参数中心按现场调整，这里只验证非负取值范围。
+    assert execution.place_descent_offset_mm >= 0
+    assert execution.place_descent_blend_radius_mm >= 0
+    assert execution.place_lift_blend_radius_mm >= 0
     assert execution.minimum_tcp_z_mm == 165.0
     assert isinstance(execution.calibration_mode, bool)
     assert isinstance(execution.visual_servo_enabled, bool)
@@ -321,6 +323,7 @@ def test_执行配置拒绝圆滑半径不小于下探深度(tmp_path):
     config_data = yaml.safe_load(
         Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
     )
+    config_data["motion"]["place_descent_offset_mm"] = 5.0
     config_data["motion"]["place_descent_blend_radius_mm"] = 5.0
     config_path = tmp_path / "圆滑半径不小于下探深度.yaml"
     config_path.write_text(
@@ -332,12 +335,48 @@ def test_执行配置拒绝圆滑半径不小于下探深度(tmp_path):
         load_execution_config(config_path)
 
 
+def test_执行配置拒绝抬升圆滑半径不小于下探深度(tmp_path):
+    config_data = yaml.safe_load(
+        Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
+    )
+    config_data["motion"]["place_descent_offset_mm"] = 5.0
+    config_data["motion"]["place_lift_blend_radius_mm"] = 5.0
+    config_path = tmp_path / "抬升圆滑半径不小于下探深度.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="place_lift_blend_radius_mm"):
+        load_execution_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    [-1.0, 1000.1, float("inf"), float("nan"), True, "不是数值"],
+)
+def test_执行配置拒绝非法摆放后抬升圆滑半径(tmp_path, invalid_value):
+    config_data = yaml.safe_load(
+        Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
+    )
+    config_data["motion"]["place_lift_blend_radius_mm"] = invalid_value
+    config_path = tmp_path / "非法摆放后抬升圆滑半径.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="motion.place_lift_blend_radius_mm"):
+        load_execution_config(config_path)
+
+
 def test_执行配置允许用零关闭摆放下探和圆滑(tmp_path):
     config_data = yaml.safe_load(
         Path(DEFAULT_EXECUTION_CONFIG_PATH).read_text(encoding="utf-8")
     )
     config_data["motion"]["place_descent_offset_mm"] = 0
     config_data["motion"]["place_descent_blend_radius_mm"] = 0
+    config_data["motion"]["place_lift_blend_radius_mm"] = 0
     config_path = tmp_path / "关闭摆放下探和圆滑.yaml"
     config_path.write_text(
         yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False),
@@ -348,6 +387,7 @@ def test_执行配置允许用零关闭摆放下探和圆滑(tmp_path):
 
     assert config.place_descent_offset_mm == 0.0
     assert config.place_descent_blend_radius_mm == 0.0
+    assert config.place_lift_blend_radius_mm == 0.0
 
 
 @pytest.mark.parametrize("invalid_value", [0, -1, 1.5, True, "30"])

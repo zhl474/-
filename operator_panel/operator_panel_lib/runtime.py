@@ -36,6 +36,20 @@ def _state_dir():
     return Path.home() / ".local" / "state" / "single-arm-tetris"
 
 
+def _browse_host(host):
+    """浏览器打开用的地址；通配监听时本机浏览器仍走回环地址。"""
+    return "127.0.0.1" if host == "0.0.0.0" else host
+
+
+def _check_listen_host(host):
+    """只允许本机监听或通配监听；通配监听打印安全警告。"""
+    if host == "0.0.0.0":
+        print("警告：控制台将监听所有网卡，局域网/热点内的其他设备也能访问并操作机械臂。")
+        return
+    if host not in ("127.0.0.1", "localhost"):
+        raise RuntimeError("V1 只允许监听 127.0.0.1（本机）或 0.0.0.0（局域网共享）")
+
+
 def _load_panel_config():
     yaml = YAML(typ="safe")
     with PANEL_CONFIG_PATH.open("r", encoding="utf-8") as handle:
@@ -103,7 +117,7 @@ class PanelRuntime:
 
     @property
     def url(self):
-        return f"http://{self.config['server']['host']}:{int(self.config['server']['port'])}"
+        return f"http://{_browse_host(self.config['server']['host'])}:{int(self.config['server']['port'])}"
 
     def _start_ros_master_if_needed(self):
         import rosgraph
@@ -154,6 +168,7 @@ class PanelRuntime:
             self.server.shutdown()
 
     def cleanup(self):
+        self.coordinator.stop_tools()
         self.supervisor.stop_all_owned()
         self.direct.release()
         self.ros.shutdown()
@@ -189,10 +204,9 @@ class PanelRuntime:
 def run_panel():
     config = _load_panel_config()
     host = str(config["server"]["host"])
-    if host not in ("127.0.0.1", "localhost"):
-        raise RuntimeError("V1 只允许监听 127.0.0.1，禁止局域网远程访问")
+    _check_listen_host(host)
     state_dir = _state_dir()
-    url = f"http://{host}:{int(config['server']['port'])}"
+    url = f"http://{_browse_host(host)}:{int(config['server']['port'])}"
     try:
         with _single_instance(state_dir / "panel.lock"):
             runtime = PanelRuntime(config)

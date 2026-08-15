@@ -15,15 +15,16 @@ def test单实例锁阻止第二个后台并在释放后可再次获取(tmp_path
         assert lock_path.read_text(encoding="utf-8").strip()
 
 
-def test运行入口拒绝局域网监听地址(monkeypatch):
-    monkeypatch.setattr(
-        runtime,
-        "_load_panel_config",
-        lambda: {"server": {"host": "0.0.0.0", "port": 8765}},
-    )
+def test运行入口允许通配监听并给出安全警告(capsys):
+    runtime._check_listen_host("0.0.0.0")
+    assert "警告" in capsys.readouterr().out
+    runtime._check_listen_host("127.0.0.1")
+    runtime._check_listen_host("localhost")
 
-    with pytest.raises(RuntimeError, match="只允许监听 127.0.0.1"):
-        runtime.run_panel()
+
+def test运行入口拒绝局域网具体地址(monkeypatch):
+    with pytest.raises(RuntimeError, match="127.0.0.1"):
+        runtime._check_listen_host("192.168.58.11")
 
 
 def test第二次启动只重新打开已有页面(tmp_path, monkeypatch):

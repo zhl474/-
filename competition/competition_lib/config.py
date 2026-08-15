@@ -27,6 +27,7 @@ class ExecutionConfig:
     pick_retreat_blend_radius_mm: float
     place_descent_offset_mm: float
     place_descent_blend_radius_mm: float
+    place_lift_blend_radius_mm: float
     minimum_tcp_z_mm: float
     timing_debug: bool
     block_error_threshold_px: float
@@ -155,6 +156,10 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
             motion["place_descent_blend_radius_mm"],
             "motion.place_descent_blend_radius_mm",
         ),
+        place_lift_blend_radius_mm=_nonnegative_finite_float(
+            motion["place_lift_blend_radius_mm"],
+            "motion.place_lift_blend_radius_mm",
+        ),
         minimum_tcp_z_mm=float(motion["minimum_tcp_z_mm"]),
         timing_debug=bool(servo.get("timing_debug", False)),
         block_error_threshold_px=block_error_threshold_px,
@@ -179,6 +184,7 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         config.pick_surface_offset_mm, config.pick_approach_clearance_mm,
         config.pick_approach_speed, config.pick_retreat_blend_radius_mm,
         config.place_descent_offset_mm, config.place_descent_blend_radius_mm,
+        config.place_lift_blend_radius_mm,
         config.minimum_tcp_z_mm,
         config.block_error_threshold_px, config.tray_error_threshold_px,
         config.min_step_mm, config.max_step_mm, config.max_iter,
@@ -200,12 +206,22 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         raise ValueError("motion.pick_retreat_blend_radius_mm 必须小于等于 1000 mm")
     if config.place_descent_blend_radius_mm > 1000.0:
         raise ValueError("motion.place_descent_blend_radius_mm 必须小于等于 1000 mm")
+    if config.place_lift_blend_radius_mm > 1000.0:
+        raise ValueError("motion.place_lift_blend_radius_mm 必须小于等于 1000 mm")
     if (
         config.place_descent_offset_mm > 0.0
         and config.place_descent_blend_radius_mm >= config.place_descent_offset_mm
     ):
         raise ValueError(
             "motion.place_descent_blend_radius_mm 必须小于 "
+            "motion.place_descent_offset_mm"
+        )
+    if (
+        config.place_descent_offset_mm > 0.0
+        and config.place_lift_blend_radius_mm >= config.place_descent_offset_mm
+    ):
+        raise ValueError(
+            "motion.place_lift_blend_radius_mm 必须小于 "
             "motion.place_descent_offset_mm"
         )
     if min(config.max_iter, config.success_stable_frames, config.max_missed_frames) <= 0:

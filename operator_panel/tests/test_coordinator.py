@@ -115,6 +115,9 @@ class FakeRos:
     def wait_hardware_ready(self, _timeout, frame_after=0.0):
         return dict(self.status, frame_after=frame_after)
 
+    def service_names(self):
+        return {"/camera/stable_world_points", "/control/move_arm"}
+
     def get_control_status(self):
         return {
             "motion_state_known": self.status["control"]["motion_state_known"],
@@ -525,6 +528,69 @@ def test相对移动拒绝非法增量与速度():
         coordinator.move_arm_relative(1, 0, 0, speed=0)
 
 
+def wait_sweep_idle(coordinator, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while coordinator.snapshot()["hardware"]["servo_sweep_running"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert coordinator.snapshot()["hardware"]["servo_sweep_running"] is False
+
+
+def test舵机往复测试在control_node缺失时走直连并按序发送角度():
+    coordinator, _supervisor, ros, direct = make_coordinator_with_direct()
+    ros.status["control_node"] = False
+
+    response = coordinator.servo_sweep_start(10, 350, 0.05, 1)
+    assert response["started"] is True
+    wait_sweep_idle(coordinator)
+
+    assert coordinator.snapshot()["hardware"]["servo_sweep_cycle"] == 1
+    assert direct.calls == [
+        ("rotate_tool", 10.0),
+        ("rotate_tool", 350.0),
+        ("rotate_tool", 10.0),
+    ]
+
+
+def test舵机往复测试超出安全边界需要二次确认():
+    coordinator, _supervisor, _ros, _direct = make_coordinator_with_direct()
+    with pytest.raises(OperationRejected, match="安全边界"):
+        coordinator.servo_sweep_start(0, 360, 1.0, 0)
+    assert coordinator.servo_sweep_start(0, 360, 0.05, 1, confirm_outside_safe=True)["started"] is True
+    wait_sweep_idle(coordinator)
+
+
+def test舵机往复测试拒绝非法参数():
+    coordinator, _supervisor, _ros, _direct = make_coordinator_with_direct()
+    with pytest.raises(OperationRejected, match="起始角必须小于终止角"):
+        coordinator.servo_sweep_start(350, 10, 1.0, 0)
+    with pytest.raises(OperationRejected, match="等待时间"):
+        coordinator.servo_sweep_start(10, 350, 0, 0)
+    with pytest.raises(OperationRejected, match="次数"):
+        coordinator.servo_sweep_start(10, 350, 1.0, -1)
+
+
+def test停止往复会停止无限循环():
+    coordinator, _supervisor, ros, _direct = make_coordinator_with_direct()
+    ros.status["control_node"] = False
+
+    coordinator.servo_sweep_start(10, 350, 0.05, 0)
+    assert coordinator.snapshot()["hardware"]["servo_sweep_running"] is True
+    assert coordinator.servo_sweep_stop()["stopping"] is True
+    wait_sweep_idle(coordinator)
+
+
+def test往复测试进行中拒绝其它手动控制():
+    coordinator, _supervisor, ros, _direct = make_coordinator_with_direct()
+    ros.status["control_node"] = False
+    coordinator.servo_sweep_start(10, 350, 0.05, 0)
+
+    with pytest.raises(OperationRejected, match="往复"):
+        coordinator._assert_manual_allowed()
+
+    coordinator.servo_sweep_stop()
+    wait_sweep_idle(coordinator)
+
+
 class FakePauseToken:
     def __init__(self):
         self._paused = False
@@ -620,3 +686,116 @@ def test继续在手動操作进行中时拒绝():
 
     with pytest.raises(OperationRejected, match="手动操作进行中"):
         coordinator.resume_task()
+
+
+def _with_execution_motion_config(coordinator, minimum_z_mm=165.0):
+    """给 FakeConfigManager 的 execution 数据补齐 motion 段。"""
+    base_get_config = coordinator.config_manager.get_config
+
+    def get_config(file_id):
+        result = base_get_config(file_id)
+        result["data"]["motion"] = {"minimum_tcp_z_mm": minimum_z_mm}
+        return result
+
+    coordinator.config_manager.get_config = get_config
+
+
+def testArUco对准未确认时拒绝():
+    coordinator, _supervisor, _ros = make_coordinator()
+    with pytest.raises(OperationRejected, match="确认"):
+        coordinator.aruco_align(220.0)
+
+
+def testArUco对准拒绝低于安全下限的Z():
+    coordinator, _supervisor, _ros = make_coordinator()
+    _with_execution_motion_config(coordinator, minimum_z_mm=165.0)
+
+    with pytest.raises(OperationRejected, match="安全下限"):
+        coordinator.aruco_align(100.0, confirmed=True)
+
+
+def testArUco对准作为串行操作执行并使识别失效(monkeypatch):
+    coordinator, _supervisor, _ros = make_coordinator()
+    _with_execution_motion_config(coordinator, minimum_z_mm=165.0)
+    with coordinator._lock:
+        coordinator._state["task"].update({
+            "state": "等待确认",
+            "recognition_valid": True,
+            "confirmed": True,
+        })
+
+    captured = {}
+
+    def fake_execute(low_z):
+        captured["low_z"] = low_z
+        return {"success": True, "message": "完成"}
+
+    monkeypatch.setattr(coordinator, "_execute_aruco_align", fake_execute)
+    operation = coordinator.aruco_align(220.0, confirmed=True)
+
+    assert operation["low_tcp_z_mm"] == 220.0
+    completed = wait_operation(coordinator, operation["operation_id"])
+    assert completed["status"] == "success"
+    assert captured == {"low_z": 220.0}
+    assert coordinator.snapshot()["task"]["state"] == "空闲"
+    assert coordinator.snapshot()["task"]["recognition_valid"] is False
+
+
+def testArUco对准子进程可被终止():
+    import subprocess
+
+    coordinator, _supervisor, _ros = make_coordinator()
+    process = subprocess.Popen(
+        ["sleep", "30"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    with coordinator._lock:
+        coordinator._aruco_align_process = process
+
+    coordinator._terminate_aruco_align_process()
+
+    assert process.poll() is not None
+    assert coordinator._aruco_align_abort.is_set()
+
+
+def test停止通道立即请求终止ArUco对准():
+    coordinator, _supervisor, _ros = make_coordinator()
+    coordinator._aruco_align_abort.clear()
+
+    operation = coordinator.emergency_stop()
+
+    assert coordinator._aruco_align_abort.is_set()
+    wait_operation(coordinator, operation["operation_id"])
+
+
+def testArUco对准子进程输出被解析并转发日志(tmp_path, monkeypatch):
+    import operator_panel_lib.coordinator as coordinator_module
+
+    fake_script = tmp_path / "fake_align.py"
+    fake_script.write_text(
+        "import sys\n"
+        "print('已到达高位拍摄位姿')\n"
+        "print('ArUco 对准成功。')\n"
+        "print('最终命令 TCP：X=1.000, Y=2.000, Z=220.000, "
+        "R=-180.000, P=0.000, YAW=90.000')\n"
+        "print('最终实测 TCP：X=1.100, Y=2.200, Z=220.000, "
+        "R=-180.000, P=0.000, YAW=90.000')\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(coordinator_module, "ARUCO_ALIGN_SCRIPT_PATH", fake_script)
+    coordinator, _supervisor, _ros = make_coordinator()
+
+    result = coordinator._execute_aruco_align(220.0)
+
+    assert result["actual_tcp_pose"] == [1.1, 2.2, 220.0, -180.0, 0.0, 90.0]
+    assert result["final_command_pose"] == [1.0, 2.0, 220.0, -180.0, 0.0, 90.0]
+    log_messages = [
+        item["data"]["message"]
+        for item in coordinator.event_bus.snapshot("log")
+    ]
+    assert "已到达高位拍摄位姿" in log_messages
+    assert "ArUco 对准成功。" in log_messages

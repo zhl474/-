@@ -228,6 +228,7 @@ code, .mono { font-family: var(--mono); }
 .stop-card p, .stop-card > small { color: var(--muted); font-size: 11px; }
 .stop-card > small { grid-column: 2; text-align: right; }
 .stop-icon { color: var(--red-dark); background: var(--red-soft); }
+.sweep-card .button.full { margin-top: 10px; }
 
 .config-heading { align-items: flex-end; }
 .search-box { width: min(440px, 42vw); }

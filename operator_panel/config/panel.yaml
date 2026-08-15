@@ -1,6 +1,6 @@
 # 本地控制台自身配置。硬件和识别参数仍分别保存在原项目 YAML 中。
 server:
-  host: 127.0.0.1
+  host: 0.0.0.0 # 改回 127.0.0.1 则只允许本机访问；0.0.0.0 允许局域网/热点设备访问
   port: 8765
 
 preview:
@@ -22,6 +22,7 @@ timeouts:
   hardware_start_seconds: 30.0
   perception_start_seconds: 120.0
   process_stop_seconds: 8.0
+  aruco_align_seconds: 300.0
 
 output:
   debug_output_dir: /home/zhl/桌面

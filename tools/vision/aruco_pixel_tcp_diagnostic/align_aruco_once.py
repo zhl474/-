@@ -10,6 +10,7 @@
 - 字典为 DICT_6X6_50，标记 ID=0（可在下方参数区修改）。
 """
 
+import argparse
 import sys
 import threading
 import time
@@ -224,8 +225,12 @@ def format_pose(pose):
     )
 
 
-def run_alignment():
-    """执行一次完整对准，成功后保持最终位置。"""
+def run_alignment(low_tcp_z_mm=None, assume_yes=False):
+    """执行一次完整对准，成功后保持最终位置。
+
+    ``low_tcp_z_mm`` 覆盖低位固定高度；``assume_yes=True`` 跳过控制台
+    交互确认，供网页控制台等自动化调用方使用。
+    """
     execution_config = load_execution_config(str(EXECUTION_CONFIG_PATH))
     visual_config = load_visual_servo_config(str(VISUAL_SERVO_CONFIG_PATH))
     with PERCEPTION_CONFIG_PATH.open("r", encoding="utf-8") as config_file:
@@ -242,12 +247,15 @@ def run_alignment():
     )
     if not ok:
         raise RuntimeError(f"高位拍摄位姿安全检查未通过：{reason}")
-    if not np.isfinite(LOW_TCP_Z_MM) or LOW_TCP_Z_MM < minimum_z_mm:
+    low_tcp_z_mm = float(
+        LOW_TCP_Z_MM if low_tcp_z_mm is None else low_tcp_z_mm
+    )
+    if not np.isfinite(low_tcp_z_mm) or low_tcp_z_mm < minimum_z_mm:
         raise RuntimeError(
-            f"低位 TCP Z={LOW_TCP_Z_MM}mm 低于安全下限 {minimum_z_mm}mm"
+            f"低位 TCP Z={low_tcp_z_mm}mm 低于安全下限 {minimum_z_mm}mm"
         )
 
-    if REQUIRE_START_CONFIRMATION:
+    if REQUIRE_START_CONFIRMATION and not assume_yes:
         print("程序将运动机械臂到高位并执行一次 ArUco 对准。")
         answer = input("确认工作空间安全后按回车继续；输入 q 取消：").strip().lower()
         if answer == "q":
@@ -255,6 +263,8 @@ def run_alignment():
             return
         if answer:
             raise RuntimeError("输入无效：仅接受空回车或 q")
+    elif REQUIRE_START_CONFIRMATION:
+        print("调用方已确认工作空间安全，跳过交互确认。")
 
     services = RosServices()
     reader = FreshImageReader()
@@ -310,7 +320,7 @@ def run_alignment():
     low_pose = [
         float(tcp_xy[0]),
         float(tcp_xy[1]),
-        float(LOW_TCP_Z_MM),
+        low_tcp_z_mm,
         *[float(value) for value in shooting_pose[3:6]],
     ]
     move_checked(
@@ -378,10 +388,33 @@ def run_alignment():
     print("脚本即将退出；不会返回高位，机械臂保持当前对准位置。")
 
 
-def main():
+def parse_args(argv=None):
+    """解析命令行参数，保持交互式终端用法与网页调用兼容。"""
+    parser = argparse.ArgumentParser(
+        description="执行一次 ArUco 高位粗定位与低位视觉伺服对准。"
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="跳过启动前的人工回车确认（仅用于网页控制台等已自行确认的调用方）",
+    )
+    parser.add_argument(
+        "--low-tcp-z-mm",
+        type=float,
+        default=None,
+        help=f"覆盖低位固定 TCP Z，默认 {LOW_TCP_Z_MM:g} mm",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
     rospy.init_node("aruco_align_once", anonymous=True)
     try:
-        run_alignment()
+        run_alignment(
+            low_tcp_z_mm=args.low_tcp_z_mm,
+            assume_yes=bool(args.yes),
+        )
         return 0
     except KeyboardInterrupt:
         print("\n用户中断：停止发送新的运动命令，不执行自动复位。")

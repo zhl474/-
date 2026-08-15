@@ -409,11 +409,15 @@ def test_place_keeps_dynamic_observation_height_and_descends_before_release(monk
             90.0,
         ]
     )
-    assert [move[3] for move in clients.moves] == [True, False, True]
+    assert clients.moves[3][0] == pytest.approx(
+        [11.0 + offset_x, 12.0 + offset_y, 234.0, -180.0, 0.0, 90.0]
+    )
+    assert [move[3] for move in clients.moves] == [True, False, True, False]
     assert [move[4] for move in clients.moves] == [
         None,
         execution_config.place_descent_blend_radius_mm,
         None,
+        execution_config.place_lift_blend_radius_mm,
     ]
     assert clients.suction_states == [module.RobotClients.BLOW]
     assert not hasattr(execution_config, "place_high_z")
@@ -440,7 +444,7 @@ def test_开环摆放应用xy偏置并保留托盘高度(monkeypatch):
     )
 
     offset_x, offset_y = _camera_to_sucker_offset()
-    assert len(clients.moves) == 2
+    assert len(clients.moves) == 3
     assert clients.moves[0][0] == pytest.approx(
         [10.0 + offset_x, 10.0 + offset_y, 200.0, -180.0, 0.0, 90.0]
     )
@@ -454,10 +458,14 @@ def test_开环摆放应用xy偏置并保留托盘高度(monkeypatch):
             90.0,
         ]
     )
-    assert [move[3] for move in clients.moves] == [False, True]
+    assert clients.moves[2][0] == pytest.approx(
+        [10.0 + offset_x, 10.0 + offset_y, 200.0, -180.0, 0.0, 90.0]
+    )
+    assert [move[3] for move in clients.moves] == [False, True, False]
     assert [move[4] for move in clients.moves] == [
         execution_config.place_descent_blend_radius_mm,
         None,
+        execution_config.place_lift_blend_radius_mm,
     ]
     assert clients.suction_states == [module.RobotClients.BLOW]
     assert clients.board_offset_requests == []
@@ -816,12 +824,13 @@ def test_calibration_keeps_release_z_while_formal_blends_and_descends(
     module = _load_task_runner(monkeypatch)
     formal_clients = _FakeClients()
     calibration_clients = _FakeClients()
+    execution_config = _execution_config()
 
     def build_runner(clients, calibration_mode, output_dir):
         runner = module.TaskRunner(
             clients=clients,
             execution_config=replace(
-                _execution_config(),
+                execution_config,
                 calibration_mode=calibration_mode,
             ),
             visual_config=load_visual_servo_config(),
@@ -843,9 +852,12 @@ def test_calibration_keeps_release_z_while_formal_blends_and_descends(
         move[:4] for move in formal_clients.moves[:4]
     ]
     assert formal_clients.moves[3][4] == 5.0
-    # 正式模式：到达摆放位圆滑拐向下探，最终 Z 停在 200-5=195。
-    assert formal_clients.moves[5][4] == 2.0
-    assert formal_clients.moves[6][0][2] == pytest.approx(195.0)
+    # 正式模式：到达摆放位圆滑拐向下探，随后圆滑抬回释放高度。
+    descent_z = 200.0 - execution_config.place_descent_offset_mm
+    assert formal_clients.moves[5][4] == execution_config.place_descent_blend_radius_mm
+    assert formal_clients.moves[6][0][2] == pytest.approx(descent_z)
+    assert formal_clients.moves[7][0][2] == pytest.approx(200.0)
+    assert formal_clients.moves[7][4] == execution_config.place_lift_blend_radius_mm
     assert len(calibration_clients.moves) == 6
     assert calibration_clients.moves[5][0][2] == pytest.approx(200.0)
     assert all(move[4] is None for move in calibration_clients.moves)
@@ -1194,6 +1206,9 @@ def test_摆放旋转统一在喷气前检查(monkeypatch):
     assert events.index("机械臂运动5") < events.index("检查抓取后摆放旋转")
     assert events.index("检查抓取后摆放旋转") < events.index(
         f"吸盘状态{module.RobotClients.BLOW}"
+    )
+    assert events.index(f"吸盘状态{module.RobotClients.BLOW}") < events.index(
+        "机械臂运动6"
     )
 
 

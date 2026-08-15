@@ -1,14 +1,24 @@
 """网页控制台所有可变操作的单一协调器。"""
 
+from collections import deque
 from copy import deepcopy
 from datetime import datetime
 import json
 import math
+import os
+import signal
+import subprocess
+import sys
 import threading
 import time
 import uuid
 
-from .constants import BLOCK_CATEGORY_NAMES, WRITABLE_CONFIG_FILES
+from .constants import (
+    ARUCO_ALIGN_DEFAULT_LOW_TCP_Z_MM,
+    ARUCO_ALIGN_SCRIPT_PATH,
+    BLOCK_CATEGORY_NAMES,
+    WRITABLE_CONFIG_FILES,
+)
 
 
 class OperationBusy(RuntimeError):
@@ -58,6 +68,11 @@ class OperationCoordinator:
         self._execution_operation = None
         self._timed_blow_timer = None
         self._timed_blow_generation = 0
+        self._aruco_align_process = None
+        self._aruco_align_abort = threading.Event()
+        self._aruco_align_lines = deque(maxlen=50)
+        self._servo_sweep_stop = threading.Event()
+        self._servo_sweep_thread = None
         self._state = {
             "system": {
                 "started_at": self._now(),
@@ -108,6 +123,10 @@ class OperationCoordinator:
                 "servo_target_angle_deg": 0.0,
                 "motion_state_known": False,
                 "motion_done": False,
+                "servo_sweep_running": False,
+                "servo_sweep_cycle": 0,
+                "servo_sweep_repeat": 0,
+                "servo_sweep_target_angle_deg": None,
             },
             "config": {
                 "pending_restart": [],
@@ -326,7 +345,17 @@ class OperationCoordinator:
 
     def _is_aborting(self):
         token = self._abort_token
-        return bool(token is not None and token.requested)
+        with self._lock:
+            tool_abort = self._aruco_align_abort.is_set()
+            active_kind = (
+                self._active_operation.get("kind")
+                if self._active_operation
+                else None
+            )
+        return bool(
+            (token is not None and token.requested)
+            or (tool_abort and active_kind == "ArUco 单次对准")
+        )
 
     def _require_not_stopped(self):
         with self._lock:
@@ -370,6 +399,9 @@ class OperationCoordinator:
 
     def start_hardware(self):
         def action():
+            with self._lock:
+                if self._state["hardware"]["servo_sweep_running"]:
+                    raise OperationRejected("舵机往复测试进行中，请先停止往复")
             with self._lock:
                 # 停止时控制节点若已离线，必须允许只重建硬件服务，否则既无法
                 # 调用 clear-stop，也无法把本地停止锁同步到新控制节点。
@@ -430,6 +462,7 @@ class OperationCoordinator:
     def stop_hardware(self):
         def action():
             self._require_task_idle()
+            self._request_sweep_stop()
             hardware = self.supervisor.snapshot().get("hardware", {})
             if hardware.get("external") and not hardware.get("owned"):
                 raise OperationRejected("硬件节点由外部进程启动，控制台不会结束它")
@@ -869,6 +902,7 @@ class OperationCoordinator:
                 self._state["operation"]["stop"] = deepcopy(record)
                 self._operations[record["operation_id"]] = record
                 self._local_stop_latched = True
+                self._aruco_align_abort.set()
                 self._state["hardware"].update({
                     "stop_latched": True,
                     "stop_confirmed": False,
@@ -889,6 +923,8 @@ class OperationCoordinator:
             response = None
             error = ""
             try:
+                # 先结束 ArUco 等一次性工具子进程，避免停止确认期间继续发送运动命令。
+                self._terminate_aruco_align_process()
                 # control_node 在跑时经 ROS 服务停止；否则直连独立 XML-RPC 调 StopMotion。
                 if self._control_node_running():
                     response = self.ros.stop_arm()
@@ -1007,6 +1043,9 @@ class OperationCoordinator:
     def _assert_manual_allowed(self):
         self._require_not_stopped()
         self._require_task_idle()
+        with self._lock:
+            if self._state["hardware"]["servo_sweep_running"]:
+                raise OperationRejected("舵机往复测试进行中，请先停止往复")
 
     def control_suction(self, action, continuous=False, confirm_continuous=False):
         normalized = str(action)
@@ -1085,6 +1124,150 @@ class OperationCoordinator:
 
         return self.submit("舵机旋转", operation, source="手动控制")
 
+    # ------------------------------------------------------------ 舵机往复测试
+    def _sweep_should_stop(self, stop_event):
+        """往复循环的统一停止判定：显式停止、停止锁或控制台退出。"""
+        if stop_event.is_set():
+            return True
+        with self._lock:
+            if self._local_stop_latched or self._state["hardware"]["stop_latched"]:
+                return True
+            if self._state["system"]["exiting"]:
+                return True
+        return False
+
+    def _sweep_wait(self, stop_event, seconds):
+        """分片等待，让“停止往复”与停止锁能在等待期间及时生效。"""
+        deadline = time.monotonic() + max(0.0, float(seconds))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if self._sweep_should_stop(stop_event):
+                return True
+            time.sleep(min(0.05, remaining))
+
+    def _publish_sweep_target(self, angle):
+        with self._lock:
+            self._state["hardware"]["servo_sweep_target_angle_deg"] = float(angle)
+        self._publish_state()
+
+    def _run_servo_sweep(self, backend, min_angle, max_angle, wait, repeat, stop_event):
+        try:
+            # 先转到起始位置，之后每轮都是一次完整往返（照 tools/hardware/测试舵机往复转.py）。
+            if self._sweep_should_stop(stop_event):
+                return
+            backend.rotate_tool(min_angle)
+            self._publish_sweep_target(min_angle)
+            if self._sweep_wait(stop_event, wait):
+                return
+            completed = 0
+            while repeat == 0 or completed < repeat:
+                if self._sweep_should_stop(stop_event):
+                    return
+                backend.rotate_tool(max_angle)
+                self._publish_sweep_target(max_angle)
+                if self._sweep_wait(stop_event, wait):
+                    return
+                if self._sweep_should_stop(stop_event):
+                    return
+                backend.rotate_tool(min_angle)
+                self._publish_sweep_target(min_angle)
+                if self._sweep_wait(stop_event, wait):
+                    return
+                completed += 1
+                with self._lock:
+                    self._state["hardware"]["servo_sweep_cycle"] = completed
+                self._publish_state()
+        except Exception as exc:
+            self._log("error", f"舵机往复测试异常结束：{exc}", source="手动控制")
+        finally:
+            with self._lock:
+                self._state["hardware"].update({
+                    "servo_sweep_running": False,
+                    "servo_sweep_target_angle_deg": None,
+                })
+            self._publish_state()
+
+    def _request_sweep_stop(self):
+        """请求停止往复循环；不等待线程结束，线程会尽快自行退出。"""
+        self._servo_sweep_stop.set()
+
+    def servo_sweep_start(
+        self, min_deg, max_deg, wait_seconds, repeat_count, confirm_outside_safe=False
+    ):
+        try:
+            min_angle = float(min_deg)
+            max_angle = float(max_deg)
+            wait = float(wait_seconds)
+        except (TypeError, ValueError):
+            raise OperationRejected("往复参数必须是数值") from None
+        try:
+            repeat = int(repeat_count)
+        except (TypeError, ValueError):
+            raise OperationRejected("往返次数必须是整数") from None
+        if not all(math.isfinite(value) for value in (min_angle, max_angle, wait)):
+            raise OperationRejected("往复参数必须是有限数值")
+        if not 0.0 <= min_angle <= 360.0 or not 0.0 <= max_angle <= 360.0:
+            raise OperationRejected("往复角度必须位于 0～360°")
+        if min_angle >= max_angle:
+            raise OperationRejected("起始角必须小于终止角")
+        if wait <= 0:
+            raise OperationRejected("每次发送后的等待时间必须大于 0")
+        if repeat < 0:
+            raise OperationRejected("往返次数不能小于 0")
+
+        execution = self.config_manager.get_config("execution")["data"]
+        motor = execution["tool_motor"]
+        outside = not (
+            float(motor["lower_margin_deg"]) <= min_angle
+            and max_angle <= float(motor["upper_margin_deg"])
+        )
+        if outside and not bool(confirm_outside_safe):
+            raise OperationRejected("往复范围超出正式安全边界，需要二次确认")
+
+        with self._lock:
+            already_running = bool(self._state["hardware"]["servo_sweep_running"])
+        if already_running:
+            raise OperationRejected("往复测试已经在进行，请先停止往复")
+        self._assert_manual_allowed()
+        self.invalidate_recognition("舵机往复测试后识别结果已失效")
+
+        backend = self._manual_backend()
+        stop_event = threading.Event()
+        with self._lock:
+            self._servo_sweep_stop = stop_event
+            self._state["hardware"].update({
+                "servo_sweep_running": True,
+                "servo_sweep_cycle": 0,
+                "servo_sweep_repeat": repeat,
+                "servo_sweep_target_angle_deg": min_angle,
+            })
+        self._publish_state()
+        self._log(
+            "info",
+            f"舵机往复测试开始：{min_angle:g}° ↔ {max_angle:g}°，"
+            f"间隔 {wait:g} 秒，次数 {'无限' if repeat == 0 else repeat}",
+            source="手动控制",
+        )
+        self._servo_sweep_thread = threading.Thread(
+            target=self._run_servo_sweep,
+            args=(backend, min_angle, max_angle, wait, repeat, stop_event),
+            name="operator-servo-sweep",
+            daemon=True,
+        )
+        self._servo_sweep_thread.start()
+        return {"started": True, "min_deg": min_angle, "max_deg": max_angle}
+
+    def servo_sweep_stop(self):
+        with self._lock:
+            running = bool(self._state["hardware"]["servo_sweep_running"])
+        if not running:
+            raise OperationRejected("往复测试当前没有在运行")
+        self._request_sweep_stop()
+        self._log("info", "已请求停止舵机往复测试", source="手动控制")
+        return {"stopping": True}
+
     def reset_arm(self, confirmed_pose=False):
         if not bool(confirmed_pose):
             raise OperationRejected("复位前必须确认页面显示的完整拍摄位姿")
@@ -1150,6 +1333,234 @@ class OperationCoordinator:
     def get_pose(self):
         self._assert_manual_allowed()
         return self._manual_backend().get_pose()
+
+    def _require_aruco_align_hardware(self):
+        """ArUco 单次对准不依赖感知节点，但必须有控制服务、相机帧与稳定深度服务。"""
+        health = self.ros.health_snapshot()
+        if not health.get("control_services_ready") or not health.get("camera_frame_fresh"):
+            raise OperationRejected(
+                "ArUco 对准需要控制服务就绪并持续收到新相机画面"
+            )
+        services = set(getattr(self.ros, "service_names", lambda: ())() or ())
+        if "/camera/stable_world_points" not in services:
+            raise OperationRejected(
+                "ArUco 对准需要 /camera/stable_world_points 稳定深度服务"
+            )
+
+    def aruco_align(self, low_tcp_z_mm=None, confirmed=False):
+        """启动一次 ArUco 高位粗定位 + 低位视觉伺服对准。"""
+        if not bool(confirmed):
+            raise OperationRejected("ArUco 对准会运动机械臂，必须先在页面完成安全确认")
+        if low_tcp_z_mm is None:
+            low_z = float(ARUCO_ALIGN_DEFAULT_LOW_TCP_Z_MM)
+        else:
+            try:
+                low_z = float(low_tcp_z_mm)
+            except (TypeError, ValueError):
+                raise OperationRejected("低位 TCP Z 必须是数值") from None
+        if not math.isfinite(low_z):
+            raise OperationRejected("低位 TCP Z 必须是有限数值")
+
+        execution = self.config_manager.get_config("execution")["data"]
+        minimum_z = float(execution["motion"]["minimum_tcp_z_mm"])
+        if low_z < minimum_z:
+            raise OperationRejected(
+                f"低位 TCP Z={low_z:g}mm 低于安全下限 {minimum_z:g}mm"
+            )
+
+        def action():
+            self._assert_manual_allowed()
+            self._require_aruco_align_hardware()
+            self.invalidate_recognition("ArUco 对准后识别结果已失效")
+            result = self._execute_aruco_align(low_z)
+            self._log(
+                "info",
+                "ArUco 单次对准完成，机械臂保持最终对准位置",
+                source="手动控制",
+            )
+            return result
+
+        result = self.submit("ArUco 单次对准", action, source="手动控制")
+        result["low_tcp_z_mm"] = low_z
+        return result
+
+    @staticmethod
+    def _parse_aruco_pose(lines, prefix):
+        """从脚本固定格式输出中解析六维位姿。"""
+        for line in reversed(lines):
+            if prefix not in line:
+                continue
+            try:
+                return [
+                    float(part.split("=", 1)[1].strip())
+                    for part in line.split(prefix, 1)[1].split(",")
+                ]
+            except (ValueError, IndexError):
+                return None
+        return None
+
+    def _execute_aruco_align(self, low_z_mm):
+        """以独立 ROS 节点子进程执行 align_aruco_once.py，并实时转发输出。"""
+        if not ARUCO_ALIGN_SCRIPT_PATH.is_file():
+            raise OperationRejected(
+                f"ArUco 对准脚本不存在：{ARUCO_ALIGN_SCRIPT_PATH}"
+            )
+        command = [
+            sys.executable,
+            "-u",
+            str(ARUCO_ALIGN_SCRIPT_PATH),
+            "--yes",
+            "--low-tcp-z-mm",
+            f"{low_z_mm:.3f}",
+        ]
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+
+        self._require_not_stopped()
+        with self._lock:
+            if (
+                self._aruco_align_process is not None
+                and self._aruco_align_process.poll() is None
+            ):
+                raise OperationRejected("ArUco 对准子进程已经在运行")
+            self._aruco_align_abort.clear()
+            self._aruco_align_lines.clear()
+
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            start_new_session=True,
+            env=env,
+        )
+        with self._lock:
+            self._aruco_align_process = process
+
+        if self._aruco_align_abort.is_set():
+            self._terminate_aruco_align_process()
+            raise OperationRejected("ArUco 对准在启动阶段被停止")
+
+        def pump(stream, level):
+            try:
+                for raw_line in iter(stream.readline, ""):
+                    line = raw_line.rstrip()
+                    if not line:
+                        continue
+                    with self._lock:
+                        self._aruco_align_lines.append(line)
+                    self.event_bus.publish("log", {
+                        "source": "ArUco对准",
+                        "level": level,
+                        "message": line,
+                    })
+            except Exception as exc:
+                self._log(
+                    "warning",
+                    f"读取 ArUco 对准输出失败：{exc}",
+                    source="ArUco对准",
+                )
+
+        stdout_thread = threading.Thread(
+            target=pump,
+            args=(process.stdout, "info"),
+            name="aruco-align-stdout",
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=pump,
+            args=(process.stderr, "error"),
+            name="aruco-align-stderr",
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        timeout = float(
+            self.panel_config.get("timeouts", {}).get("aruco_align_seconds", 300.0)
+        )
+        try:
+            return_code = process.wait(timeout=max(1.0, timeout))
+        except subprocess.TimeoutExpired:
+            self._aruco_align_abort.set()
+            self._terminate_aruco_align_process()
+            raise RuntimeError(
+                f"ArUco 单次对准超过 {timeout:g} 秒，已终止子进程"
+            ) from None
+
+        stdout_thread.join(timeout=1.0)
+        stderr_thread.join(timeout=1.0)
+
+        with self._lock:
+            self._aruco_align_process = None
+            tail = list(self._aruco_align_lines)
+
+        if self._aruco_align_abort.is_set():
+            raise OperationRejected("ArUco 单次对准已被停止通道结束")
+        if return_code != 0:
+            detail = "\n".join(tail[-8:]) or f"退出码 {return_code}"
+            raise RuntimeError(f"ArUco 单次对准失败：{detail}")
+
+        return {
+            "success": True,
+            "message": next(
+                (
+                    line
+                    for line in reversed(tail)
+                    if "ArUco 对准成功" in line
+                ),
+                "ArUco 单次对准完成",
+            ),
+            "actual_tcp_pose": self._parse_aruco_pose(
+                tail, "最终实测 TCP："
+            ),
+            "final_command_pose": self._parse_aruco_pose(
+                tail, "最终命令 TCP："
+            ),
+        }
+
+    def _terminate_aruco_align_process(self):
+        """结束 ArUco 对准子进程组，防止它继续发送运动命令。"""
+        with self._lock:
+            process = self._aruco_align_process
+        if process is None or process.poll() is not None:
+            return
+
+        self._aruco_align_abort.set()
+        self._log(
+            "warning",
+            "正在结束 ArUco 对准子进程，不再发送新的运动命令",
+            source="手动控制",
+        )
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            return
+
+        try:
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                self._log(
+                    "error",
+                    "ArUco 对准子进程未能及时退出",
+                    source="手动控制",
+                )
+
+    def stop_tools(self):
+        """控制台退出时统一清理一次性工具子进程。"""
+        self._aruco_align_abort.set()
+        self._terminate_aruco_align_process()
 
     def _config_operation_allowed(self):
         self._require_not_stopped()

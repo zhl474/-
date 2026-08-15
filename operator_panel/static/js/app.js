@@ -436,9 +436,22 @@ function renderState(state) {
   $('#task-start').classList.toggle('warning', task.state === '执行中');
   $('#clear-stop').disabled = busy || !stopped;
 
-  const manualEnabled = !busy && !stopped && !['准备识别', '执行中'].includes(task.state);
+  const sweeping = Boolean(hardware.servo_sweep_running);
+  const manualEnabled = !busy && !stopped && !sweeping && !['准备识别', '执行中'].includes(task.state);
   $$('[data-suction], #servo-send, #servo-quick button, #arm-reset, #relative-move').forEach((button) => { button.disabled = !manualEnabled; });
   $('#pose-refresh').disabled = !manualEnabled;
+  $('#servo-sweep-start').disabled = !manualEnabled;
+  $('#servo-sweep-stop').disabled = !sweeping;
+
+  const arucoAlignRunning = active?.kind === 'ArUco 单次对准';
+  const arucoAlignReady = manualEnabled
+    && health.control_services_ready
+    && health.camera_frame_fresh;
+  const arucoStatus = $('#aruco-align-status');
+  arucoStatus.textContent = arucoAlignRunning ? '运行中' : '未运行';
+  arucoStatus.className = `state-badge ${arucoAlignRunning ? 'active' : ''}`;
+  $('#aruco-align-start').disabled = !arucoAlignReady;
+  $('#aruco-low-z').disabled = arucoAlignRunning;
   const manualRoute = $('#manual-route');
   if (manualRoute) manualRoute.textContent = health.control_node ? '控制链路：控制节点（ROS）' : '控制链路：直连硬件';
 
@@ -446,6 +459,14 @@ function renderState(state) {
   $('#suction-status').textContent = suctionNames[hardware.suction_state] ?? '状态未知';
   $('#suction-status').className = `state-badge ${hardware.suction_state === 0 ? 'active' : ''}`;
   $('#servo-status').textContent = hardware.servo_target_known ? `目标 ${Number(hardware.servo_target_angle_deg).toFixed(1)}°` : '角度未知';
+  const sweepStatus = $('#servo-sweep-status');
+  if (sweeping) {
+    sweepStatus.textContent = `往复中 · 第 ${Number(hardware.servo_sweep_cycle || 0)} 次 · ${Number(hardware.servo_sweep_target_angle_deg || 0).toFixed(1)}°`;
+    sweepStatus.className = 'state-badge active';
+  } else {
+    sweepStatus.textContent = '未运行';
+    sweepStatus.className = 'state-badge';
+  }
 
   const warning = hardware.emergency_warning || '';
   const overlay = $('#emergency-overlay');
@@ -856,6 +877,40 @@ function bindManual() {
     }
   }));
 
+  $('#servo-sweep-start').addEventListener('click', async () => {
+    const min = Number($('#sweep-min').value);
+    const max = Number($('#sweep-max').value);
+    const wait = Number($('#sweep-wait').value);
+    const repeat = Number($('#sweep-repeat').value);
+    if (![min, max, wait, repeat].every(Number.isFinite)) {
+      return toast('往复参数无效', '起始角、终止角、间隔、次数必须是数值', 'error');
+    }
+    if (min < 0 || max > 360 || min >= max) {
+      return toast('往复参数无效', '角度必须在 0～360° 且起始角小于终止角', 'error');
+    }
+    if (wait <= 0) return toast('往复参数无效', '间隔必须大于 0', 'error');
+    if (repeat < 0 || !Number.isInteger(repeat)) {
+      return toast('往复参数无效', '次数必须是非负整数（0 = 无限）', 'error');
+    }
+    let confirmed = false;
+    const motor = app.executionConfig?.data?.tool_motor;
+    const outside = motor && (min < motor.lower_margin_deg || max > motor.upper_margin_deg);
+    if (outside) {
+      confirmed = await confirmAction(
+        '往复范围超出正式安全边界',
+        `往复范围 ${min}°～${max}° 超出 ${motor.lower_margin_deg}°～${motor.upper_margin_deg}°。只在确认机构不会顶到限位时继续。`,
+      );
+      if (!confirmed) return;
+    }
+    command('/api/control/servo-sweep/start', {
+      min_deg: min, max_deg: max, wait_seconds: wait, repeat_count: repeat,
+      confirm_outside_safe: confirmed,
+    }, '往复测试已开始');
+  });
+  $('#servo-sweep-stop').addEventListener('click', () => {
+    command('/api/control/servo-sweep/stop', {}, '停止往复已提交');
+  });
+
   $('#pose-refresh').addEventListener('click', async () => {
     try {
       const result = await api('/api/control/pose');
@@ -902,6 +957,27 @@ function bindManual() {
       command('/api/control/move-relative', { dx, dy, dz, speed }, '增量移动已提交');
     }
   });
+  $('#aruco-align-start').addEventListener('click', async () => {
+    await loadExecutionConfig();
+    const value = Number($('#aruco-low-z').value);
+    const motion = app.executionConfig?.data?.motion || {};
+    const minimumZ = Number(motion.minimum_tcp_z_mm);
+    if (!Number.isFinite(value)) {
+      return toast('参数错误', '低位 TCP Z 必须是数值', 'error');
+    }
+    if (Number.isFinite(minimumZ) && value < minimumZ) {
+      return toast('低位 TCP Z 过低', `不能低于安全下限 ${minimumZ} mm`, 'error');
+    }
+    const pose = app.executionConfig?.data?.shooting_pose;
+    const detail = `完整拍摄位姿：${pose ? formatPose(pose) : '未读取到 execution.yaml'}\n低位固定 TCP Z：${value} mm\n结束后保持最终位置，不返回高位。`;
+    if (await confirmAction(
+      '开始 ArUco 单次对准？',
+      '机械臂将先运动到高位拍摄位，再下降到低位做 ArUco 闭环对准。请确认工作区安全、吸盘已关闭且未持块，ArUco 板在高位和低位都能被相机看到。',
+      detail,
+    )) {
+      command('/api/tools/aruco-align', { low_tcp_z_mm: value, confirmed: true }, 'ArUco 单次对准已提交');
+    }
+  });
   $('#clear-stop').addEventListener('click', async () => {
     if (await confirmAction('解除停止锁？', '请先在现场确认机械臂已经停稳、原因已经排除，且工作区重新安全。解除后也必须重新启动感知并识别。')) {
       command('/api/control/clear-stop', {}, '解除停止锁已提交');
@@ -920,6 +996,14 @@ async function loadExecutionConfig(force = false) {
     const pose = app.executionConfig.data.shooting_pose;
     $('#reset-pose').textContent = formatPose(pose);
     $('#servo-angle').value = app.executionConfig.data.tool_motor.initial_angle_deg;
+    const minimumZ = Number(app.executionConfig.data?.motion?.minimum_tcp_z_mm);
+    if (Number.isFinite(minimumZ)) {
+      const lowZ = $('#aruco-low-z');
+      lowZ.min = minimumZ;
+      if (Number(lowZ.value) < minimumZ) {
+        lowZ.value = Math.max(220, minimumZ);
+      }
+    }
     return app.executionConfig;
   } catch (error) {
     $('#reset-pose').textContent = `加载失败：${formatError(error)}`;
@@ -1359,7 +1443,7 @@ function sourceChannel(source) {
   const value = source || '';
   if (value.startsWith('launch:hardware') || value === '/camera_node' || value === '/control_node') return 'hardware';
   if (value.startsWith('launch:runtime') || value === '/image_process_node' || value === '/competition_node') return 'perception';
-  if (value === '手动控制') return 'manual';
+  if (value === '手动控制' || value === 'ArUco对准') return 'manual';
   return 'system';
 }
 

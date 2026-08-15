@@ -72,6 +72,15 @@ READ_ONLY_CONFIG_FILES = {
 
 HAND_EYE_MATRIX_PATH = SRC_DIR / "camera" / "config" / "T_wrist2camera.npy"
 
+ARUCO_ALIGN_SCRIPT_PATH = (
+    SRC_DIR
+    / "tools"
+    / "vision"
+    / "aruco_pixel_tcp_diagnostic"
+    / "align_aruco_once.py"
+)
+ARUCO_ALIGN_DEFAULT_LOW_TCP_Z_MM = 220.0
+
 DEBUG_IMAGE_FILES = {
     "block_mask": "方块上表面掩码.jpg",
     "template_match": "高位方块模板匹配结果.jpg",

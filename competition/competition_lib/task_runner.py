@@ -944,7 +944,7 @@ class TaskRunner:
                 self.clients.move_arm,
                 descent_pose,
                 self.config.arm_speed,
-                wait_until_stable=True,
+                wait_until_stable=False,
             )
         else:
             self._timed_call(
@@ -969,6 +969,23 @@ class TaskRunner:
                 RobotClients.BLOW,
             )
         self._set_holding_block(False)
+
+        # 喷气后抬回释放高度（下探多少就抬回多少），圆滑衔接下一块方块的抓取。
+        if (
+            not self.config.calibration_mode
+            and self.config.place_descent_offset_mm > 0.0
+        ):
+            lift_blend_radius_mm = self.config.place_lift_blend_radius_mm
+            self._timed_call(
+                "摆放后抬升运动",
+                self.clients.move_arm,
+                place_pose,
+                self.config.arm_speed,
+                wait_until_stable=False,
+                blend_radius_mm=(
+                    lift_blend_radius_mm if lift_blend_radius_mm > 0.0 else None
+                ),
+            )
 
     def prepare(self, advanced=False, place_order=()):
         self._check_abort()

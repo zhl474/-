@@ -205,6 +205,22 @@
             </div>
           </article>
 
+          <article class="card manual-card sweep-card">
+            <div class="card-heading"><div><span class="tool-icon">往</span><h2>舵机往复测试</h2></div><span id="servo-sweep-status" class="state-badge">未运行</span></div>
+            <p>在起始角与终止角之间反复转动；0 次表示无限循环直到点击停止。复用网页手动控制链路发送角度，不占用其它操作队列。</p>
+            <div class="delta-inputs">
+              <label><small>起始角（°）</small><input id="sweep-min" type="number" min="0" max="360" step="0.1" value="0"></label>
+              <label><small>终止角（°）</small><input id="sweep-max" type="number" min="0" max="360" step="0.1" value="360"></label>
+              <label><small>间隔（秒）</small><input id="sweep-wait" type="number" min="0.1" step="0.1" value="2"></label>
+            </div>
+            <label class="field-label" for="sweep-repeat">往返次数（0 = 无限循环）</label>
+            <div class="input-action">
+              <input id="sweep-repeat" type="number" min="0" step="1" value="0">
+              <button id="servo-sweep-start" class="button primary" type="button">开始往复</button>
+            </div>
+            <button id="servo-sweep-stop" class="button danger-outline full" type="button">停止往复</button>
+          </article>
+
           <article class="card manual-card pose-card">
             <div class="card-heading"><div><span class="tool-icon">位</span><h2>当前位姿</h2></div><button id="pose-refresh" class="text-button" type="button">读取位姿</button></div>
             <div class="pose-values">
@@ -233,6 +249,20 @@
               <input id="move-speed" type="number" min="1" step="1" value="50">
               <button id="relative-move" class="button warning" type="button">预览并移动</button>
             </div>
+          </article>
+
+          <article class="card manual-card aruco-card">
+            <div class="card-heading">
+              <div><span class="tool-icon">准</span><h2>ArUco 单次对准</h2></div>
+              <span id="aruco-align-status" class="state-badge">未运行</span>
+            </div>
+            <p>运动到高位拍摄位，识别 ArUco 中心并深度定位，再下降到低位闭环对准。成功后保持最终位置，不返回高位。</p>
+            <label class="field-label" for="aruco-low-z">低位固定 TCP Z（mm）</label>
+            <div class="input-action">
+              <input id="aruco-low-z" type="number" min="165" step="0.1" value="220">
+              <button id="aruco-align-start" class="button warning" type="button">确认并开始对准</button>
+            </div>
+            <small>需要控制服务、新相机画面和 /camera/stable_world_points；进度显示在“运行日志”。</small>
           </article>
 
           <article class="card stop-card">
