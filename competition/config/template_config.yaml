@@ -2,7 +2,7 @@ template_sizes:
   active_profile: high
   profiles:
     high:
-      block_px: 38
+      block_px: 36
       connector_px: 5
     low:
       block_px: 83
