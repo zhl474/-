@@ -628,6 +628,25 @@ def check_image_size_constant(
     return (int(width), int(height)) == (int(expected_size[0]), int(expected_size[1]))
 
 
+def open_video_writer(video_path: Path, fps: float, frame_size):
+    """按正式代码惯例依次尝试 avi+MJPG、mp4+mp4v，返回 (writer, 实际路径)。"""
+    candidates = [
+        (video_path.with_suffix(".avi"), "MJPG"),
+        (video_path.with_suffix(".mp4"), "mp4v"),
+    ]
+    for path, codec_name in candidates:
+        writer = cv2.VideoWriter(
+            str(path),
+            cv2.VideoWriter_fourcc(*codec_name),
+            float(fps),
+            (int(frame_size[0]), int(frame_size[1])),
+        )
+        if writer.isOpened():
+            return writer, path
+        writer.release()
+    return None, None
+
+
 def draw_rejected_candidates(canvas: np.ndarray, rejected_corners) -> np.ndarray:
     """用黄色在画布上叠加 rejected 候选四边形（找到外框但解码失败）。"""
     if not rejected_corners:

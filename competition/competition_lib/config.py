@@ -29,6 +29,8 @@ class ExecutionConfig:
     place_descent_blend_radius_mm: float
     place_lift_blend_radius_mm: float
     minimum_tcp_z_mm: float
+    pick_rotate_safe_lift_mm: float
+    pick_safe_z_timeout_sec: float
     timing_debug: bool
     block_error_threshold_px: float
     tray_error_threshold_px: float
@@ -169,6 +171,14 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
             motion["minimum_tcp_z_mm"],
             "motion.minimum_tcp_z_mm",
         ),
+        pick_rotate_safe_lift_mm=_positive_finite_float(
+            motion["pick_rotate_safe_lift_mm"],
+            "motion.pick_rotate_safe_lift_mm",
+        ),
+        pick_safe_z_timeout_sec=_positive_finite_float(
+            motion["pick_safe_z_timeout_sec"],
+            "motion.pick_safe_z_timeout_sec",
+        ),
         timing_debug=bool(servo.get("timing_debug", False)),
         block_error_threshold_px=block_error_threshold_px,
         tray_error_threshold_px=tray_error_threshold_px,
@@ -194,6 +204,8 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         config.place_descent_offset_mm, config.place_descent_blend_radius_mm,
         config.place_lift_blend_radius_mm,
         config.minimum_tcp_z_mm,
+        config.pick_rotate_safe_lift_mm,
+        config.pick_safe_z_timeout_sec,
         config.block_error_threshold_px, config.tray_error_threshold_px,
         config.min_step_mm, config.max_step_mm, config.max_iter,
         config.success_stable_frames, config.post_success_sample_frames,

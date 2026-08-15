@@ -1478,6 +1478,16 @@ class OperationCoordinator:
                 return None
         return None
 
+    @staticmethod
+    def _parse_aruco_video_path(lines):
+        """从脚本固定格式输出中解析对准录像保存路径。"""
+        prefix = "对准录像已保存："
+        for line in reversed(lines):
+            if prefix in line:
+                path = line.split(prefix, 1)[1].strip()
+                return path or None
+        return None
+
     def _execute_aruco_align(self, low_z_mm):
         """以独立 ROS 节点子进程执行 align_aruco_once.py，并实时转发输出。"""
         if not ARUCO_ALIGN_SCRIPT_PATH.is_file():
@@ -1600,6 +1610,7 @@ class OperationCoordinator:
             "final_command_pose": self._parse_aruco_pose(
                 tail, "最终命令 TCP："
             ),
+            "video_path": self._parse_aruco_video_path(tail),
         }
 
     def _terminate_aruco_align_process(self):

@@ -22,6 +22,12 @@ from image_process_lib.servo_angle_model import (
 )
 
 
+# 抓后抬升途中实测 TCP Z 的轮询间隔。
+# 触发阈值 = 抓取Z + motion.pick_rotate_safe_lift_mm（与抬升终点取小），
+# 轮询持续到达标才放行舵机旋转，超时由配置 motion.pick_safe_z_timeout_sec 控制。
+_Z_SAFE_POLL_INTERVAL_SEC = 0.02
+
+
 class TaskState(Enum):
     IDLE = "空闲"
     PREPARING = "准备任务"
@@ -298,6 +304,34 @@ class TaskRunner:
                 remaining_sec * 1000.0,
             )
         return remaining_sec
+
+    def _wait_until_z_safe(self, safe_z_mm):
+        """持续轮询实测 TCP Z，达标返回 True；超时仍未达标则放行返回 False。
+
+        抬升运动已提交（wait_until_stable=False，机械臂在动），
+        读数异常只跳过本轮继续等；等待期间仍响应中止/暂停令牌。
+        """
+        deadline = time.monotonic() + self.config.pick_safe_z_timeout_sec
+        while not rospy.is_shutdown() and time.monotonic() < deadline:
+            try:
+                response = self.clients.get_actual_pose()
+                tcp_pose = getattr(response, "tcp_pose", None)
+                z_safe = (
+                    getattr(response, "success", False)
+                    and tcp_pose is not None
+                    and len(tcp_pose) >= 3
+                    and float(tcp_pose[2]) >= safe_z_mm
+                )
+            except Exception:
+                z_safe = False
+            if z_safe:
+                return True
+            self._sleep_abortible(_Z_SAFE_POLL_INTERVAL_SEC)
+        rospy.logwarn(
+            "抬升高度轮询超时，safe_z=%.1f mm，已按原逻辑发送舵机指令",
+            safe_z_mm,
+        )
+        return False
 
     def _align(
         self,
@@ -837,6 +871,18 @@ class TaskRunner:
             wait_until_stable=False,
             blend_radius_mm=retreat_blend_radius_mm,
         )
+        if not self.config.calibration_mode:
+            # 正式任务吸住方块后，先等实测高度抬过安全阈值再开始摆放旋转，
+            # 避免方块还在低位时旋转扫到相邻方块；超时兜底不阻塞任务。
+            safe_z = min(
+                pick_z_mm + self.config.pick_rotate_safe_lift_mm,
+                retreat_z_mm,
+            )
+            self._timed_call(
+                "抬升高度轮询",
+                self._wait_until_z_safe,
+                safe_z,
+            )
         place_rotation = self._timed_call(
             "摆放角度舵机指令",
             self.angle_planner.commit_place_angle,

@@ -808,6 +808,7 @@ def testArUco对准子进程输出被解析并转发日志(tmp_path, monkeypatch
         "R=-180.000, P=0.000, YAW=90.000')\n"
         "print('最终实测 TCP：X=1.100, Y=2.200, Z=220.000, "
         "R=-180.000, P=0.000, YAW=90.000')\n"
+        "print('对准录像已保存：/home/zhl/桌面/aruco单次对准/20260816-120000_单次对准录像.avi')\n"
         "sys.exit(0)\n",
         encoding="utf-8",
     )
@@ -818,6 +819,9 @@ def testArUco对准子进程输出被解析并转发日志(tmp_path, monkeypatch
 
     assert result["actual_tcp_pose"] == [1.1, 2.2, 220.0, -180.0, 0.0, 90.0]
     assert result["final_command_pose"] == [1.0, 2.0, 220.0, -180.0, 0.0, 90.0]
+    assert result["video_path"] == (
+        "/home/zhl/桌面/aruco单次对准/20260816-120000_单次对准录像.avi"
+    )
     log_messages = [
         item["data"]["message"]
         for item in coordinator.event_bus.snapshot("log")

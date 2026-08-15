@@ -63,6 +63,7 @@ from aruco_diagnostic_core import (  # noqa: E402
     draw_servo_overlay,
     image_center_uv,
     median_center,
+    open_video_writer,
     static_center_stats,
     validate_motion_pose,
     zero_error_tcp_xy,
@@ -1115,25 +1116,6 @@ def run_one_sample(
         print(f"回高位失败，控制服务可能异常: {exc}")
         return False
     return True
-
-
-def open_video_writer(video_path, fps, frame_size):
-    """按正式代码惯例依次尝试 avi+MJPG、mp4+mp4v，返回 (writer, 实际路径)。"""
-    candidates = [
-        (video_path.with_suffix(".avi"), "MJPG"),
-        (video_path.with_suffix(".mp4"), "mp4v"),
-    ]
-    for path, codec_name in candidates:
-        writer = cv2.VideoWriter(
-            str(path),
-            cv2.VideoWriter_fourcc(*codec_name),
-            float(fps),
-            (int(frame_size[0]), int(frame_size[1])),
-        )
-        if writer.isOpened():
-            return writer, path
-        writer.release()
-    return None, None
 
 
 def move_checked(

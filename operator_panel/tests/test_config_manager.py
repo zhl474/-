@@ -46,7 +46,7 @@ def test六份YAML完整读取且建立初始稳定预设(manager):
 
 def test最低安全高度只保留在执行配置(manager):
     execution = manager.get_config("execution")
-    assert execution["data"]["motion"]["minimum_tcp_z_mm"] == 163.0
+    assert execution["data"]["motion"]["minimum_tcp_z_mm"] == 162.0
     assert execution["restart_scope"] == "hardware"
 
     launch_path = Path(__file__).parents[2] / "competition" / "launch" / "hardware.launch"

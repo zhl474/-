@@ -34,7 +34,7 @@ def test_current_execution_and_servo_configs_are_valid():
     assert execution.place_descent_offset_mm >= 0
     assert execution.place_descent_blend_radius_mm >= 0
     assert execution.place_lift_blend_radius_mm >= 0
-    assert execution.minimum_tcp_z_mm == 163.0
+    assert execution.minimum_tcp_z_mm == 162.0
     assert isinstance(execution.calibration_mode, bool)
     assert isinstance(execution.visual_servo_enabled, bool)
     assert execution.block_error_threshold_px == 1.0

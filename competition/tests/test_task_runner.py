@@ -33,6 +33,7 @@ def _load_task_runner(monkeypatch):
     rospy.loginfo = lambda *_args, **_kwargs: None
     rospy.logerr = lambda *_args, **_kwargs: None
     rospy.logwarn = lambda *_args, **_kwargs: None
+    rospy.is_shutdown = lambda: False
     monkeypatch.setitem(sys.modules, "rospy", rospy)
 
     clients_module = types.ModuleType("competition_lib.ros_clients")
@@ -84,7 +85,7 @@ class _FakeClients:
             place_observation_pose=[10, 10, 200, -180, 0, 90],
             detected_angle_deg=0.0,
             rotation_delta_deg=0.0,
-            pick_surface_z_mm=8.0,
+            pick_surface_z_mm=22.0,
             pick_surface_z_valid=True,
             pick_high_detected_pixel_xy=[120.5, 220.5],
             pick_high_depth_sample_pixel_xy=[0.0, 0.0],
@@ -133,9 +134,10 @@ class _FakeClients:
 
     def get_actual_pose(self):
         self.actual_pose_calls += 1
+        # 实测 Z 取高位，保证抬升高度轮询第一次调用即达标，不拖慢测试。
         return types.SimpleNamespace(
             success=True,
-            tcp_pose=[1, 2, 3, -180, 0, 90],
+            tcp_pose=[1, 2, 300, -180, 0, 90],
             camera_pose=[4, 5, 6, -180, 0, 90],
         )
 
@@ -195,7 +197,7 @@ def test_闭环模式调用方块和托盘低位检测(monkeypatch):
 
     runner._align = align_once
     target = clients.get_task_target(0)
-    target.pick_surface_z_mm = 8.0
+    target.pick_surface_z_mm = 22.0
 
     place_rotation = runner._pick(target)
     runner._place(target, place_rotation=place_rotation)
@@ -226,7 +228,7 @@ def test_pick_uses_surface_height_and_configured_offset(monkeypatch):
     assert clients.moves[2][0][2] == 177.5
 
 
-@pytest.mark.parametrize("surface_z_mm", [8.0, 10.5])
+@pytest.mark.parametrize("surface_z_mm", [22.0, 24.5])
 def test_闭环抓取使用动态预抓取和托盘伺服高度抬升(
     monkeypatch,
     surface_z_mm,
@@ -291,7 +293,7 @@ def test_开环抓取直接到动态预抓取位并抬到托盘伺服高度(monk
         AssertionError("开环抓取不应调用视觉伺服")
     )
     target = clients.get_task_target(0)
-    target.pick_surface_z_mm = 8.0
+    target.pick_surface_z_mm = 22.0
 
     runner._pick(target)
 
@@ -412,7 +414,7 @@ def test_place_keeps_dynamic_observation_height_and_descends_before_release(monk
     assert clients.moves[3][0] == pytest.approx(
         [11.0 + offset_x, 12.0 + offset_y, 234.0, -180.0, 0.0, 90.0]
     )
-    assert [move[3] for move in clients.moves] == [True, False, True, False]
+    assert [move[3] for move in clients.moves] == [True, False, False, False]
     assert [move[4] for move in clients.moves] == [
         None,
         execution_config.place_descent_blend_radius_mm,
@@ -461,7 +463,7 @@ def test_开环摆放应用xy偏置并保留托盘高度(monkeypatch):
     assert clients.moves[2][0] == pytest.approx(
         [10.0 + offset_x, 10.0 + offset_y, 200.0, -180.0, 0.0, 90.0]
     )
-    assert [move[3] for move in clients.moves] == [False, True, False]
+    assert [move[3] for move in clients.moves] == [False, False, False]
     assert [move[4] for move in clients.moves] == [
         execution_config.place_descent_blend_radius_mm,
         None,
@@ -494,10 +496,10 @@ def test_pick_rejects_missing_surface_height_before_moving(monkeypatch):
     ("field", "value", "message"),
     [
         ("pick_observation_pose", [0, 0, float("nan"), -180, 0, 90], "方块观察位"),
-        ("pick_observation_pose", [0, 0, 164.9, -180, 0, 90], "低于 TCP 安全下限"),
+        ("pick_observation_pose", [0, 0, 160.0, -180, 0, 90], "低于 TCP 安全下限"),
         ("place_observation_pose", [0, 0, 160.0, -180, 0, 90], "托盘观察位"),
         ("pick_surface_z_mm", float("inf"), "方块抓取表面高度"),
-        ("pick_surface_z_mm", -1.0, "最终抓取位"),
+        ("pick_surface_z_mm", 8.0, "最终抓取位"),
     ],
 )
 def test_pick_rejects_invalid_pose_or_height_before_moving(
@@ -568,10 +570,10 @@ def test_place_rejects_low_descent_height_before_final_move(monkeypatch):
         execution_config=_execution_config(),
         visual_config=load_visual_servo_config(),
     )
-    # 摆放位 Z=167 本身合法，但下探 5mm 后 162 < minimum_tcp_z_mm(163)。
+    # 摆放位 Z=166 本身合法，但下探 5mm 后 161 < minimum_tcp_z_mm(162)。
     runner._align = lambda *_args, **_kwargs: (
         True,
-        [11, 12, 167, -180, 0, 90],
+        [11, 12, 166, -180, 0, 90],
         None,
         "成功",
     )
@@ -789,7 +791,9 @@ def test_标定模式警告并强制开启视觉伺服(
     assert clients.suction_states == [module.RobotClients.OFF]
 
 
-def test_formal_mode_uses_suction_without_csv_or_actual_pose(monkeypatch, tmp_path):
+def test_formal_mode_uses_suction_without_csv_but_polls_z_before_rotation(
+    monkeypatch, tmp_path
+):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()
     runner = module.TaskRunner(
@@ -805,6 +809,16 @@ def test_formal_mode_uses_suction_without_csv_or_actual_pose(monkeypatch, tmp_pa
         "成功",
     )
 
+    original_get_task_target = clients.get_task_target
+
+    def get_task_target(index):
+        target = original_get_task_target(index)
+        # 表面高度取 22mm：抓取Z=173 需通过 minimum_tcp_z_mm=162 校验。
+        target.pick_surface_z_mm = 22.0
+        return target
+
+    clients.get_task_target = get_task_target
+
     runner.execute_all(1)
 
     assert clients.suction_states == [
@@ -812,9 +826,89 @@ def test_formal_mode_uses_suction_without_csv_or_actual_pose(monkeypatch, tmp_pa
         module.RobotClients.BLOW,
         module.RobotClients.OFF,
     ]
-    assert clients.actual_pose_calls == 0
+    # 正式模式抬升后通过实测位姿轮询放行舵机旋转，因此会读取一次位姿，
+    # 但不写标定 CSV。
+    assert clients.actual_pose_calls == 1
     assert not (tmp_path / "方块视觉伺服.csv").exists()
     assert not (tmp_path / "托盘视觉伺服.csv").exists()
+
+
+def test_抬升高度轮询达标前不发出摆放旋转(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    events = []
+    z_values = iter([5.0, 5.0, 300.0])
+
+    def get_actual_pose():
+        clients.actual_pose_calls += 1
+        return types.SimpleNamespace(
+            success=True,
+            tcp_pose=[1, 2, next(z_values), -180, 0, 90],
+            camera_pose=[4, 5, 6, -180, 0, 90],
+        )
+
+    clients.get_actual_pose = get_actual_pose
+    original_move_arm = clients.move_arm
+    original_rotate_tool = clients.rotate_tool
+
+    def move_arm(*args, **kwargs):
+        original_move_arm(*args, **kwargs)
+        events.append(f"机械臂运动{len(clients.moves)}")
+
+    def rotate_tool(angle):
+        original_rotate_tool(angle)
+        events.append(f"舵机旋转{float(angle):.0f}")
+
+    clients.move_arm = move_arm
+    clients.rotate_tool = rotate_tool
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=_execution_config(visual_servo_enabled=False),
+        visual_config=load_visual_servo_config(),
+    )
+    target = clients.get_task_target(0)
+    # 表面高度取 22mm：抓取Z=173 需通过 minimum_tcp_z_mm=162 校验，
+    # 旋转安全阈值 = min(173+13, 200) = 186。
+    target.pick_surface_z_mm = 22.0
+
+    runner._pick(target)
+
+    # 实测 Z 前两次低于安全阈值，第三次达标才放行旋转。
+    assert events.index("机械臂运动3") < events.index("舵机旋转180")
+    assert clients.actual_pose_calls == 3
+
+
+def test_抬升高度轮询超时后仍按原逻辑发出摆放旋转(monkeypatch):
+    module = _load_task_runner(monkeypatch)
+    warnings = []
+    monkeypatch.setattr(
+        module.rospy,
+        "logwarn",
+        lambda message, *args: warnings.append(message % args if args else message),
+    )
+    clients = _FakeClients()
+    clients.get_actual_pose = lambda: types.SimpleNamespace(
+        success=True,
+        tcp_pose=[1, 2, 5.0, -180, 0, 90],
+        camera_pose=[4, 5, 6, -180, 0, 90],
+    )
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=_execution_config(
+            visual_servo_enabled=False,
+            pick_safe_z_timeout_sec=0.05,
+        ),
+        visual_config=load_visual_servo_config(),
+    )
+    target = clients.get_task_target(0)
+    # 表面高度取 22mm：抓取Z=173 需通过 minimum_tcp_z_mm=162 校验。
+    target.pick_surface_z_mm = 22.0
+
+    runner._pick(target)
+
+    # 实测 Z 一直低于阈值，超时后不阻塞任务，按原逻辑发送旋转并告警。
+    assert 180.0 in clients.rotation_angles
+    assert any("抬升高度轮询超时" in message for message in warnings)
 
 
 def test_calibration_keeps_release_z_while_formal_blends_and_descends(
@@ -1109,7 +1203,7 @@ def test_抓取前预旋转统一在下探前检查(
     )
     runner.angle_planner.last_angle = 350.0
     target = clients.get_task_target(0)
-    target.pick_surface_z_mm = 8.0
+    target.pick_surface_z_mm = 22.0
     target.rotation_delta_deg = 20.0
 
     if visual_servo_enabled:
@@ -1180,7 +1274,7 @@ def test_摆放旋转统一在喷气前检查(monkeypatch):
         visual_config=load_visual_servo_config(),
     )
     target = clients.get_task_target(0)
-    target.pick_surface_z_mm = 8.0
+    target.pick_surface_z_mm = 22.0
     target.rotation_delta_deg = 90.0
 
     def wait_for_rotation(rotation, purpose):
@@ -1273,7 +1367,7 @@ def test_标定方块下探后退回自身观察高度且不读取全零托盘�
     )
     target = clients.get_task_target(0)
     target.target_type = "block"
-    target.pick_surface_z_mm = 8.0
+    target.pick_surface_z_mm = 22.0
     target.place_observation_pose = [0.0] * 6
 
     runner._pick(target)
