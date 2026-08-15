@@ -22,6 +22,7 @@ const app = {
   logs: [],
   logRenderScheduled: false,
   selectedLogChannel: 'all',
+  launchLogKind: 'hardware',
   seenOperations: new Set(),
   interactionDialogKey: '',
   interactionDialogKind: '',
@@ -2124,6 +2125,103 @@ function bindLogs() {
   }));
 }
 
+const LAUNCH_LOG_TAIL_LINES = 5000;
+const LAUNCH_LOG_ALL_LINES = 1000000;
+const LAUNCH_LOG_REFRESH_MS = 2000;
+
+const launchLogViewer = {
+  timer: 0,
+  pinned: true,
+  allMode: false,
+};
+
+function launchLogUrl(kind, lines) {
+  return `/api/launch-log/${encodeURIComponent(kind)}?lines=${lines}`;
+}
+
+function formatBytes(size) {
+  if (!Number.isFinite(size)) return '—';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(2)} MB`;
+}
+
+async function loadLaunchLogMeta(kind) {
+  const download = $('#launch-log-download');
+  download.href = `/api/launch-log/${encodeURIComponent(kind)}?download=1`;
+  download.hidden = true;
+  try {
+    const summary = await api('/api/launch-log');
+    const meta = (summary.files || []).find((item) => item.kind === kind);
+    if (!meta) {
+      $('#launch-log-meta').textContent = '控制台未配置 launch 日志目录。';
+      return;
+    }
+    $('#launch-log-meta').textContent = meta.exists
+      ? `${meta.path} · ${formatBytes(meta.size)} · 更新 ${meta.modified_at || '—'}${launchLogViewer.allMode ? ' · 已显示全部行（自动刷新暂停）' : ' · 每 2 秒自动刷新'}`
+      : `${meta.path} · 尚未生成（还没有通过控制台启动过该 launch）`;
+    download.hidden = !meta.exists;
+  } catch (error) {
+    $('#launch-log-meta').textContent = formatError(error);
+  }
+}
+
+async function loadLaunchLog() {
+  const kind = app.launchLogKind;
+  const content = $('#launch-log-content');
+  // 已在底部（或一直跟随）就贴住底部；用户往上翻阅时保持原位不被拽走。
+  const atBottom = content.scrollHeight - content.scrollTop - content.clientHeight < 40;
+  const pinned = launchLogViewer.pinned || atBottom;
+  loadLaunchLogMeta(kind);
+  content.textContent = '读取中…';
+  try {
+    const text = await api(launchLogUrl(kind, launchLogViewer.allMode ? LAUNCH_LOG_ALL_LINES : LAUNCH_LOG_TAIL_LINES));
+    content.textContent = text || '（暂无输出）';
+  } catch (error) {
+    content.textContent = '';
+    toast('读取 launch 日志失败', formatError(error), 'error');
+  }
+  launchLogViewer.pinned = pinned;
+  if (pinned) content.scrollTop = content.scrollHeight;
+}
+
+function bindLaunchLogs() {
+  const dialog = $('#launch-log-dialog');
+  $('#launch-log-open').addEventListener('click', () => {
+    launchLogViewer.allMode = false;
+    launchLogViewer.pinned = true;
+    launchLogViewer.timer = window.setInterval(() => {
+      // 「显示全部行」时数据量太大，暂停自动刷新，避免每 2 秒重传整份日志。
+      if (!launchLogViewer.allMode) loadLaunchLog();
+    }, LAUNCH_LOG_REFRESH_MS);
+    dialog.showModal();
+    loadLaunchLog();
+  });
+  dialog.addEventListener('close', () => window.clearInterval(launchLogViewer.timer));
+  $('#launch-log-close').addEventListener('click', () => dialog.close());
+  $('#launch-log-refresh').addEventListener('click', () => { launchLogViewer.allMode = false; loadLaunchLog(); });
+  $('#launch-log-all').addEventListener('click', async () => {
+    const content = $('#launch-log-content');
+    launchLogViewer.allMode = true;
+    content.textContent = '读取中…';
+    try {
+      content.textContent = (await api(launchLogUrl(app.launchLogKind, LAUNCH_LOG_ALL_LINES))) || '（暂无输出）';
+    } catch (error) {
+      content.textContent = '';
+      toast('读取完整日志失败', formatError(error), 'error');
+    }
+    loadLaunchLogMeta(app.launchLogKind);
+    content.scrollTop = content.scrollHeight;
+  });
+  $$('.launch-log-tabs button').forEach((button) => button.addEventListener('click', () => {
+    app.launchLogKind = button.dataset.launchLogKind;
+    launchLogViewer.allMode = false;
+    launchLogViewer.pinned = true;
+    $$('.launch-log-tabs button').forEach((item) => item.classList.toggle('active', item === button));
+    loadLaunchLog();
+  }));
+}
+
 function bindExit() {
   $('#exit-panel').addEventListener('click', async () => {
     if (!await confirmAction('显式退出控制台？', '将停止控制台自己启动的感知、硬件和 ROS Master。外部 ROS 进程不会被结束。关闭浏览器本身不会执行这个动作。')) return;
@@ -2172,6 +2270,7 @@ async function initialize() {
   bindConfig();
   bindReadOnly();
   bindLogs();
+  bindLaunchLogs();
   bindExit();
   bindImageZoom();
   bindTaskInteraction();

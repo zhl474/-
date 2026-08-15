@@ -402,6 +402,16 @@ code, .mono { font-family: var(--mono); }
 .log-row.debug { color: #8fa099; }
 .log-row .message { white-space: pre-wrap; overflow-wrap: anywhere; }
 
+.launch-log-tabs { display: flex; gap: 5px; margin-top: 14px; }
+.launch-log-tabs button { padding: 6px 12px; border: 0; border-radius: 7px; color: #8ca097; background: #22312b; font-size: 10px; cursor: pointer; }
+.launch-log-tabs button.active { color: #d9e6e1; background: #2f4a3f; font-weight: 700; }
+.launch-log-meta { margin: 10px 0; color: var(--muted); font: 10px/1.5 var(--mono); word-break: break-all; }
+.launch-log-actions { display: flex; gap: 8px; margin: 0 0 10px; }
+.launch-log-actions a { text-decoration: none; }
+/* 弹窗整体限高，日志区在弹窗内部滚动，保证滚轮始终可用。 */
+.modal.launch-log-dialog[open] { display: flex; flex-direction: column; height: min(86vh, 860px); max-height: calc(100vh - 40px); }
+.launch-log-dialog .launch-log-content { flex: 1; min-height: 120px !important; max-height: none !important; }
+
 .toast-region { position: fixed; z-index: 90; right: 22px; bottom: 22px; display: grid; gap: 8px; width: 360px; }
 .toast { padding: 12px 14px; border: 1px solid var(--line); border-left: 4px solid var(--green); border-radius: 10px; color: #26342f; background: white; box-shadow: 0 12px 32px rgba(20,38,31,.16); animation: toast-in .2s ease; }
 .toast.error { border-left-color: var(--red); }

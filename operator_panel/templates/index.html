@@ -437,6 +437,7 @@
             <label>级别<select id="log-level"><option value="all">全部</option><option value="debug">调试</option><option value="info">信息</option><option value="warning">警告</option><option value="error">错误 / 致命</option></select></label>
             <input id="log-search" type="search" placeholder="搜索来源或消息">
             <label class="switch"><input id="log-autoscroll" type="checkbox" checked><span></span>自动滚动</label>
+            <button id="launch-log-open" class="button ghost compact" type="button">完整日志</button>
             <button id="log-clear" class="button ghost compact" type="button">清空显示</button>
           </div>
         </div>
@@ -506,6 +507,24 @@
       <div class="card-heading"><div><p class="eyebrow">配置差异</p><h2 id="diff-title">修改预览</h2></div><button value="cancel" class="close-button" aria-label="关闭">×</button></div>
       <pre id="diff-content" class="diff-content"></pre>
     </form>
+  </dialog>
+
+  <dialog id="launch-log-dialog" class="modal wide launch-log-dialog" aria-labelledby="launch-log-title">
+    <div class="card-heading">
+      <div><p class="eyebrow">完整终端原始输出</p><h2 id="launch-log-title">launch 运行日志</h2></div>
+      <button id="launch-log-close" class="close-button" type="button" aria-label="关闭">×</button>
+    </div>
+    <div class="launch-log-tabs" role="tablist" aria-label="launch 日志类别">
+      <button type="button" data-launch-log-kind="hardware" class="active">硬件 hardware.launch</button>
+      <button type="button" data-launch-log-kind="runtime">感知 perception.launch</button>
+    </div>
+    <p id="launch-log-meta" class="launch-log-meta">尚未读取</p>
+    <div class="launch-log-actions">
+      <button id="launch-log-refresh" class="button ghost compact" type="button">刷新</button>
+      <button id="launch-log-all" class="button ghost compact" type="button">显示全部行</button>
+      <a id="launch-log-download" class="button ghost compact" href="#" download>下载完整文件</a>
+    </div>
+    <pre id="launch-log-content" class="diff-content launch-log-content"></pre>
   </dialog>
 
   <script type="module" src="{{ url_for('static', filename='js/app.js') }}"></script>

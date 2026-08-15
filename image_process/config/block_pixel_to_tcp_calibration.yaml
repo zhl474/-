@@ -1,5 +1,5 @@
 schema_version: 2
-generation_id: 20260810T125956.902729Z
+generation_id: 20260815T110614.011930Z
 calibration_type: pixel_to_tcp_position
 calibration_subject: block
 description: 高位像素到 TCP XY 模型与独立 TCP Z 平面标定结果
@@ -25,75 +25,71 @@ output:
   unit: mm
   orientation_included: false
 xy_model:
-  name: affine
+  name: homography
   parameters:
-    kind: polynomial
-    degree: 1
-    uv_mean:
-    - 632.0857142857143
-    - 301.4
-    uv_scale:
-    - 440.1788189509591
-    - 165.2717588873377
-    coef:
-    - - -279.6938555036271
-      - 16.631966291155123
-    - - 2.093367755605457
-      - 205.48040456376137
-    - - 76.99205535286441
-      - -0.5166760910721283
-    feature_names:
-    - '1'
-    - u
-    - v
+    kind: homography
+    H:
+    - - 0.0056000735136777675
+      - 0.48135531160854417
+      - -427.01148589968216
+    - - 0.48147829999060304
+      - -0.00016683420269449022
+      - -287.5740722612371
+    - - -7.759134784228286e-06
+      - -2.8604574385231945e-07
+      - 1.0
 z_plane:
   equation: z = a*x + b*y + c
   coefficients:
-  - 0.00047263799278299983
-  - -0.004676791260958879
-  - 205.08322169269078
+  - -0.0007695610669998957
+  - -0.0020084591471372093
+  - 178.54532222600034
   source: external_depth_block_surface_plus_observation_height
 metrics:
   sample_count: 35
   xy_cross_validation:
-    模型: affine
+    模型: homography
     样本数: 35
     折数: 5
-    CV二维RMSE: 0.7355776516274889
-    CV二维MAE: 0.6473173401030922
-    CV二维P95: 1.2336403646963472
-    CV二维最大误差: 1.4637263458902654
-    CV_X_RMSE: 0.5352735247457644
-    CV_Y_RMSE: 0.5045361585457052
-  xy_full_training_rmse_mm: 0.6291641335980526
-  external_depth_z_plane_rmse_mm: 0.4605376890149692
+    CV二维RMSE: 0.6545908165531261
+    CV二维MAE: 0.5900771659462207
+    CV二维P95: 1.0469498145636174
+    CV二维最大误差: 1.1187907097778678
+    CV_X_RMSE: 0.4788753994910473
+    CV_Y_RMSE: 0.44628184914690205
+  xy_full_training_rmse_mm: 0.5743661516492812
+  external_depth_z_plane_rmse_mm: 0.5344511829573731
 coverage:
   sample_count: 35
   pixel_range:
     u:
-    - 44.0
-    - 1210.0
+    - 93.0
+    - 1189.0
     v:
-    - 48.0
-    - 558.0
+    - 22.0
+    - 547.0
   pixel_convex_hull:
-  - - 1210.0
-    - 199.0
-  - - 1194.0
-    - 534.0
-  - - 1054.0
-    - 552.0
-  - - 907.0
-    - 558.0
-  - - 85.0
-    - 556.0
-  - - 44.0
-    - 264.0
-  - - 120.0
+  - - 1189.0
+    - 403.0
+  - - 1179.0
+    - 499.0
+  - - 1004.0
+    - 547.0
+  - - 217.0
+    - 546.0
+  - - 135.0
+    - 483.0
+  - - 93.0
+    - 257.0
+  - - 178.0
+    - 40.0
+  - - 337.0
+    - 22.0
+  - - 1026.0
+    - 40.0
+  - - 1145.0
     - 48.0
-  - - 1095.0
-    - 56.0
-  - - 1184.0
-    - 81.0
+  - - 1177.0
+    - 215.0
   extrapolation_policy: diagnostic_only
 usage_note: 正式运行仅使用离线 XY 模型和独立 Z 平面，不查询深度相机。

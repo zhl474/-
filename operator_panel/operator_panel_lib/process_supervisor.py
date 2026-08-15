@@ -1,7 +1,9 @@
 """仅允许固定 roslaunch 的后台进程管理。"""
 
+from collections import deque
 from datetime import datetime
 import os
+from pathlib import Path
 import re
 import signal
 import subprocess
@@ -10,6 +12,66 @@ import time
 
 
 ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
+
+LAUNCH_LOG_FILES = {
+    "hardware": "hardware.launch.log",
+    "runtime": "perception.launch.log",
+}
+
+
+def tail_lines(path, count):
+    """读取文件最后 count 行；大文件也不会整个载入内存。"""
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        return "".join(deque(handle, maxlen=max(1, int(count))))
+
+
+class LaunchLogFile:
+    """把 launch 原始输出逐行追加到文件；失败只告警一次，不影响进程。"""
+
+    def __init__(self, path, event_bus, kind):
+        self.event_bus = event_bus
+        self.kind = kind
+        self._handle = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._handle = path.open("a", encoding="utf-8", errors="replace")
+        except Exception as exc:
+            self._warn(f"无法打开 launch 日志文件 {path}：{exc}；本次运行不落盘。")
+
+    def _warn(self, message):
+        self.event_bus.publish("log", {
+            "source": f"launch:{self.kind}", "level": "warning", "message": message,
+        })
+
+    def append(self, line):
+        handle = self._handle
+        if handle is None:
+            return
+        try:
+            handle.write(line + "\n")
+            handle.flush()
+        except Exception as exc:
+            self._handle = None
+            try:
+                handle.close()
+            except Exception:
+                pass
+            self._warn(f"写入 launch 日志失败：{exc}；已停止落盘。")
+
+    def finish(self, note):
+        handle = self._handle
+        if handle is None:
+            return
+        self._handle = None
+        try:
+            handle.write(note + "\n")
+            handle.flush()
+        except Exception as exc:
+            self._warn(f"写入 launch 日志结束行失败：{exc}。")
+        try:
+            handle.close()
+        except Exception:
+            pass
 
 
 class ProcessConflict(RuntimeError):
@@ -31,6 +93,7 @@ class ProcessSupervisor:
         node_provider=None,
         popen_factory=None,
         state_callback=None,
+        launch_log_dir=None,
     ):
         self.event_bus = event_bus
         self.debug_output_dir = str(debug_output_dir)
@@ -39,6 +102,7 @@ class ProcessSupervisor:
         self.node_provider = node_provider or (lambda: set())
         self.popen_factory = popen_factory or subprocess.Popen
         self.state_callback = state_callback
+        self.launch_log_dir = Path(launch_log_dir) if launch_log_dir else None
         self._lock = threading.RLock()
         self._processes = {"hardware": None, "runtime": None}
         self._requested_stop = {"hardware": False, "runtime": False}
@@ -67,11 +131,23 @@ class ProcessSupervisor:
             except Exception:
                 pass
 
-    def _read_output(self, kind, process):
+    def _open_launch_log(self, kind, command, pid):
+        """为一次 launch 打开追加日志文件并写头部分隔行；未配置则返回 None。"""
+        if self.launch_log_dir is None:
+            return None
+        log_file = LaunchLogFile(
+            self.launch_log_dir / LAUNCH_LOG_FILES[kind], self.event_bus, kind
+        )
+        log_file.append(f"===== {self._now()} 启动 {' '.join(command)} (pid {pid}) =====")
+        return log_file
+
+    def _read_output(self, kind, process, log_file):
         try:
             for raw_line in iter(process.stdout.readline, ""):
                 line = ANSI_PATTERN.sub("", raw_line.rstrip())
                 if line:
+                    if log_file is not None:
+                        log_file.append(line)
                     self.event_bus.publish("log", {
                         "source": f"launch:{kind}",
                         "level": self._level(line),
@@ -85,8 +161,11 @@ class ProcessSupervisor:
                 "message": f"读取 launch 输出失败：{exc}",
             })
 
-    def _watch(self, kind, process):
+    def _watch(self, kind, process, log_file, reader):
         return_code = process.wait()
+        # 先等读线程把管道里剩余输出写完，结束行才不会插到输出前面。
+        if reader is not None:
+            reader.join(timeout=2.0)
         with self._lock:
             requested = bool(self._requested_stop.get(kind))
             if self._processes.get(kind) is process:
@@ -94,6 +173,11 @@ class ProcessSupervisor:
                 if kind == "runtime":
                     self._modes["runtime"] = None
             self._requested_stop[kind] = False
+        if log_file is not None:
+            note = "控制台主动停止" if requested else "自行退出"
+            log_file.finish(
+                f"===== {self._now()} 进程{note}，返回码 {int(return_code)} ====="
+            )
         self.event_bus.publish("process", {
             "kind": kind,
             "running": False,
@@ -135,12 +219,14 @@ class ProcessSupervisor:
             self._started_at[kind] = self._now()
             if kind == "runtime":
                 self._modes["runtime"] = mode
-        threading.Thread(
-            target=self._read_output, args=(kind, process),
+        log_file = self._open_launch_log(kind, command, process.pid)
+        reader = threading.Thread(
+            target=self._read_output, args=(kind, process, log_file),
             name=f"{kind}-launch-output", daemon=True,
-        ).start()
+        )
+        reader.start()
         threading.Thread(
-            target=self._watch, args=(kind, process),
+            target=self._watch, args=(kind, process, log_file, reader),
             name=f"{kind}-launch-watch", daemon=True,
         ).start()
         self.event_bus.publish("process", {

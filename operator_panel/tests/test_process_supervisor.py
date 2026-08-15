@@ -1,5 +1,6 @@
 import io
 import threading
+import time
 
 import pytest
 
@@ -59,3 +60,37 @@ def test外部节点冲突时不启动也不结束外部节点():
     with pytest.raises(ProcessConflict, match="外部 ROS 节点"):
         supervisor.start_hardware()
     assert called == []
+
+
+def testlaunch原始输出按类别完整落盘(tmp_path):
+    def popen(_command, **_kwargs):
+        process = FakeProcess()
+        process.stdout = io.StringIO("[INFO] 节点输出一行\n[WARN] 节点输出两行\n")
+        return process
+
+    supervisor = ProcessSupervisor(
+        EventBus(), "/tmp", "/tmp", launch_log_dir=tmp_path, popen_factory=popen,
+    )
+    supervisor.start_hardware()
+    supervisor.start_runtime("formal")
+
+    def wait_footer(path):
+        deadline = time.monotonic() + 5.0
+        content = ""
+        while time.monotonic() < deadline:
+            if path.is_file():
+                content = path.read_text(encoding="utf-8")
+                if "返回码" in content:
+                    break
+            time.sleep(0.02)
+        return content
+
+    hardware = wait_footer(tmp_path / "hardware.launch.log")
+    assert "roslaunch competition hardware.launch" in hardware
+    assert "[INFO] 节点输出一行" in hardware
+    assert "[WARN] 节点输出两行" in hardware
+    assert "返回码 0" in hardware
+
+    perception = wait_footer(tmp_path / "perception.launch.log")
+    assert "perception.launch" in perception
+    assert "返回码 0" in perception

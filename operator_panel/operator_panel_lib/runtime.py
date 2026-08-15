@@ -83,6 +83,11 @@ class PanelRuntime:
         self.config = panel_config
         self.state_dir = _state_dir()
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        # launch 原始输出落盘目录；配置缺省时回退到状态目录。
+        self.launch_log_dir = Path(
+            self.config["output"].get("launch_log_dir")
+            or (self.state_dir / "launch_logs")
+        )
         self.event_bus = EventBus(capacity=3000)
         self.store = StateStore(self.state_dir / "panel.sqlite3")
         self.config_manager = ConfigManager(self.store, self.state_dir)
@@ -98,6 +103,7 @@ class PanelRuntime:
             servo_csv_output_dir=self.config["output"]["servo_csv_output_dir"],
             process_stop_seconds=self.config["timeouts"]["process_stop_seconds"],
             node_provider=self.ros.node_names,
+            launch_log_dir=self.launch_log_dir,
         )
         self.coordinator = OperationCoordinator(
             self.event_bus, self.supervisor, self.ros,
@@ -109,7 +115,7 @@ class PanelRuntime:
         self.supervisor.state_callback = self.coordinator.on_process_state
         self.app = create_app(
             self.coordinator, self.event_bus, self.config_manager,
-            self.ros, self.config,
+            self.ros, self.config, launch_log_dir=self.launch_log_dir,
         )
         self.server = None
         self.roscore_process = None

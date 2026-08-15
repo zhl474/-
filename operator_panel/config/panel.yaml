@@ -26,3 +26,5 @@ timeouts:
 output:
   debug_output_dir: /home/zhl/桌面
   servo_csv_output_dir: /home/zhl/桌面/标定数据
+  # hardware.launch / perception.launch 的完整原始输出追加写到这里，网页「完整日志」和终端 tail -F 都看这个目录
+  launch_log_dir: /home/zhl/桌面/运行日志

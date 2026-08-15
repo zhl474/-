@@ -1,5 +1,6 @@
 """Flask HTTP、SSE 与固定图片白名单接口。"""
 
+from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
@@ -22,9 +23,16 @@ from .config_manager import (
 )
 from .constants import DEBUG_IMAGE_FILES, PACKAGE_DIR
 from .coordinator import OperationBusy, OperationRejected
+from .process_supervisor import LAUNCH_LOG_FILES, tail_lines
 
 
-def create_app(coordinator, event_bus, config_manager, ros_gateway, panel_config, page_token=None):
+LAUNCH_LOG_LABELS = {"hardware": "硬件", "runtime": "感知"}
+
+
+def create_app(
+    coordinator, event_bus, config_manager, ros_gateway, panel_config,
+    page_token=None, launch_log_dir=None,
+):
     """创建 Web 应用；默认仅信任本机，通配监听时信任任意带正确端口的访问来源。"""
     token = page_token or secrets.token_urlsafe(32)
     host = str(panel_config["server"]["host"])
@@ -370,6 +378,46 @@ def create_app(coordinator, event_bus, config_manager, ros_gateway, panel_config
         return jsonify(coordinator.deploy_hand_eye(
             payload.get("matrix"), confirmed=payload.get("confirmed", False)
         )), 202
+
+    @app.get("/api/launch-log")
+    def list_launch_logs():
+        files = []
+        if launch_log_dir is not None:
+            root = Path(launch_log_dir)
+            for kind in ("hardware", "runtime"):
+                path = root / LAUNCH_LOG_FILES[kind]
+                stat = path.stat() if path.is_file() else None
+                files.append({
+                    "kind": kind,
+                    "label": LAUNCH_LOG_LABELS[kind],
+                    "file": LAUNCH_LOG_FILES[kind],
+                    "path": str(path),
+                    "exists": stat is not None,
+                    "size": stat.st_size if stat else 0,
+                    "modified_at": (
+                        datetime.fromtimestamp(stat.st_mtime).astimezone()
+                        .isoformat(timespec="seconds") if stat else ""
+                    ),
+                })
+        return jsonify({"dir": str(launch_log_dir or ""), "files": files})
+
+    @app.get("/api/launch-log/<kind>")
+    def get_launch_log(kind):
+        if launch_log_dir is None or kind not in LAUNCH_LOG_LABELS:
+            return jsonify({"error": "日志类别不存在", "code": "not_found"}), 404
+        path = Path(launch_log_dir) / LAUNCH_LOG_FILES[kind]
+        if not path.is_file():
+            return jsonify({"error": "日志尚未生成", "code": "log_unavailable"}), 404
+        if request.args.get("download") == "1":
+            return send_file(
+                str(path), as_attachment=True, mimetype="text/plain", max_age=0
+            )
+        try:
+            lines = int(request.args.get("lines", 5000))
+        except ValueError:
+            raise ValueError("lines 必须是整数")
+        text = tail_lines(path, max(1, min(lines, 1_000_000)))
+        return Response(text, mimetype="text/plain; charset=utf-8")
 
     @app.get("/api/images/<image_id>")
     def get_image(image_id):

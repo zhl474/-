@@ -8,13 +8,13 @@ models:
 
 # 固定盘面最短摆放方案 V1。shadow 计算并记录新方案，但仍执行旧匈牙利方案。
 task_sequence_optimizer:
-  mode: execute           # legacy / shadow / execute
+  mode: legacy            # legacy / shadow / execute
   beam_width: 5000
   report_top_candidates: 20
 
 # 普通 260 分任务的 V5 动态盘面选择。shadow 完整计算并记录，但仍执行固定 YAML。
 dynamic_board_selection:
-  mode: execute                 # disabled / shadow / execute
+  mode: disabled                # disabled / shadow / execute
   library_path: image_process/config/v5_board_library_v1.npz
   coarse_top_k: 1000
   final_candidate_k: 100
@@ -90,7 +90,7 @@ calibration_depth:
   # 托盘 TCP 平面相对于方块低位观察 TCP 平面的有符号高度差，不是物理表面高度差。
   # 对任意相同机器人 XY：Z_tray(X,Y)=Z_block_observation(X,Y)-该值；正数表示托盘更低，负数表示托盘更高。
   # 托盘深度只提供粗定位 X/Y，其深度 Z 无论如何波动都不会改变这里计算出的托盘 TCP Z。
-  tray_tcp_below_block_observation_mm: 7.0
+  tray_tcp_below_block_observation_mm: -9.0
 
 high_tcp_localization:
   # 当前模式下实际准备运动到的 TCP 必须落在实测安全 XY 范围内：

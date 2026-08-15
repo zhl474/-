@@ -112,7 +112,8 @@ def web(tmp_path):
     coordinator = FakeCoordinator()
     bus = EventBus()
     app = create_app(
-        coordinator, bus, FakeConfigManager(), FakeRos(), config, page_token="测试令牌"
+        coordinator, bus, FakeConfigManager(), FakeRos(), config,
+        page_token="测试令牌", launch_log_dir=tmp_path / "运行日志",
     )
     app.config["TESTING"] = True
     return app.test_client(), coordinator, bus, tmp_path
@@ -299,6 +300,32 @@ def testSSE发送重连间隔和状态事件(web):
     event_chunk = next(iterator)
     assert b"event: state" in event_chunk
     response.close()
+
+
+def testlaunch日志接口列出文件并返回尾部内容(web):
+    client, _coordinator, _bus, tmp_path = web
+    log_dir = tmp_path / "运行日志"
+    log_dir.mkdir()
+    (log_dir / "perception.launch.log").write_text("行一\n行二\n行三\n", encoding="utf-8")
+
+    listed = client.get("/api/launch-log", **url("x"))
+    assert listed.status_code == 200
+    files = {item["kind"]: item for item in listed.get_json()["files"]}
+    assert files["hardware"]["exists"] is False
+    assert files["runtime"]["exists"] is True
+    assert files["runtime"]["path"].endswith("perception.launch.log")
+
+    content = client.get("/api/launch-log/runtime?lines=2", **url("x"))
+    assert content.status_code == 200
+    assert content.get_data(as_text=True) == "行二\n行三\n"
+
+    download = client.get("/api/launch-log/runtime?download=1", **url("x"))
+    assert download.status_code == 200
+    assert download.get_data(as_text=True) == "行一\n行二\n行三\n"
+
+    assert client.get("/api/launch-log/runtime?lines=abc", **url("x")).status_code == 400
+    assert client.get("/api/launch-log/任意类别", **url("x")).status_code == 404
+    assert client.get("/api/launch-log/hardware", **url("x")).status_code == 404
 
 
 @pytest.fixture
