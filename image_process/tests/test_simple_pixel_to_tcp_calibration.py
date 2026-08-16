@@ -262,3 +262,79 @@ def test_pair_analysis_removes_both_candidates_when_block_depth_gate_fails(tmp_p
 
     assert not block_path.exists()
     assert not tray_path.exists()
+
+
+def _fixed_z_rows(subject, count=34):
+    """构造固定 Z 模式采集的 CSV 行：目标 Z 全为常数，深度 Z 只留诊断。"""
+    rows = []
+    for index in range(count):
+        row_index, column_index = divmod(index, 7)
+        pixel_x = 100.0 + column_index * 31.0
+        pixel_y = 80.0 + row_index * 37.0
+        tcp_x = 0.45 * pixel_x - 0.12 * pixel_y - 300.0
+        tcp_y = -0.08 * pixel_x + 0.52 * pixel_y - 35.0
+        if subject == "block":
+            target_z = 173.46
+            world_z = 13.0  # 深度表面 Z 与固定值偏差仅作诊断
+            source = "stable_depth_xyz"
+            depth_mad = 0.2
+            category = f"测试类别{index % 7}"
+        else:
+            target_z = 182.46
+            world_z = 14.0
+            source = "stable_depth_xy_fixed_z"
+            depth_mad = 20.0
+            category = ""
+        rows.append({
+            "方块类别": category,
+            "事件": "伺服成功",
+            "目标类型": "方块" if subject == "block" else "托盘",
+            "高位检测像素X": pixel_x,
+            "高位检测像素Y": pixel_y,
+            "高位世界坐标Z": world_z,
+            "深度有效帧数": 15,
+            "深度MAD毫米": depth_mad,
+            "粗定位来源": source,
+            "标定目标TCP位置Z": target_z,
+            "实测TCP位置X": tcp_x,
+            "实测TCP位置Y": tcp_y,
+            "实测TCP位置Z": target_z,
+        })
+    return rows
+
+
+def test_pair_analysis_fixed_z_mode_writes_constant_planes(tmp_path):
+    """固定 Z 模式：z_plane 直接写常数，不拟合深度斜面；旧深度强校验被跳过。"""
+    block_job = _make_job(tmp_path, "block", _fixed_z_rows("block"))
+    tray_job = _make_job(tmp_path, "tray", _fixed_z_rows("tray"))
+
+    assert analyze_calibration_pair(block_job, tray_job) is True
+
+    block_path = block_job.output_dir / block_job.calibration_filename
+    tray_path = tray_job.output_dir / tray_job.calibration_filename
+    block_document = yaml.safe_load(block_path.read_text(encoding="utf-8"))
+    tray_document = yaml.safe_load(tray_path.read_text(encoding="utf-8"))
+    assert block_document["z_plane"]["coefficients"] == [0.0, 0.0, 173.46]
+    assert tray_document["z_plane"]["coefficients"] == [0.0, 0.0, 182.46]
+    assert block_document["z_plane"]["source"] == "fixed_constant_block_observation_z"
+    assert tray_document["z_plane"]["source"] == "fixed_constant_tray_z"
+    # 固定模式不写托盘派生偏移字段。
+    assert "tray_tcp_below_block_observation_mm" not in tray_document["z_plane"]
+    report = json.loads(
+        (block_job.output_dir / "标定检查报告.json").read_text(encoding="utf-8")
+    )
+    assert report["固定Z深度诊断"]["深度表面Z减固定表面Z均值_mm"] == pytest.approx(
+        13.0 - (173.46 - 167.0), abs=1e-9
+    )
+
+
+def test_pair_analysis_fixed_z_mode_rejects_non_constant_target_z(tmp_path):
+    """固定 Z 模式下目标 Z 不是常数时必须拒绝，防止用错批次的 CSV 生成标定。"""
+    block_job = _make_job(tmp_path, "block", _fixed_z_rows("block", count=34))
+    tray_job = _make_job(tmp_path, "tray", _fixed_z_rows("tray"))
+    rows = _fixed_z_rows("block")
+    rows[0]["标定目标TCP位置Z"] = 180.0
+    block_job = _make_job(tmp_path, "block", rows)
+
+    assert analyze_calibration_pair(block_job, tray_job) is False
+    assert not (block_job.output_dir / block_job.calibration_filename).exists()

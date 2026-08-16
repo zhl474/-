@@ -2445,8 +2445,14 @@ def test_stable_depth_query_forwards_capture_timeout(monkeypatch):
 
 def test_calibration_targets_reject_block_depth_mad_before_motion(monkeypatch):
     module = _load_process_module_with_stubs(monkeypatch, "process_depth_mad_gate")
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
     processor = object.__new__(module.ImageProcessor)
     processor.block_depth_max_mad_mm = 1.0
+    # 深度模式（不传固定 Z）：MAD 门禁仍然生效。
+    processor.depth_rough_localizer = image_node_module.DepthRoughLocalizer(
+        [-250.0, 0.0, 380.0, 0.0, 0.0, 0.0],
+        np.eye(4),
+    )
     processor._placement_specs = lambda _layout: []
     processor._query_stable_world_points = lambda _pixels: [{
         "pixel": (100.0, 100.0),
@@ -2518,6 +2524,7 @@ def test_calibrated_height_rejects_low_final_pick_z_during_high_preparation(monk
 
 def _calibration_prep_processor(module):
     """构造标定准备编排测试用的轻量图像节点。"""
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
     processor = object.__new__(module.ImageProcessor)
     processor.calibration_mode = True
     processor.fresh_image_timeout_sec = 0.5
@@ -2526,6 +2533,11 @@ def _calibration_prep_processor(module):
     processor.board_grid_image_shape = None
     processor.board_grid_image = None
     processor.block_plane_max_rmse_mm = 1.0
+    # 深度模式（不传固定 Z）：平面拟合门禁在这些编排测试中保持生效。
+    processor.depth_rough_localizer = image_node_module.DepthRoughLocalizer(
+        [-250.0, 0.0, 380.0, 0.0, 0.0, 0.0],
+        np.eye(4),
+    )
     processor.get_image_snapshot_newer_than = lambda _stamp: np.zeros(
         (6, 8, 3),
         dtype=np.uint8,
@@ -3128,3 +3140,83 @@ def test_dynamic_execute_speed_mismatch_can_be_confirmed_for_low_speed_test(
     assert prompt_calls[0]["allow_continue"] is True
     assert processor.dynamic_reports[-1]["human_failure_choice"] == "continue_dynamic"
     assert "人工忽略" in response.message
+
+
+def test_calibration_mode_uses_fixed_tcp_z_when_enabled(monkeypatch, tmp_path):
+    """标定模式与正式模式共用 fixed_tcp_z：深度只提供 XY，Z 用常数。"""
+    module = _load_process_module_with_stubs(monkeypatch, "process_calibration_fixed_z")
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    execution_data = yaml.safe_load(
+        open(image_node_module.EXECUTION_CONFIG_PATH, "r", encoding="utf-8")
+    )
+    execution_path = tmp_path / "execution.yaml"
+    execution_path.write_text(
+        yaml.safe_dump(execution_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(image_node_module, "EXECUTION_CONFIG_PATH", str(execution_path))
+    monkeypatch.setattr(
+        image_node_module.rospy,
+        "get_param",
+        lambda name, default=None: True if name == "~calibration_mode" else default,
+    )
+    monkeypatch.setattr(image_node_module.np, "load", lambda _path: np.eye(4))
+    monkeypatch.setattr(image_node_module, "YOLO", lambda _path: object())
+    monkeypatch.setattr(
+        image_node_module.rospy, "Subscriber", lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        image_node_module.rospy, "Service", lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        image_node_module.rospy, "on_shutdown", lambda _callback: None, raising=False,
+    )
+
+    class StableWorldPointsClient:
+        def wait_for_service(self):
+            return None
+
+    stable_world_points_client = StableWorldPointsClient()
+    monkeypatch.setattr(image_node_module.rospy, "ServiceProxy", lambda *_a, **_k: stable_world_points_client)
+
+    processor = module.ImageProcessor()
+
+    # 真实 perception.yaml 已开启 fixed_tcp_z，标定模式定位器必须拿到同一组常数。
+    fixed_tcp_z = processor.depth_rough_localizer.fixed_tcp_z_mm
+    assert fixed_tcp_z is not None
+    assert fixed_tcp_z["block"] == pytest.approx(173.46)
+    assert fixed_tcp_z["tray"] == pytest.approx(182.46)
+
+    # 方块：观察位 Z=B、表面 Z=B−h、抓取校验 B−h+o 全部用常数，深度 Z 不参与。
+    blocks = [{"category": "square", "px": 400.0, "py": 300.0, "theta": 0.0}]
+    samples = [{
+        "pixel": (400.0, 300.0),
+        "world": np.array([-260.0, 30.0, 13.0]),  # 深度 Z=13（偏高），固定模式必须忽略
+        "valid_count": 10,
+        "depth_median_mm": 1_000.0,
+        "depth_mad_mm": 0.1,
+    }]
+    observed = processor._build_calibration_block_observed(blocks, samples, (640, 480))
+    block = observed[0]
+    assert block.observation_pose[2] == pytest.approx(173.46)
+    assert block.pick_surface_z_mm == pytest.approx(173.46 - 167.0)
+    assert block.calibration_target_tcp_z_mm == pytest.approx(173.46)
+
+    # 托盘：Z=T 常数，来源标注固定 Z，不再依赖方块平面。
+    specs = [({"index": 0, "row": 5.0, "col": 5.0, "angle_deg": 0.0, "category": ""}, (500.0, 300.0))]
+    tray_samples = [{
+        "pixel": (500.0, 300.0),
+        "world": np.array([-200.0, 60.0, 14.0]),
+        "valid_count": 10,
+        "depth_median_mm": 1_000.0,
+        "depth_mad_mm": 0.1,
+    }]
+    targets = processor._build_calibration_tray_targets(
+        specs, tray_samples, block_plane=None, image_shape=(640, 480)
+    )
+    tray = targets[0]
+    assert tray.observation_pose[2] == pytest.approx(182.46)
+    assert tray.calibration_target_tcp_z_mm == pytest.approx(182.46)
+    assert tray.rough_localization_source == "stable_depth_xy_fixed_z"
+    # XY 仍来自深度世界坐标（减相机偏移）。
+    assert tray.observation_pose[0] != 0.0

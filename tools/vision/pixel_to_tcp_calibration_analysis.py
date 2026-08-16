@@ -1377,15 +1377,27 @@ def analyze_calibration_pair(block_job, tray_job) -> bool:
         observation_height_mm = float(
             perception.get("pick_height", {}).get("block_observation_height_mm", 192.0)
         )
+        fixed_z = perception.get("high_tcp_localization", {}).get("fixed_tcp_z", {})
+        fixed_z_enabled = bool(fixed_z.get("enabled", False))
+        fixed_block_z_mm = (
+            float(fixed_z["block_observation_z_mm"]) if fixed_z_enabled else None
+        )
+        fixed_tray_z_mm = float(fixed_z["tray_z_mm"]) if fixed_z_enabled else None
 
         block_rows, reports["block"] = _read_v2_success_rows(block_job)
         tray_rows, reports["tray"] = _read_v2_success_rows(tray_job)
         if not (block_rows[COL_SOURCE] == "stable_depth_xyz").all():
             raise ValueError("方块 CSV 粗定位来源必须全部为 stable_depth_xyz")
-        if not (
-            tray_rows[COL_SOURCE] == "stable_depth_xy_block_plane_z"
-        ).all():
-            raise ValueError("托盘 CSV 粗定位来源必须全部为 stable_depth_xy_block_plane_z")
+        expected_tray_source = (
+            "stable_depth_xy_fixed_z" if fixed_z_enabled else "stable_depth_xy_block_plane_z"
+        )
+        if not (tray_rows[COL_SOURCE] == expected_tray_source).all():
+            expected_text = (
+                "stable_depth_xy_fixed_z（固定 Z 模式采集）"
+                if fixed_z_enabled
+                else "stable_depth_xy_block_plane_z（深度平面模式采集）"
+            )
+            raise ValueError(f"托盘 CSV 粗定位来源必须全部为 {expected_text}")
         if (block_rows[COL_DEPTH_VALID_COUNT] < min_valid_frames).any():
             raise ValueError("方块 CSV 存在有效深度帧数不足的记录")
         if (tray_rows[COL_DEPTH_VALID_COUNT] < min_valid_frames).any():
@@ -1397,44 +1409,92 @@ def analyze_calibration_pair(block_job, tray_job) -> bool:
                 f"方块最大深度 MAD={maximum_block_mad:.6g} mm "
                 f"超过阈值 {block_max_mad_mm} mm"
             )
-        block_depth_target_z = (
-            block_rows[COL_WORLD_Z].to_numpy(dtype=float) + observation_height_mm
-        )
-        if not np.allclose(
-            block_rows[COL_TARGET_Z].to_numpy(dtype=float),
-            block_depth_target_z,
-            rtol=0.0,
-            atol=1e-6,
-        ):
-            raise ValueError(
-                "方块标定目标 TCP Z 必须严格等于深度表面世界 Z 加 "
-                f"{observation_height_mm:.3f} mm"
+        block_target_z = block_rows[COL_TARGET_Z].to_numpy(dtype=float)
+        if fixed_z_enabled:
+            # 固定 Z 模式：采集时目标 Z 全部是常数，验证与当前配置一致；
+            # 深度表面 Z 与固定值的偏差仅作诊断对照，不再参与门禁。
+            if not np.allclose(
+                block_target_z,
+                fixed_block_z_mm,
+                rtol=0.0,
+                atol=1e-6,
+            ):
+                raise ValueError(
+                    "固定 Z 模式下方块标定目标 TCP Z 必须全部等于配置的 "
+                    f"fixed_tcp_z.block_observation_z_mm={fixed_block_z_mm:.3f} mm"
+                )
+            if not np.allclose(
+                tray_rows[COL_TARGET_Z].to_numpy(dtype=float),
+                fixed_tray_z_mm,
+                rtol=0.0,
+                atol=1e-6,
+            ):
+                raise ValueError(
+                    "固定 Z 模式下托盘标定目标 TCP Z 必须全部等于配置的 "
+                    f"fixed_tcp_z.tray_z_mm={fixed_tray_z_mm:.3f} mm"
+                )
+            depth_bias = float(
+                np.mean(
+                    block_rows[COL_WORLD_Z].to_numpy(dtype=float)
+                    - (fixed_block_z_mm - observation_height_mm)
+                )
             )
+            reports["block"]["固定Z深度诊断"] = {
+                "深度表面Z减固定表面Z均值_mm": depth_bias,
+                "说明": "正值表示深度测得表面偏高，该偏差不参与标定生成",
+            }
+        else:
+            block_depth_target_z = (
+                block_rows[COL_WORLD_Z].to_numpy(dtype=float) + observation_height_mm
+            )
+            if not np.allclose(
+                block_target_z,
+                block_depth_target_z,
+                rtol=0.0,
+                atol=1e-6,
+            ):
+                raise ValueError(
+                    "方块标定目标 TCP Z 必须严格等于深度表面世界 Z 加 "
+                    f"{observation_height_mm:.3f} mm"
+                )
 
         block_xy = block_rows[COL_TCP_XY].to_numpy(dtype=float)
-        block_target_z = block_rows[COL_TARGET_Z].to_numpy(dtype=float)
-        block_z_coefficients, block_z_residuals, block_z_rmse = fit_vertical_z_plane(
-            block_xy,
-            block_target_z,
-        )
-        reports["block"]["外部深度Z平面"] = {
-            "系数_a_b_c": block_z_coefficients.tolist(),
-            "RMSE_mm": block_z_rmse,
-            "最大绝对残差_mm": float(np.max(np.abs(block_z_residuals))),
-            "门禁_mm": block_plane_max_rmse_mm,
-        }
-        if block_z_rmse > block_plane_max_rmse_mm:
-            raise ValueError(
-                f"方块外部深度 Z 平面 RMSE={block_z_rmse:.6g} mm "
-                f"超过阈值 {block_plane_max_rmse_mm} mm"
+        if fixed_z_enabled:
+            # 固定 Z 模式：z_plane 直接写常数，不拟合（与正式运行链路一致）。
+            block_z_coefficients = np.asarray([0.0, 0.0, fixed_block_z_mm], dtype=float)
+            block_z_rmse = 0.0
+            reports["block"]["固定Z平面"] = {
+                "系数_a_b_c": block_z_coefficients.tolist(),
+                "来源": "fixed_constant_block_observation_z",
+            }
+            tray_z_coefficients = np.asarray([0.0, 0.0, fixed_tray_z_mm], dtype=float)
+            reports["tray"]["固定Z平面"] = {
+                "系数_a_b_c": tray_z_coefficients.tolist(),
+                "来源": "fixed_constant_tray_z",
+            }
+        else:
+            block_z_coefficients, block_z_residuals, block_z_rmse = fit_vertical_z_plane(
+                block_xy,
+                block_target_z,
             )
-        tray_z_coefficients = block_z_coefficients.copy()
-        tray_z_coefficients[2] -= tray_offset_mm
-        reports["tray"]["Z平面来源"] = {
-            "来源": "方块观察TCP平面",
-            "向下控制偏移_mm": tray_offset_mm,
-            "系数_a_b_c": tray_z_coefficients.tolist(),
-        }
+            reports["block"]["外部深度Z平面"] = {
+                "系数_a_b_c": block_z_coefficients.tolist(),
+                "RMSE_mm": block_z_rmse,
+                "最大绝对残差_mm": float(np.max(np.abs(block_z_residuals))),
+                "门禁_mm": block_plane_max_rmse_mm,
+            }
+            if block_z_rmse > block_plane_max_rmse_mm:
+                raise ValueError(
+                    f"方块外部深度 Z 平面 RMSE={block_z_rmse:.6g} mm "
+                    f"超过阈值 {block_plane_max_rmse_mm} mm"
+                )
+            tray_z_coefficients = block_z_coefficients.copy()
+            tray_z_coefficients[2] -= tray_offset_mm
+            reports["tray"]["Z平面来源"] = {
+                "来源": "方块观察TCP平面",
+                "向下控制偏移_mm": tray_offset_mm,
+                "系数_a_b_c": tray_z_coefficients.tolist(),
+            }
 
         fitted = {}
         for job, rows in ((block_job, block_rows), (tray_job, tray_rows)):
@@ -1447,13 +1507,21 @@ def analyze_calibration_pair(block_job, tray_job) -> bool:
             uv, name, model, summary, training_rmse = fitted[job.subject]
             if job.subject == "block":
                 z_coefficients = block_z_coefficients
-                z_source = "external_depth_block_surface_plus_observation_height"
+                z_source = (
+                    "fixed_constant_block_observation_z"
+                    if fixed_z_enabled
+                    else "external_depth_block_surface_plus_observation_height"
+                )
                 offset = None
-                plane_rmse = block_z_rmse
+                plane_rmse = None if fixed_z_enabled else block_z_rmse
             else:
                 z_coefficients = tray_z_coefficients
-                z_source = "derived_from_block_observation_tcp_plane"
-                offset = tray_offset_mm
+                z_source = (
+                    "fixed_constant_tray_z"
+                    if fixed_z_enabled
+                    else "derived_from_block_observation_tcp_plane"
+                )
+                offset = None if fixed_z_enabled else tray_offset_mm
                 plane_rmse = None
             documents[job.subject] = build_v2_document(
                 job,

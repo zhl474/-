@@ -1962,7 +1962,17 @@ async function loadReadOnly() {
   const container = $('#readonly-content');
   container.replaceChildren();
   try {
-    const result = await api('/api/read-only-config');
+    const [result, chainResult] = await Promise.all([
+      api('/api/read-only-config'),
+      api('/api/localization-z-chain').then((chain) => ({ chain }), (error) => ({ chainError: error })),
+    ]);
+    if (chainResult.chain) {
+      container.append(renderZChain(chainResult.chain));
+    } else {
+      const chainCard = document.createElement('article'); chainCard.className = 'card empty-state';
+      chainCard.textContent = `定位 Z 链路读取失败：${formatError(chainResult.chainError)}`;
+      container.append(chainCard);
+    }
     const liveBoard = app.state?.task?.board;
     let renderedLive = false;
     if (liveBoard?.targets?.length) {
@@ -1985,6 +1995,74 @@ async function loadReadOnly() {
   } catch (error) {
     const card = document.createElement('article'); card.className = 'card empty-state'; card.textContent = `读取失败：${formatError(error)}`; container.append(card);
   }
+}
+
+function formatZChainValue(value) {
+  if (value === null || value === undefined) return '—';
+  if (typeof value === 'object') return `${Number(value.min).toFixed(2)} ~ ${Number(value.max).toFixed(2)}`;
+  return Number(value).toFixed(2);
+}
+
+function renderZChain(data) {
+  const card = document.createElement('article'); card.className = 'card calibration-card z-chain-card';
+  const top = document.createElement('div'); top.className = 'card-heading';
+  top.append(heading('定位 Z 计算链路', data.mode_label || ''));
+  const badge = document.createElement('span');
+  badge.className = 'state-badge';
+  badge.textContent = data.mode === 'fixed_constant' ? '固定 Z' : 'z_plane 斜面';
+  top.append(badge); card.append(top);
+
+  const dl = document.createElement('dl');
+  data.constants.forEach((item) => {
+    const dt = document.createElement('dt'); dt.textContent = `${item.symbol} ${item.label}`;
+    const dd = document.createElement('dd');
+    dd.textContent = item.value === null ? '—（未启用）' : String(item.value);
+    dd.title = item.source;
+    dl.append(dt, dd);
+  });
+  card.append(dl);
+
+  const wrap = document.createElement('div'); wrap.className = 'table-wrap';
+  const table = document.createElement('table'); table.className = 'layout-table';
+  const header = document.createElement('thead'); const headerRow = document.createElement('tr');
+  ['阶段', '公式', '代入', '结果(mm)'].forEach((label) => { const th = document.createElement('th'); th.textContent = label; headerRow.append(th); });
+  header.append(headerRow); table.append(header);
+  const body = document.createElement('tbody');
+  data.rows.forEach((row) => {
+    const tr = document.createElement('tr');
+    const stageCell = document.createElement('td'); stageCell.textContent = row.stage; tr.append(stageCell);
+    [row.formula, row.substitution, formatZChainValue(row.value)].forEach((value) => {
+      const td = document.createElement('td'); td.className = 'mono'; td.textContent = value; tr.append(td);
+    });
+    body.append(tr);
+  });
+  table.append(body); wrap.append(table); card.append(wrap);
+
+  data.checks.forEach((check) => {
+    const line = document.createElement('p'); line.className = 'hint';
+    const stateBadge = document.createElement('span');
+    stateBadge.className = `state-badge ${check.ok ? '' : 'error'}`.trim();
+    stateBadge.textContent = check.ok ? '通过' : '不通过';
+    line.append(stateBadge, `${check.name}：${check.detail}`);
+    card.append(line);
+  });
+
+  const planeLabels = { block: '方块', tray: '托盘' };
+  Object.keys(planeLabels).forEach((subject) => {
+    const plane = data.z_plane?.[subject];
+    if (!plane) return;
+    const role = data.mode === 'fixed_constant' ? '对照（已被固定常数绕过）' : '当前生效';
+    const [a, b, c] = plane.coefficients;
+    const line = document.createElement('p'); line.className = 'hint mono';
+    line.textContent = `${role}${planeLabels[subject]}平面：z = ${a}*x + ${b}*y + ${c}，安全区范围 ${formatZChainValue(plane.safe_box_range)}，批次 ${plane.generation_id || '—'}`;
+    card.append(line);
+  });
+
+  data.notes.forEach((note) => {
+    const line = document.createElement('p'); line.className = 'hint'; line.textContent = note;
+    card.append(line);
+  });
+  return card;
 }
 
 function heading(title, subtitle = '') {

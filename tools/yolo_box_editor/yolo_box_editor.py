@@ -7,10 +7,12 @@
 2. 独立演示模式：直接 python 运行，按代码开头的参数加载模型和图像，
    用于脱离 ROS 单独调试交互。
 
-纯 OpenCV 单窗口，键盘操作（与高位 Mask 编辑总览风格一致）：
+纯 OpenCV 单窗口，交互与高位 Mask 编辑器（Ctrl 画笔）和常规标注软件一致：
+  Ctrl+拖动 画新框（当前类别，任何位置，包括已有框内部）
+  点击框   选中并显示 8 个句柄
+  框内拖动 平移该框；拖动句柄调大调小
   1-7      选类别；有选中框时改为把该框改成这个类别
   D/Delete 删除选中框
-  拖动     空白处拖动画新框（当前类别）；框内拖动移动该框
   Enter/Q  提交；Esc 或关窗取消本轮修正
   H        开关按键帮助
 """
@@ -50,6 +52,8 @@ from image_process_lib.yolo_edit_session import (  # noqa: E402
 显示最大高 = 900
 状态栏高 = 34
 帮助行高 = 24
+句柄半径 = 4
+句柄命中半径 = 9
 类别颜色表 = {
     "L_blue": (255, 64, 0),
     "L_yellow": (0, 210, 230),
@@ -60,10 +64,11 @@ from image_process_lib.yolo_edit_session import (  # noqa: E402
     "line": (180, 180, 180),
 }
 帮助文本 = [
-    "1-7: select class / change selected box class",
+    "Ctrl+Drag: draw new box (current class)",
+    "Click box: select | Drag inside box: move",
+    "Drag white handles: resize selected box",
+    "1-7: set class / change selected box class",
     "D or Delete: delete selected box",
-    "Drag on empty area: draw new box (current class)",
-    "Drag inside a box: move it",
     "Enter / Q: commit    Esc / close window: cancel",
     "H: toggle this help",
 ]
@@ -121,18 +126,29 @@ class YOLO框编辑器:
     def _鼠标回调(self, event, x, y, flags, param):
         px, py = self._图像坐标(x, y)
         self._鼠标显示坐标 = (x, y)
+        ctrl_pressed = bool(flags & cv2.EVENT_FLAG_CTRLKEY)
         if event == cv2.EVENT_LBUTTONDOWN:
+            if ctrl_pressed:
+                # Ctrl+拖动永远画新框（即使起点落在已有框内），
+                # 与高位 Mask 编辑器的 Ctrl 画笔习惯一致。
+                self.drag = ("draw", (px, py))
+                return
+            handle = self._命中句柄(x, y)
+            if handle is not None:
+                index, name = handle
+                self.drag = ("resize", index, self.detections[index]["box"], name)
+                return
             hit = self._命中框(px, py)
             self.selected = hit
             if hit is None:
-                self.drag = ("draw", (px, py))
+                self.drag = None
             else:
                 self.drag = ("move", hit, self.detections[hit]["box"], (px, py))
         elif event == cv2.EVENT_MOUSEMOVE and self.drag is not None:
             kind = self.drag[0]
             if kind == "draw":
                 self._预览画框 = (self.drag[1], (px, py))
-            else:
+            elif kind == "move":
                 _kind, index, original_box, start = self.drag
                 ox1, oy1, ox2, oy2 = original_box
                 self.detections[index]["box"] = self._限制框在图内(
@@ -140,6 +156,11 @@ class YOLO框编辑器:
                     oy1 + py - start[1],
                     ox2 + px - start[0],
                     oy2 + py - start[1],
+                )
+            else:  # resize
+                _kind, index, original_box, name = self.drag
+                self.detections[index]["box"] = self._应用句柄调整(
+                    original_box, name, px, py
                 )
         elif event == cv2.EVENT_LBUTTONUP and self.drag is not None:
             kind = self.drag[0]
@@ -156,11 +177,46 @@ class YOLO框编辑器:
                     self.selected = len(self.detections) - 1
                 self._预览画框 = None
             else:
-                _kind, index, original_box, _start = self.drag
+                # 移动/缩放后被图像边界截断到过小，回退到原框。
+                index, original_box = self.drag[1], self.drag[2]
                 if not self._框可用(self.detections[index]["box"]):
-                    # 移动后太小（被图像边界截断），回退到原位置。
                     self.detections[index]["box"] = original_box
             self.drag = None
+
+    def _句柄位置(self, box):
+        """选中框的 8 个调整句柄：四角 + 四边中点（图像坐标）。"""
+        x1, y1, x2, y2 = box
+        xm = (x1 + x2) / 2.0
+        ym = (y1 + y2) / 2.0
+        return {
+            "左上": (x1, y1), "右上": (x2, y1), "左下": (x1, y2), "右下": (x2, y2),
+            "上": (xm, y1), "下": (xm, y2), "左": (x1, ym), "右": (x2, ym),
+        }
+
+    def _命中句柄(self, x, y):
+        """在显示坐标里命中选中框的句柄；返回 (框序号, 句柄名) 或 None。"""
+        if self.selected is None or self.selected >= len(self.detections):
+            return None
+        box = self.detections[self.selected]["box"]
+        for name, (hx, hy) in self._句柄位置(box).items():
+            dx = hx * self.scale - x
+            dy = hy * self.scale - y
+            if dx * dx + dy * dy <= 句柄命中半径 ** 2:
+                return (self.selected, name)
+        return None
+
+    def _应用句柄调整(self, box, name, px, py):
+        """拖动句柄时只改动该句柄控制的边，支持拖过对边自动翻转。"""
+        x1, y1, x2, y2 = box
+        if "左" in name:
+            x1 = px
+        if "右" in name:
+            x2 = px
+        if "上" in name:
+            y1 = py
+        if "下" in name:
+            y2 = py
+        return self._限制框在图内(*self._规范框(x1, y1, x2, y2))
 
     def _限制框在图内(self, x1, y1, x2, y2):
         x1 = min(max(x1, 0.0), float(self.image_w))
@@ -195,6 +251,8 @@ class YOLO框编辑器:
 
         for index, detection in enumerate(self.detections):
             self._画框(canvas, detection, selected=(index == self.selected))
+        if self.selected is not None and self.selected < len(self.detections):
+            self._画句柄(canvas, self.detections[self.selected]["box"])
         preview = getattr(self, "_预览画框", None)
         if preview is not None and self.drag is not None and self.drag[0] == "draw":
             (sx1, sy1), (sx2, sy2) = preview
@@ -206,6 +264,7 @@ class YOLO框编辑器:
         self._画状态栏(canvas)
         if self.show_help:
             self._画帮助(canvas)
+        self._画类别图例(canvas)
         return canvas
 
     def _显示坐标(self, px, py):
@@ -220,7 +279,7 @@ class YOLO框编辑器:
         if selected:
             cv2.rectangle(canvas, p1, p2, (255, 255, 255), thickness + 2)
         cv2.rectangle(canvas, p1, p2, color, thickness)
-        label = f"{detection['category']}"
+        label = f"{self._类别序号(detection['category'])}:{detection['category']}"
         if detection.get("source", "yolo") == "yolo":
             label += f" {detection['score']:.2f}"
         else:
@@ -229,14 +288,48 @@ class YOLO框编辑器:
         cv2.putText(canvas, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
         cv2.putText(canvas, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
+    def _画句柄(self, canvas, box):
+        """给选中框画 8 个白色句柄，提示可以直接拖动调大调小。"""
+        for hx, hy in self._句柄位置(box).values():
+            cx, cy = self._显示坐标(hx, hy)
+            cv2.circle(canvas, (cx, cy), 句柄半径 + 1, (0, 0, 0), -1, cv2.LINE_AA)
+            cv2.circle(canvas, (cx, cy), 句柄半径, (255, 255, 255), -1, cv2.LINE_AA)
+
     def _画状态栏(self, canvas):
         y = canvas.shape[0] - 状态栏高 // 2 + 6
         text = (
-            f"Class: {self.current_class} | Boxes: {len(self.detections)} | "
-            "1-7:class D:del Drag:draw/move Enter:OK Esc:cancel H:help"
+            f"Class: {self._类别序号(self.current_class)}:{self.current_class}"
+            f" | Boxes: {len(self.detections)} | "
+            "Ctrl+Drag:draw Drag:move Handles:resize D:del Enter:OK Esc:cancel H:help"
         )
         cv2.rectangle(canvas, (0, canvas.shape[0] - 状态栏高), (canvas.shape[1], canvas.shape[0]), (30, 30, 30), -1)
         cv2.putText(canvas, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 1, cv2.LINE_AA)
+
+    def _类别序号(self, category):
+        """类别对应的数字键序号，画框时直接看着图例按。"""
+        try:
+            return self.classes.index(category) + 1
+        except ValueError:
+            return 0
+
+    def _画类别图例(self, canvas):
+        """右上角常驻类别图例：序号 + 色块 + 类名。"""
+        line_h = 22
+        pad = 6
+        width = 168
+        x0 = canvas.shape[1] - width - pad
+        y0 = pad
+        height = line_h * len(self.classes) + 2 * pad
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (x0, y0), (x0 + width, y0 + height), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.55, canvas, 0.45, 0, canvas)
+        for index, name in enumerate(self.classes):
+            color = 类别颜色表.get(name, (255, 255, 255))
+            ty = y0 + pad + 14 + index * line_h
+            cv2.rectangle(canvas, (x0 + 6, ty - 11), (x0 + 20, ty + 3), color, -1)
+            text = f"{index + 1} {name}"
+            cv2.putText(canvas, text, (x0 + 26, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(canvas, text, (x0 + 26, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
     def _画帮助(self, canvas):
         for line_index, line in enumerate(帮助文本):

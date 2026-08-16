@@ -941,12 +941,22 @@ class ImageProcessor:
             self.depth_rough_localizer = DepthRoughLocalizer(
                 self.shooting_angle,
                 wrist_to_camera,
+                fixed_tcp_z_mm=fixed_tcp_z_mm,
             )
             self.stable_world_points_client = rospy.ServiceProxy(
                 "/camera/stable_world_points",
                 GetStableWorldPoints,
             )
-            rospy.loginfo("标定模式：高位粗定位使用批量稳定深度 XYZ")
+            if fixed_tcp_z_mm is not None:
+                # 与正式模式同一声明：固定 Z 同时作用于标定模式，深度只提供粗定位 XY。
+                rospy.logwarn(
+                    "标定模式：TCP Z 已固定为常数（深度相机 Z 不再参与运动高度）"
+                    "——方块观察 Z=%.2f，托盘 Z=%.2f；深度只提供粗定位 XY",
+                    fixed_tcp_z_mm["block"],
+                    fixed_tcp_z_mm["tray"],
+                )
+            else:
+                rospy.loginfo("标定模式：高位粗定位使用批量稳定深度 XYZ")
         else:
             self.high_tcp_localizer = HighPixelToTcpLocalizer(
                 block_calibration_path=block_calibration_path,
@@ -2315,6 +2325,7 @@ class ImageProcessor:
     def _build_calibration_block_observed(self, blocks, samples, image_shape):
         """把方块深度样本转成标定 ObservedBlock，并校验 MAD、位姿和抓取高度。"""
         observed_blocks = []
+        fixed_tcp_z = self.depth_rough_localizer.fixed_tcp_z_mm
         for block, sample in zip(blocks, samples):
             high_pixel = (float(block["px"]), float(block["py"]))
             block_label = f"方块 {block['category']}（block）高位像素 {high_pixel!r}"
@@ -2328,7 +2339,14 @@ class ImageProcessor:
                 self.block_observation_height_mm,
             )
             pose = self._validate_calibration_pose(pose, f"{block_label} 深度粗定位")
-            pick_tcp_z = float(sample["world"][2]) + self.pick_surface_offset_mm
+            if fixed_tcp_z is not None:
+                # 固定 Z 模式：表面高度由常数提供（与正式模式反推一致），深度只供 XY。
+                pick_surface_z_mm = (
+                    fixed_tcp_z["block"] - self.block_observation_height_mm
+                )
+            else:
+                pick_surface_z_mm = float(sample["world"][2])
+            pick_tcp_z = pick_surface_z_mm + self.pick_surface_offset_mm
             if not np.isfinite(pick_tcp_z) or pick_tcp_z < self.minimum_tcp_z_mm:
                 raise ValueError(
                     f"{block_label} 最终抓取 TCP Z={pick_tcp_z:.3f} mm "
@@ -2352,7 +2370,7 @@ class ImageProcessor:
                     category=block["category"],
                     observation_pose=tuple(pose),
                     detected_angle_deg=block["theta"],
-                    pick_surface_z_mm=float(sample["world"][2]),
+                    pick_surface_z_mm=pick_surface_z_mm,
                     pick_surface_z_valid=True,
                     **diagnostic,
                 )
@@ -2385,12 +2403,19 @@ class ImageProcessor:
     def _build_calibration_tray_targets(self, specs, samples, block_plane, image_shape):
         """把托盘格点规格和深度样本转成标定 PlacementTarget。"""
         placement_targets = []
+        fixed_tcp_z = self.depth_rough_localizer.fixed_tcp_z_mm
         for (item, point), sample in zip(specs, samples):
             tray_tcp_xy = self.depth_rough_localizer.tcp_xy_from_world(sample["world"])
-            tray_tcp_z = (
-                block_plane.predict(tray_tcp_xy[0], tray_tcp_xy[1])
-                - self.tray_tcp_below_block_observation_mm
-            )
+            if fixed_tcp_z is not None:
+                # 固定 Z 模式：托盘释放高度用常数（与正式模式一致），不再拟合方块观察平面。
+                tray_tcp_z = fixed_tcp_z["tray"]
+                source = "stable_depth_xy_fixed_z"
+            else:
+                tray_tcp_z = (
+                    block_plane.predict(tray_tcp_xy[0], tray_tcp_xy[1])
+                    - self.tray_tcp_below_block_observation_mm
+                )
+                source = "stable_depth_xy_block_plane_z"
             pose = self.depth_rough_localizer.tray_observation_pose(
                 sample["world"],
                 tray_tcp_z,
@@ -2406,7 +2431,7 @@ class ImageProcessor:
                 depth_sample_pixel_xy=sample["pixel"],
                 world_position=sample["world"],
                 world_position_valid=True,
-                source="stable_depth_xy_block_plane_z",
+                source=source,
                 depth_valid_frame_count=sample["valid_count"],
                 depth_median_mm=sample["depth_median_mm"],
                 depth_mad_mm=sample["depth_mad_mm"],
@@ -2436,7 +2461,10 @@ class ImageProcessor:
             samples[:len(blocks)],
             image_shape,
         )
-        block_plane = self._fit_calibration_block_plane(observed_blocks)
+        block_plane = None
+        if self.depth_rough_localizer.fixed_tcp_z_mm is None:
+            # 固定 Z 模式不需要拟合方块观察平面：托盘 Z 直接用常数。
+            block_plane = self._fit_calibration_block_plane(observed_blocks)
         placement_targets = self._build_calibration_tray_targets(
             placement_specs,
             samples[len(blocks):],
@@ -2519,7 +2547,9 @@ class ImageProcessor:
         block_plane = None
         placement_targets = []
         if tray_found:
-            block_plane = self._fit_calibration_block_plane(observed_blocks)
+            if self.depth_rough_localizer.fixed_tcp_z_mm is None:
+                # 固定 Z 模式不需要拟合方块观察平面：托盘 Z 直接用常数。
+                block_plane = self._fit_calibration_block_plane(observed_blocks)
             placement_targets = self._build_calibration_tray_targets(
                 list(zip(tray_items, tray_pixels)),
                 samples[len(blocks):],

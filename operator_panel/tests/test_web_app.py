@@ -367,3 +367,18 @@ def test通配监听写操作要求Origin与访问地址一致(wildcard_web):
     ).status_code == 403
     # 错误端口的主机名仍被拒绝
     assert client.get("/api/state", base_url="http://10.42.0.1:9999").status_code == 403
+
+
+def test定位Z链路端点返回实时计算结构(web):
+    client, _coordinator, _bus, _tmp_path = web
+    response = client.get("/api/localization-z-chain", **url("/api/localization-z-chain"))
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["mode"] in {"fixed_constant", "calibration_z_plane"}
+    assert payload["mode_label"]
+    assert {item["symbol"] for item in payload["constants"]} >= {"B", "T", "h", "o", "z_min"}
+    assert payload["rows"]
+    assert all({"stage", "formula", "substitution", "value"} <= set(row) for row in payload["rows"])
+    assert all({"name", "detail", "ok"} <= set(check) for check in payload["checks"])
+    assert payload["notes"]

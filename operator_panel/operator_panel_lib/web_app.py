@@ -23,6 +23,7 @@ from .config_manager import (
 )
 from .constants import DEBUG_IMAGE_FILES, PACKAGE_DIR
 from .coordinator import OperationBusy, OperationRejected
+from .localization_chain import build_localization_z_chain
 from .process_supervisor import LAUNCH_LOG_FILES, tail_lines
 
 
@@ -363,6 +364,11 @@ def create_app(
     @app.get("/api/read-only-config")
     def read_only_config():
         return jsonify({"items": config_manager.inspect_read_only()})
+
+    @app.get("/api/localization-z-chain")
+    def localization_z_chain():
+        # 数值由当前配置实时代入公式，只读接口，不触发任何写操作。
+        return jsonify(build_localization_z_chain())
 
     @app.post("/api/calibration/deploy-pair")
     def deploy_calibration_pair():

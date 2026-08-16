@@ -1,7 +1,9 @@
 """标定模式下用深度世界坐标生成低位视觉伺服粗位姿。"""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Mapping, Optional, Sequence
 
 import numpy as np
 
@@ -54,10 +56,42 @@ def fit_z_plane(tcp_xyz: Sequence[Sequence[float]]) -> ZPlaneFit:
     )
 
 
+def _validate_fixed_tcp_z(
+    fixed_tcp_z_mm: Optional[Mapping[str, float]],
+) -> Optional[dict[str, float]]:
+    """校验标定模式的固定 TCP Z 常数；None 表示继续使用深度表面 Z。"""
+    if fixed_tcp_z_mm is None:
+        return None
+    if not isinstance(fixed_tcp_z_mm, Mapping):
+        raise ValueError("fixed_tcp_z_mm 必须是含 block 和 tray 键的字典")
+    fixed: dict[str, float] = {}
+    for subject in ("block", "tray"):
+        if subject not in fixed_tcp_z_mm:
+            raise ValueError(
+                "固定 TCP Z 必须同时提供 block 和 tray 两个常数，缺少 " + subject
+            )
+        raw_value = fixed_tcp_z_mm[subject]
+        if isinstance(raw_value, bool):
+            raise ValueError(f"{subject} 固定 TCP Z 必须是有限数值")
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{subject} 固定 TCP Z 必须是有限数值") from exc
+        if not np.isfinite(value):
+            raise ValueError(f"{subject} 固定 TCP Z 必须是有限数值")
+        fixed[subject] = value
+    return fixed
+
+
 class DepthRoughLocalizer:
     """把目标表面世界坐标转换为固定姿态的 TCP 粗定位位姿。"""
 
-    def __init__(self, shooting_pose, wrist_to_camera_mm):
+    def __init__(
+        self,
+        shooting_pose,
+        wrist_to_camera_mm,
+        fixed_tcp_z_mm: Optional[Mapping[str, float]] = None,
+    ):
         shooting = np.asarray(shooting_pose, dtype=float)
         wrist_to_camera = np.asarray(wrist_to_camera_mm, dtype=float)
         if shooting.shape != (6,) or not np.all(np.isfinite(shooting)):
@@ -67,6 +101,13 @@ class DepthRoughLocalizer:
         self.shooting_pose = shooting
         rotation = rpy_degrees_to_rotation_matrix(*shooting[3:6])
         self.camera_offset_in_base = rotation @ wrist_to_camera[:3, 3]
+        # 固定 Z 模式：观察/表面高度由常数提供，深度只负责粗定位 XY。
+        self._fixed_tcp_z_mm = _validate_fixed_tcp_z(fixed_tcp_z_mm)
+
+    @property
+    def fixed_tcp_z_mm(self) -> Optional[dict[str, float]]:
+        """当前固定 TCP Z 常数；None 表示使用深度表面 Z。"""
+        return None if self._fixed_tcp_z_mm is None else dict(self._fixed_tcp_z_mm)
 
     def tcp_xy_from_world(self, world_position):
         """沿用历史算法，把表面世界 XY 转成相机对准时的 TCP XY。"""
@@ -82,9 +123,19 @@ class DepthRoughLocalizer:
         )
 
     def block_observation_pose(self, world_position, observation_height_mm):
-        """用方块上表面 XYZ 生成低位观察 TCP 位姿。"""
+        """用方块上表面 XYZ 生成低位观察 TCP 位姿。
+
+        固定 Z 模式下忽略深度表面 Z，观察高度取固定常数，XY 仍来自深度。
+        """
         world = np.asarray(world_position, dtype=float)
         tcp_xy = self.tcp_xy_from_world(world)
+        if self._fixed_tcp_z_mm is not None:
+            return [
+                float(tcp_xy[0]),
+                float(tcp_xy[1]),
+                self._fixed_tcp_z_mm["block"],
+                *self.shooting_pose[3:6].tolist(),
+            ]
         height = float(observation_height_mm)
         if not np.isfinite(height) or height <= 0.0:
             raise ValueError("方块观察高度必须是大于 0 的有限数值")
