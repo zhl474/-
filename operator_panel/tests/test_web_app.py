@@ -164,6 +164,8 @@ def test首页使用简洁标题并展示ROS身份(web):
     assert "sensor_msgs/Image" in html
     assert 'id="image-zoom-dialog"' in html
     assert 'id="task-interaction-dialog"' in html
+    assert 'Line 模板像素尺寸' in html
+    assert 'id="line-template-calc"' in html
     assert "从识别到抓放，一条清晰的操作链" not in html
     assert "把常用工具动作放在伸手可及的位置" not in html
 
@@ -278,6 +280,38 @@ def testArUco对准接口转发低位Z和确认标记(web):
     assert name == "aruco_align"
     assert args == (220.0,)
     assert kwargs == {"confirmed": True}
+
+
+def testLine模板像素尺寸接口返回计算结果(web):
+    client, _coordinator, _bus, _tmp = web
+    response = client.get(
+        "/api/tools/line-template-size",
+        query_string={
+            "p1_x": 436, "p1_y": 442,
+            "p2_x": 843, "p2_y": 370,
+            "short_side_mm": 17.8, "long_side_mm": 78.2,
+        },
+        **url("/api/tools/line-template-size"),
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["long_side_px"] > 0
+    assert payload["block_px"] > 0
+    assert payload["connector_px"] > 0
+    assert set(payload) == {"long_side_px", "block_px", "connector_px"}
+
+
+def testLine模板像素尺寸接口缺少参数返回400(web):
+    client, _coordinator, _bus, _tmp = web
+    response = client.get(
+        "/api/tools/line-template-size",
+        query_string={"p1_x": 1, "p1_y": 2, "p2_x": 3},
+        **url("/api/tools/line-template-size"),
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["code"] == "invalid_request"
 
 
 def test配置ID和图片ID均为固定白名单(web):

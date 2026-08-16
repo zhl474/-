@@ -25,6 +25,7 @@ from .constants import DEBUG_IMAGE_FILES, PACKAGE_DIR
 from .coordinator import OperationBusy, OperationRejected
 from .localization_chain import build_localization_z_chain
 from .process_supervisor import LAUNCH_LOG_FILES, tail_lines
+from .template_size import calculate_template_size
 
 
 LAUNCH_LOG_LABELS = {"hardware": "硬件", "runtime": "感知", "task": "任务执行"}
@@ -308,6 +309,24 @@ def create_app(
             payload.get("low_tcp_z_mm"),
             confirmed=payload.get("confirmed", False),
         )), 202
+
+    @app.get("/api/tools/line-template-size")
+    def line_template_size():
+        try:
+            p1 = (float(request.args["p1_x"]), float(request.args["p1_y"]))
+            p2 = (float(request.args["p2_x"]), float(request.args["p2_y"]))
+            short_side_mm = float(request.args.get("short_side_mm", 17.8))
+            long_side_mm = float(request.args.get("long_side_mm", 78.2))
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("P1、P2 和真实尺寸必须是数值")
+        long_px, block_px, connector_px = calculate_template_size(
+            p1, p2, short_side_mm=short_side_mm, long_side_mm=long_side_mm,
+        )
+        return jsonify({
+            "long_side_px": long_px,
+            "block_px": block_px,
+            "connector_px": connector_px,
+        })
 
     @app.get("/api/control/pose")
     def get_pose():

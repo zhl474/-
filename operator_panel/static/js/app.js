@@ -2122,6 +2122,44 @@ function renderCalibration(item) {
   rows.forEach(([key, value]) => { const dt = document.createElement('dt'); dt.textContent = key; const dd = document.createElement('dd'); dd.textContent = value; dl.append(dt, dd); }); card.append(dl); return card;
 }
 
+let lastLineTemplateResult = '';
+
+function bindLineTemplateSize() {
+  $('#line-template-calc').addEventListener('click', async () => {
+    const params = new URLSearchParams({
+      p1_x: $('#line-p1-x').value,
+      p1_y: $('#line-p1-y').value,
+      p2_x: $('#line-p2-x').value,
+      p2_y: $('#line-p2-y').value,
+      short_side_mm: $('#line-short-mm').value,
+      long_side_mm: $('#line-long-mm').value,
+    });
+    try {
+      const data = await api(`/api/tools/line-template-size?${params.toString()}`);
+      lastLineTemplateResult = [
+        `长边像素长度: ${Number(data.long_side_px).toFixed(2)} px`,
+        `block_px: ${Number(data.block_px).toFixed(2)}`,
+        `connector_px: ${Number(data.connector_px).toFixed(2)}`,
+      ].join('\n');
+      $('#line-template-result').textContent = lastLineTemplateResult;
+      $('#line-template-copy').disabled = false;
+    } catch (error) {
+      lastLineTemplateResult = '';
+      $('#line-template-result').textContent = `计算失败：${formatError(error)}`;
+      $('#line-template-copy').disabled = true;
+    }
+  });
+  $('#line-template-copy').addEventListener('click', async () => {
+    if (!lastLineTemplateResult) return;
+    try {
+      await navigator.clipboard.writeText(lastLineTemplateResult);
+      toast('计算结果已复制');
+    } catch (_) {
+      toast('复制失败', '请手动选择结果文本复制', 'warning');
+    }
+  });
+}
+
 function bindReadOnly() {
   $('#readonly-refresh').addEventListener('click', loadReadOnly);
   $('#deploy-calibration').addEventListener('click', async () => {
@@ -2352,6 +2390,7 @@ async function initialize() {
   bindManual();
   bindConfig();
   bindReadOnly();
+  bindLineTemplateSize();
   bindLogs();
   bindLaunchLogs();
   bindExit();

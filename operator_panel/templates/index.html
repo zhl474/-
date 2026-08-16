@@ -333,6 +333,26 @@
         <div id="readonly-content" class="readonly-content">
           <article class="card empty-state"><div><strong>正在读取只读配置</strong><p>盘面、像素标定和手眼矩阵会在此汇总。</p></div></article>
         </div>
+        <article class="card template-size-card">
+          <div class="card-heading">
+            <div><span class="tool-icon">尺</span><h2>Line 模板像素尺寸</h2></div>
+            <span class="state-badge">常用工具</span>
+          </div>
+          <p>输入 line 长边两端的像素坐标和游标卡尺实测尺寸，自动计算模板匹配用的 <code>block_px</code> / <code>connector_px</code>。</p>
+          <div class="delta-inputs template-size-grid">
+            <label><small>P1 X</small><input id="line-p1-x" type="number" step="any" value="436"></label>
+            <label><small>P1 Y</small><input id="line-p1-y" type="number" step="any" value="442"></label>
+            <label><small>P2 X</small><input id="line-p2-x" type="number" step="any" value="843"></label>
+            <label><small>P2 Y</small><input id="line-p2-y" type="number" step="any" value="370"></label>
+            <label><small>短边实测（mm）</small><input id="line-short-mm" type="number" min="0.001" step="any" value="17.8"></label>
+            <label><small>长边实测（mm）</small><input id="line-long-mm" type="number" min="0.001" step="any" value="78.2"></label>
+          </div>
+          <div class="input-action">
+            <button id="line-template-calc" class="button primary" type="button">计算</button>
+            <button id="line-template-copy" class="button ghost" type="button" disabled>复制结果</button>
+          </div>
+          <div id="line-template-result" class="template-size-result muted">尚未计算</div>
+        </article>
         <article class="card deploy-card">
           <div class="card-heading"><div><h2>整文件替换</h2><small>仅在硬件空闲时开放；替换前自动备份</small></div><span class="risk-tag">专家操作</span></div>
           <div class="deploy-grid">

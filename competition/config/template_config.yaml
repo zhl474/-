@@ -5,7 +5,7 @@ template_sizes:
       block_px: 37
       connector_px: 5
     low:
-      block_px: 90
+      block_px: 94
       connector_px: 12
 
 color_segmentation:

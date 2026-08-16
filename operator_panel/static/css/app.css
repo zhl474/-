@@ -333,6 +333,9 @@ code, .mono { font-family: var(--mono); }
 .calibration-card dd { margin: 0; overflow-wrap: anywhere; }
 .matrix-table { margin-top: 12px; border-collapse: collapse; font: 10px var(--mono); }
 .matrix-table td { padding: 6px 8px; border: 1px solid var(--line); }
+.template-size-card { margin-top: 17px; padding: 18px; }
+.template-size-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.template-size-result { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-soft); font-size: 12px; line-height: 1.7; white-space: pre-line; overflow-wrap: anywhere; }
 .deploy-card { margin-top: 17px; padding: 18px; }
 .deploy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 16px; }
 .deploy-grid > div { padding: 14px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-soft); }
