@@ -11,7 +11,9 @@
 - 安全边界：perception.yaml 的 high_tcp_localization 安全 XY 范围，
   Z 下限取 execution.yaml 的 motion.minimum_tcp_z_mm；
 - 安全 XY 偏移：execution.yaml 的 servo.enabled=false 时按开环模式
-  使用 visual_servo.yaml 的 camera_to_sucker_offset_mm。
+  使用 visual_servo.yaml 的 camera_to_sucker_offset_mm；
+- 固定 TCP Z：perception.yaml 的 high_tcp_localization.fixed_tcp_z 开启时，
+  Z 用常数覆盖标定 z_plane（工作台为平面、深度相机 Z 不可信），XY 仍走标定模型。
 """
 
 from __future__ import annotations
@@ -129,6 +131,15 @@ def build_formal_context() -> FormalContext:
             float(value) for value in visual_servo["camera_to_sucker_offset_mm"]
         )
 
+    # 与 image_node 一致：固定 Z 模式开启时把 TCP Z 常数传给定位器。
+    fixed_tcp_z_config = localization_config.get("fixed_tcp_z", {})
+    fixed_tcp_z_mm = None
+    if fixed_tcp_z_config.get("enabled", False):
+        fixed_tcp_z_mm = {
+            "block": fixed_tcp_z_config["block_observation_z_mm"],
+            "tray": fixed_tcp_z_config["tray_z_mm"],
+        }
+
     localizer = HighPixelToTcpLocalizer(
         block_calibration_path=block_path,
         tray_calibration_path=tray_path,
@@ -136,6 +147,7 @@ def build_formal_context() -> FormalContext:
         tcp_min_xyz=(safe_x[0], safe_y[0], minimum_tcp_z),
         tcp_max_xyz=(safe_x[1], safe_y[1], None),
         safety_xy_offset=safety_xy_offset,
+        fixed_tcp_z_mm=fixed_tcp_z_mm,
     )
     return FormalContext(
         localizer=localizer,
@@ -158,6 +170,7 @@ def print_calibration_info(
     subject: str,
     calibration: PixelToTcpCalibration,
     calibration_path: Path,
+    fixed_tcp_z_mm=None,
 ) -> None:
     """打印部署标定的批次、模型和像素覆盖范围。"""
     document = calibration.metadata
@@ -169,6 +182,9 @@ def print_calibration_info(
     else:
         model_name = document["model"]["name"]
         z_source = "同平面直接输出（schema v1）"
+    if fixed_tcp_z_mm is not None:
+        # 固定 Z 模式下 yaml 里的 z_plane 只是留档对照，实际 Z 是常数。
+        z_source += f"（已被固定常数 {fixed_tcp_z_mm[subject]:.2f} 覆盖）"
     print(f"[{label}] 标定文件：{calibration_path}")
     print(
         f"       批次 {document.get('generation_id', '无')}，"
@@ -231,16 +247,28 @@ def main() -> None:
     """按直接运行配置查询所有像素点。"""
     context = build_formal_context()
     mode_text = "闭环（视觉伺服开）" if context.servo_enabled else "开环（视觉伺服关）"
+    fixed_tcp_z_mm = context.localizer.fixed_tcp_z_mm
     print("使用正式部署配置装配 HighPixelToTcpLocalizer：")
     print(f"  安全校验模式：{mode_text}，安全 XY 偏移 {list(context.safety_xy_offset)}")
     print(f"  拍摄姿态 R/P/YAW：{list(context.shooting_rpy)}")
+    if fixed_tcp_z_mm is not None:
+        print(
+            "  TCP Z 固定模式：已开启——"
+            f"方块观察 Z={fixed_tcp_z_mm['block']:.2f}，"
+            f"托盘 Z={fixed_tcp_z_mm['tray']:.2f}（标定 z_plane 已禁用）"
+        )
     for subject, points in QUERY_POINTS.items():
         if subject not in SUBJECT_LABELS:
             print(f"\n未知主体 {subject!r}，仅支持 {sorted(SUBJECT_LABELS)}，已跳过")
             continue
         calibration = load_subject_calibration(context, subject)
         print()
-        print_calibration_info(subject, calibration, context.calibration_paths[subject])
+        print_calibration_info(
+            subject,
+            calibration,
+            context.calibration_paths[subject],
+            fixed_tcp_z_mm=fixed_tcp_z_mm,
+        )
         for pixel in points:
             print_point_result(context, subject, calibration, pixel)
 

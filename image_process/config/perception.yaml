@@ -98,6 +98,16 @@ high_tcp_localization:
   safe_x_range_mm: [-520.224, -148.17]
   safe_y_range_mm: [-305.0, 315.925]
 
+  # 2026-08-16 工作台为水平平面，深度相机 Z 不可信：true 时正式模式 TCP Z
+  # 固定为下方常数，不再使用标定 yaml 的 z_plane（斜相机拟合出的 a/b 视为噪声清零）。
+  # XY 仍用 xy_model 预测加视觉伺服修正；深度相机只保留在标定模式链路。
+  # 常数取自 20260815T212913 批次 block z_plane 的 c；tray = block + 9（托盘高于方块观察面）。
+  # 节点每次启动都会打印固定值与标定平面的对照；回滚只需 enabled: false 并重启节点。
+  fixed_tcp_z:
+    enabled: true
+    block_observation_z_mm: 173.46
+    tray_z_mm: 182.46
+
 pick_height:
   # 正式模式由观察 TCP Z 减该值得到表面 Z；标定模式由表面深度加该值得到观察 TCP Z。
   block_observation_height_mm: 167.0

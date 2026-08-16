@@ -29,7 +29,7 @@ import numpy as np
 import os
 
 # ===================== 传参区（改这里） =====================
-IMAGE_PATH = "/home/zhl/SingleArmTetris/SingleArmTetris/src/tools/vision/5.png"  # 输入图片
+IMAGE_PATH = "/home/zhl/SingleArmTetris/SingleArmTetris/src/tools/vision/7.png"  # 输入图片
 
 # Canny 参数
 CANNY_LOW = 50

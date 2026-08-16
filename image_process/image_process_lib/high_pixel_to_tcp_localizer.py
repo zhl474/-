@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 import numpy as np
 import yaml
@@ -106,6 +106,41 @@ def _validate_safety_bounds(
     return minimum, maximum
 
 
+def _validate_fixed_tcp_z(
+    fixed_tcp_z_mm: Optional[Mapping[str, float]],
+    minimum_tcp_z_mm: float,
+) -> Optional[dict[str, float]]:
+    """校验固定 TCP Z 配置；None 表示继续使用标定 yaml 的 z_plane。"""
+    if fixed_tcp_z_mm is None:
+        return None
+    if not isinstance(fixed_tcp_z_mm, Mapping):
+        raise ValueError("fixed_tcp_z_mm 必须是含 block 和 tray 键的字典")
+    fixed: dict[str, float] = {}
+    for subject in ("block", "tray"):
+        label = _SUBJECT_LABELS[subject]
+        if subject not in fixed_tcp_z_mm:
+            raise ValueError(
+                "固定 TCP Z 必须同时提供 block 和 tray 两个常数，"
+                f"缺少 {label}（{subject}）"
+            )
+        raw_value = fixed_tcp_z_mm[subject]
+        if isinstance(raw_value, bool):
+            raise ValueError(f"{label}固定 TCP Z 必须是有限数值")
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label}固定 TCP Z 必须是有限数值") from exc
+        if not np.isfinite(value):
+            raise ValueError(f"{label}固定 TCP Z 必须是有限数值")
+        if value < minimum_tcp_z_mm:
+            raise ValueError(
+                f"{label}固定 TCP Z={value:.3f} mm 低于安全下限 "
+                f"{minimum_tcp_z_mm:.3f} mm"
+            )
+        fixed[subject] = value
+    return fixed
+
+
 class HighPixelToTcpLocalizer:
     """加载方块和托盘标定，并生成带拍摄姿态 R/P/YAW 的观察位姿。"""
 
@@ -117,6 +152,7 @@ class HighPixelToTcpLocalizer:
         tcp_min_xyz: Optional[Sequence[float]] = None,
         tcp_max_xyz: Sequence[Optional[float]] = DEFAULT_TCP_MAX_XYZ,
         safety_xy_offset: Sequence[float] = (0.0, 0.0),
+        fixed_tcp_z_mm: Optional[Mapping[str, float]] = None,
     ) -> None:
         shooting = _finite_vector(shooting_pose, 6, "高位拍摄位姿")
         self._shooting_rpy = shooting[3:6].copy()
@@ -125,6 +161,11 @@ class HighPixelToTcpLocalizer:
         self._tcp_min_xyz, self._tcp_max_xyz = _validate_safety_bounds(
             tcp_min_xyz,
             tcp_max_xyz,
+        )
+        # 工作台为平面的固定 Z 模式：不传时保持标定 yaml z_plane 的原始行为。
+        self._fixed_tcp_z_mm = _validate_fixed_tcp_z(
+            fixed_tcp_z_mm,
+            float(self._tcp_min_xyz[2]),
         )
         # 该偏移只用于检查实际待执行 TCP，不改变标定模型输出和后续任务位姿。
         self._safety_xy_offset = _finite_vector(
@@ -175,6 +216,11 @@ class HighPixelToTcpLocalizer:
             )
         return self._calibrations[subject]
 
+    @property
+    def fixed_tcp_z_mm(self) -> Optional[dict[str, float]]:
+        """当前固定 TCP Z 常数；None 表示使用标定 yaml 的 z_plane。"""
+        return None if self._fixed_tcp_z_mm is None else dict(self._fixed_tcp_z_mm)
+
     def calibration_summary(self, subject: str) -> dict:
         """只读暴露标定元信息，供定位全景导出留档。"""
         calibration = self._subject_calibration(subject, (0.0, 0.0))
@@ -187,6 +233,12 @@ class HighPixelToTcpLocalizer:
             "XY模型": calibration.model_name,
             "Z平面系数a_b_c": (
                 None if z_plane is None else [float(value) for value in z_plane]
+            ),
+            # 固定 Z 模式下上方的 z_plane 系数只是留档对照，实际 Z 以该常数为准。
+            "TCP_Z来源": (
+                "calibration_z_plane"
+                if self._fixed_tcp_z_mm is None
+                else f"fixed_constant={self._fixed_tcp_z_mm[subject]:.3f}"
             ),
             "凸包顶点数": int(len(calibration.pixel_convex_hull)),
             "标定样本数": (
@@ -245,6 +297,9 @@ class HighPixelToTcpLocalizer:
             raise ValueError(
                 f"{label}（{subject}）高位像素 {pixel_xy!r} 的 TCP 标定预测失败：{exc}"
             ) from exc
+        # 固定 Z 模式只在 XY 保留标定预测，Z 用平面常数覆盖（安全校验同样使用覆盖值）。
+        if self._fixed_tcp_z_mm is not None:
+            tcp_xyz[2] = self._fixed_tcp_z_mm[subject]
 
         safety_tcp_xyz = tcp_xyz.copy()
         safety_tcp_xyz[:2] += self._safety_xy_offset

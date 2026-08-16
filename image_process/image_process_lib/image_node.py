@@ -807,6 +807,29 @@ class ImageProcessor:
         self.safe_x_range_mm = safe_x_range_mm
         self.safe_y_range_mm = safe_y_range_mm
 
+        # 固定 TCP Z 模式：工作台为平面、深度相机 Z 不可信时，正式模式 Z 不走标定 z_plane。
+        fixed_tcp_z_config = localization_config.get("fixed_tcp_z", {})
+        if not isinstance(fixed_tcp_z_config, dict):
+            raise ValueError("high_tcp_localization.fixed_tcp_z 必须是字典")
+        fixed_tcp_z_enabled = fixed_tcp_z_config.get("enabled", False)
+        if not isinstance(fixed_tcp_z_enabled, bool):
+            raise ValueError("high_tcp_localization.fixed_tcp_z.enabled 必须是布尔值")
+        fixed_tcp_z_mm = None
+        if fixed_tcp_z_enabled:
+            missing_fixed_keys = [
+                name
+                for name in ("block_observation_z_mm", "tray_z_mm")
+                if name not in fixed_tcp_z_config
+            ]
+            if missing_fixed_keys:
+                raise ValueError(
+                    "fixed_tcp_z.enabled=true 但缺少配置项: " + ", ".join(missing_fixed_keys)
+                )
+            fixed_tcp_z_mm = {
+                "block": fixed_tcp_z_config["block_observation_z_mm"],
+                "tray": fixed_tcp_z_config["tray_z_mm"],
+            }
+
         pick_height_config = perception_config.get("pick_height", {})
         if not isinstance(pick_height_config, dict):
             raise ValueError("pick_height 必须是字典")
@@ -893,6 +916,7 @@ class ImageProcessor:
                 tcp_min_xyz=(safe_x_range_mm[0], safe_y_range_mm[0], self.minimum_tcp_z_mm),
                 tcp_max_xyz=(safe_x_range_mm[1], safe_y_range_mm[1], None),
                 safety_xy_offset=self.high_tcp_safety_xy_offset,
+                fixed_tcp_z_mm=fixed_tcp_z_mm,
             )
             safety_mode = "闭环原始预测 TCP" if self.visual_servo_enabled else "开环吸盘偏置后 TCP"
             rospy.loginfo(
@@ -901,6 +925,40 @@ class ImageProcessor:
                 tray_calibration_path,
                 safety_mode,
             )
+            fixed_tcp_z = self.high_tcp_localizer.fixed_tcp_z_mm
+            if fixed_tcp_z is not None:
+                # 固定 Z 必须在每次启动时自我声明，并保留与标定平面的对照，
+                # 防止"写死的常数"随时间变成无人知晓的隐藏行为。
+                rospy.logwarn(
+                    "正式模式：TCP Z 已固定为常数（标定 z_plane 已禁用，"
+                    "深度相机只保留在标定模式）——方块观察 Z=%.2f，托盘 Z=%.2f；"
+                    "XY 仍用标定模型加视觉伺服",
+                    fixed_tcp_z["block"],
+                    fixed_tcp_z["tray"],
+                )
+                center_x = (safe_x_range_mm[0] + safe_x_range_mm[1]) / 2.0
+                center_y = (safe_y_range_mm[0] + safe_y_range_mm[1]) / 2.0
+                for subject, label in (("block", "方块"), ("tray", "托盘")):
+                    coefficients = self.high_tcp_localizer.calibration_summary(subject)[
+                        "Z平面系数a_b_c"
+                    ]
+                    if coefficients is None:
+                        continue
+                    plane_a, plane_b, plane_c = coefficients
+                    plane_z = plane_a * center_x + plane_b * center_y + plane_c
+                    deviation = fixed_tcp_z[subject] - plane_z
+                    comparison = (
+                        f"{label}固定 Z={fixed_tcp_z[subject]:.2f}，"
+                        f"标定平面在工作区中心预测 {plane_z:.2f}，"
+                        f"偏差 {deviation:+.2f} mm"
+                    )
+                    if abs(deviation) > 3.0:
+                        rospy.logwarn(
+                            "固定 Z 与标定平面偏差超过 3 mm，请确认常数是否过期：%s",
+                            comparison,
+                        )
+                    else:
+                        rospy.loginfo("固定 Z 与标定平面对照：%s", comparison)
         self.image_sub = rospy.Subscriber(self.image_topic, Image, self.image_callback)
         self.prepare_task_service = rospy.Service("/perception/prepare_task", PrepareTask, self.prepare_task)
         self.get_task_target_service = rospy.Service(

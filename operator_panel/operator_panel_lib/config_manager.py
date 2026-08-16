@@ -304,6 +304,18 @@ FIELD_OVERRIDES = {
     "perception.high_tcp_localization.safe_y_range_mm": {
         "label": "高位定位 Y 安全范围", "unit": "mm", "risk": "danger",
     },
+    "perception.high_tcp_localization.fixed_tcp_z": {
+        "label": "固定 TCP Z",
+    },
+    "perception.high_tcp_localization.fixed_tcp_z.enabled": {
+        "label": "固定 TCP Z 开关",
+    },
+    "perception.high_tcp_localization.fixed_tcp_z.block_observation_z_mm": {
+        "label": "方块观察固定 Z", "unit": "mm", "risk": "danger",
+    },
+    "perception.high_tcp_localization.fixed_tcp_z.tray_z_mm": {
+        "label": "托盘固定 Z", "unit": "mm", "risk": "danger",
+    },
     "perception.pick_height": {
         "label": "抓取高度",
     },

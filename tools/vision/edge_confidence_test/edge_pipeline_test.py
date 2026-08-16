@@ -36,7 +36,7 @@ from collections import Counter
 import numpy as np
 
 # ===================== 传参区（改这里） =====================
-IMAGE_PATH = "/home/zhl/SingleArmTetris/SingleArmTetris/src/tools/vision/5.png"
+IMAGE_PATH = "/home/zhl/SingleArmTetris/SingleArmTetris/src/tools/vision/7.png"
 ROI = None                # 如 (x, y, w, h)；None = 整图
 
 OUTPUT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")

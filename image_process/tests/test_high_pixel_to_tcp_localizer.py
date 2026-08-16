@@ -492,3 +492,102 @@ def test_localizer_rejects_v1_v2_mix_and_v2_batch_mismatch(tmp_path):
             tray,
             shooting_pose=[-250.0, 0.0, 380.0, 180.0, 0.0, 90.0],
         )
+
+
+def test_fixed_tcp_z_overrides_z_but_keeps_xy_prediction(tmp_path):
+    block_path, tray_path = _write_calibrations(tmp_path)
+    localizer = HighPixelToTcpLocalizer(
+        block_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+        fixed_tcp_z_mm={"block": 205.0, "tray": 214.0},
+    )
+
+    block_pose = localizer.locate_block([10.0, 20.0])
+    tray_pose = localizer.locate_tray([30.0, 40.0])
+
+    # XY 仍按像素变化，Z 恒为固定常数。
+    assert block_pose[:2] == [-290.0, 20.0]
+    assert tray_pose[:2] == [-220.0, 90.0]
+    assert block_pose[2] == pytest.approx(205.0)
+    assert tray_pose[2] == pytest.approx(214.0)
+    assert localizer.fixed_tcp_z_mm == {"block": 205.0, "tray": 214.0}
+
+
+def test_fixed_tcp_z_on_v2_ignores_tilted_plane(tmp_path):
+    block_path = tmp_path / "斜面方块.yaml"
+    tray_path = tmp_path / "斜面托盘.yaml"
+    block_path.write_text(
+        yaml.safe_dump(_v2_affine_payload("block", "batch-1", 203.0), sort_keys=False),
+        encoding="utf-8",
+    )
+    tray_path.write_text(
+        yaml.safe_dump(_v2_affine_payload("tray", "batch-1", 196.0), sort_keys=False),
+        encoding="utf-8",
+    )
+    localizer = HighPixelToTcpLocalizer(
+        block_path,
+        tray_path,
+        shooting_pose=[-250.0, 0.0, 380.0, 180.0, 0.0, 90.0],
+        fixed_tcp_z_mm={"block": 200.0, "tray": 207.0},
+    )
+
+    # v2 标定的 z_plane 带 a/b 斜率，固定模式下不同像素的 Z 也必须完全相同。
+    assert localizer.locate_block([10.0, 20.0])[2] == pytest.approx(200.0)
+    assert localizer.locate_block([90.0, 80.0])[2] == pytest.approx(200.0)
+    assert localizer.locate_tray([10.0, 20.0])[2] == pytest.approx(207.0)
+
+
+def test_fixed_tcp_z_assessment_and_summary_report_constant_z(tmp_path):
+    block_path, tray_path = _write_calibrations(tmp_path)
+    localizer = HighPixelToTcpLocalizer(
+        block_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+        fixed_tcp_z_mm={"block": 205.0, "tray": 214.0},
+    )
+
+    assessment = localizer.assess("block", [10.0, 20.0])
+
+    assert assessment.predicted_tcp_xyz == (-290.0, 20.0, 205.0)
+    assert assessment.safety_tcp_xyz == (-290.0, 20.0, 205.0)
+    assert assessment.violated_axes == ()
+    summary = localizer.calibration_summary("block")
+    assert summary["TCP_Z来源"] == "fixed_constant=205.000"
+
+
+def test_default_mode_keeps_calibration_z_plane_and_reports_source(tmp_path):
+    block_path, tray_path = _write_calibrations(tmp_path)
+    localizer = HighPixelToTcpLocalizer(
+        block_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+    )
+
+    assert localizer.fixed_tcp_z_mm is None
+    assert localizer.locate_block([10.0, 20.0])[2] == pytest.approx(200.0)
+    assert localizer.calibration_summary("block")["TCP_Z来源"] == "calibration_z_plane"
+
+
+@pytest.mark.parametrize(
+    "fixed, message",
+    [
+        ({"block": 205.0}, r"固定 TCP Z 必须同时提供.*托盘"),
+        ({"tray": 214.0}, r"固定 TCP Z 必须同时提供.*方块"),
+        ({"block": float("nan"), "tray": 214.0}, r"方块固定 TCP Z 必须是有限数值"),
+        ({"block": True, "tray": 214.0}, r"方块固定 TCP Z 必须是有限数值"),
+        ({"block": 150.0, "tray": 214.0}, r"方块固定 TCP Z=150\.000 mm 低于安全下限 190\.000"),
+        ([205.0, 214.0], r"fixed_tcp_z_mm 必须是含 block 和 tray 键的字典"),
+    ],
+)
+def test_constructor_rejects_incomplete_or_unsafe_fixed_tcp_z(tmp_path, fixed, message):
+    block_path, tray_path = _write_calibrations(tmp_path)
+
+    with pytest.raises(ValueError, match=message):
+        HighPixelToTcpLocalizer(
+            block_path,
+            tray_path,
+            shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+            tcp_min_xyz=[-444.224, -263.279, 190.0],
+            fixed_tcp_z_mm=fixed,
+        )
