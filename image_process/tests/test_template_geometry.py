@@ -1641,6 +1641,173 @@ def test_high_mask_editor_cancel_rejects_current_detection(monkeypatch, tmp_path
         )
 
 
+def test_yolo_correction_subprocess_passes_session_and_reads_validated_commit(
+    monkeypatch,
+    tmp_path,
+):
+    module = _load_process_module_with_stubs(monkeypatch, "process_yolo_correction_success")
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    monkeypatch.setenv("DISPLAY", ":0")
+    editor_script = tmp_path / "yolo_editor.py"
+    editor_script.write_text("# 测试占位脚本\n", encoding="utf-8")
+    manifest_paths = []
+    monkeypatch.setattr(
+        image_node_module,
+        "创建YOLO编辑会话",
+        lambda temp_dir, _image, _detections: manifest_paths.append(
+            os.path.join(temp_dir, "session.json")
+        ) or manifest_paths[-1],
+    )
+    corrected_detections = [
+        {"category": "T", "score": 0.92, "box": (10.0, 10.0, 40.0, 40.0), "source": "yolo"},
+        {"category": "L_blue", "score": 1.0, "box": (50.0, 5.0, 80.0, 45.0), "source": "manual"},
+    ]
+    monkeypatch.setattr(
+        image_node_module,
+        "读取已提交YOLO检测",
+        lambda _manifest: [dict(detection) for detection in corrected_detections],
+    )
+    popen_calls = []
+
+    class CompletedProcess:
+        returncode = 0
+
+        @staticmethod
+        def poll():
+            return 0
+
+    def fake_popen(args, cwd, env):
+        popen_calls.append((args, cwd, env))
+        return CompletedProcess()
+
+    monkeypatch.setattr(image_node_module.subprocess, "Popen", fake_popen)
+    processor = object.__new__(module.ImageProcessor)
+    processor.yolo_manual_correction_enabled = True
+    processor.yolo_editor_script_path = str(editor_script)
+    processor.yolo_editor_process_lock = threading.Lock()
+    processor.active_yolo_editor_process = None
+
+    result = processor._run_yolo_manual_correction(
+        np.zeros((8, 10, 3), dtype=np.uint8),
+        [{"category": "T", "score": 0.92, "box": (10.0, 10.0, 40.0, 40.0)}],
+    )
+
+    assert result == corrected_detections
+    assert popen_calls[0][0] == [sys.executable, str(editor_script)]
+    assert popen_calls[0][1] == image_node_module.SRC_DIR
+    assert popen_calls[0][2][image_node_module.YOLO会话环境变量] == manifest_paths[0]
+    assert popen_calls[0][2]["PYTHONUNBUFFERED"] == "1"
+    assert processor.active_yolo_editor_process is None
+
+
+def test_yolo_correction_cancel_rejects_current_detection(monkeypatch, tmp_path):
+    module = _load_process_module_with_stubs(monkeypatch, "process_yolo_correction_cancel")
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    monkeypatch.setenv("DISPLAY", ":0")
+    editor_script = tmp_path / "yolo_editor.py"
+    editor_script.write_text("# 测试占位脚本\n", encoding="utf-8")
+    monkeypatch.setattr(
+        image_node_module,
+        "创建YOLO编辑会话",
+        lambda temp_dir, _image, _detections: os.path.join(temp_dir, "session.json"),
+    )
+
+    class CancelledProcess:
+        returncode = image_node_module.编辑取消退出码
+
+        @staticmethod
+        def poll():
+            return image_node_module.编辑取消退出码
+
+    monkeypatch.setattr(
+        image_node_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: CancelledProcess(),
+    )
+    processor = object.__new__(module.ImageProcessor)
+    processor.yolo_manual_correction_enabled = True
+    processor.yolo_editor_script_path = str(editor_script)
+    processor.yolo_editor_process_lock = threading.Lock()
+    processor.active_yolo_editor_process = None
+
+    with pytest.raises(RuntimeError, match="用户取消"):
+        processor._run_yolo_manual_correction(
+            np.zeros((8, 10, 3), dtype=np.uint8),
+            [{"category": "T", "score": 0.92, "box": (10.0, 10.0, 40.0, 40.0)}],
+        )
+
+
+def test_detect_blocks_automatic_runs_correction_between_yolo_and_per_box_processing(
+    monkeypatch,
+):
+    module = _load_process_module_with_stubs(monkeypatch, "process_yolo_correction_order")
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    image = np.zeros((20, 30, 3), dtype=np.uint8)
+    raw_detection = {"category": "T", "score": 0.9, "box": (10.0, 5.0, 25.0, 15.0)}
+    corrected_detection = {
+        "category": "L_blue",
+        "score": 1.0,
+        "box": (10.0, 5.0, 25.0, 15.0),
+        "source": "manual",
+    }
+    expected_block = {
+        "found": True,
+        "category": "L_blue",
+        "px": 17.0,
+        "py": 10.0,
+        "theta": 3.0,
+        "score": 1.0,
+    }
+    call_order = []
+
+    monkeypatch.setattr(
+        image_node_module,
+        "load_template_geometry",
+        lambda _mode: {"block_px": 1, "connector_px": 1},
+    )
+    monkeypatch.setattr(
+        image_node_module,
+        "detect_blocks_yolo",
+        lambda _image, _model: call_order.append("YOLO出框") or [dict(raw_detection)],
+    )
+    monkeypatch.setattr(
+        image_node_module,
+        "process_block_detections",
+        lambda _image, detections, **_kwargs: call_order.append("逐框精定位") or (
+            [dict(expected_block)],
+            image.copy(),
+        ),
+    )
+    monkeypatch.setattr(
+        image_node_module,
+        "detect_blocks_in_image",
+        lambda *_args, **_kwargs: call_order.append("旧整链路") or ([], image.copy()),
+    )
+    processor = object.__new__(module.ImageProcessor)
+    processor.model = object()
+    processor.save_top_surface_mask_vis = False
+    processor.yolo_manual_correction_enabled = True
+    processor.yolo_editor_process_lock = threading.Lock()
+    processor.active_yolo_editor_process = None
+    processor._run_yolo_manual_correction = (
+        lambda _image, detections: call_order.append("人工修正") or [dict(corrected_detection)]
+    )
+
+    blocks, debug_image, geometry = processor._detect_blocks_automatic(image)
+
+    assert call_order == ["YOLO出框", "人工修正", "逐框精定位"]
+    assert blocks == [expected_block]
+    assert geometry == {"block_px": 1, "connector_px": 1}
+    assert debug_image.shape == image.shape
+
+    # 关闭修正时完全走原有整链路，测试 patch detect_blocks_in_image 的路径不受影响。
+    call_order.clear()
+    processor.yolo_manual_correction_enabled = False
+    with pytest.raises(RuntimeError, match="高位没有识别到方块"):
+        processor._detect_blocks_automatic(image)
+    assert call_order == ["旧整链路"]
+
+
 def test_disabled_high_mask_editor_does_not_create_session_or_subprocess(monkeypatch):
     module = _load_process_module_with_stubs(monkeypatch, "process_high_mask_editor_disabled")
     image_node_module = sys.modules[module.ImageProcessor.__module__]
@@ -1715,6 +1882,8 @@ def test_shutdown_terminates_active_high_mask_editor_process(monkeypatch):
     processor = object.__new__(module.ImageProcessor)
     processor.high_mask_editor_process_lock = threading.Lock()
     processor.active_high_mask_editor_process = process
+    processor.yolo_editor_process_lock = threading.Lock()
+    processor.active_yolo_editor_process = None
     recorder_closed = []
     processor.close_debug_video_recorders = lambda: recorder_closed.append(True)
 

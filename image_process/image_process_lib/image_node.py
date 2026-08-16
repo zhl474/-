@@ -36,6 +36,8 @@ from image_process_lib.board_servo_detector import detect_nearest_board_dot_in_r
 from image_process_lib.block_category import BLOCK_CATEGORY_NAMES, normalize_category_name
 from image_process_lib.block_scene_detector import (
     detect_blocks_in_image,
+    detect_blocks_yolo,
+    process_block_detections,
     rematch_blocks_from_masks,
 )
 from image_process_lib.block_servo_detector import detect_block_with_high_prior_roi
@@ -53,6 +55,11 @@ from image_process_lib.high_mask_edit_session import (
     预览设备环境变量,
     编辑取消退出码,
     读取已提交高位Mask,
+)
+from image_process_lib.yolo_edit_session import (
+    YOLO会话环境变量,
+    创建YOLO编辑会话,
+    读取已提交YOLO检测,
 )
 from image_process_lib.task_planner import (
     ObservedBlock,
@@ -143,6 +150,12 @@ DEFAULT_HIGH_MASK_EDITOR_SCRIPT = os.path.join(
     "high_mask_editor_demo",
     "high_mask_session_editor.py",
 )
+DEFAULT_YOLO_EDITOR_SCRIPT = os.path.join(
+    SRC_DIR,
+    "tools",
+    "yolo_box_editor",
+    "yolo_box_editor.py",
+)
 
 
 class HighTcpSafetyCheckError(RuntimeError):
@@ -175,6 +188,8 @@ class ImageProcessor:
         self.prepare_task_lock = threading.Lock()
         self.high_mask_editor_process_lock = threading.Lock()
         self.active_high_mask_editor_process = None
+        self.yolo_editor_process_lock = threading.Lock()
+        self.active_yolo_editor_process = None
         self.latest_image = None
         self.latest_image_stamp = None
         self.fresh_image_timeout_sec = float(rospy.get_param("~fresh_image_timeout_sec", 0.5))
@@ -265,6 +280,30 @@ class ImageProcessor:
         ):
             raise FileNotFoundError(
                 f"高位 Mask 编辑子进程脚本不存在: {self.high_mask_editor_script_path}"
+            )
+
+        yolo_correction_config = perception_config.get("yolo_manual_correction", {})
+        if not isinstance(yolo_correction_config, dict):
+            raise ValueError("perception.yaml 的 yolo_manual_correction 必须是字典")
+        yolo_correction_enabled = rospy.get_param(
+            "~yolo_manual_correction_enabled",
+            yolo_correction_config.get("enabled", False),
+        )
+        if not isinstance(yolo_correction_enabled, bool):
+            raise ValueError("yolo_manual_correction.enabled 必须是布尔值")
+        self.yolo_manual_correction_enabled = yolo_correction_enabled
+        self.yolo_editor_script_path = src_path(
+            rospy.get_param(
+                "~yolo_correction_editor_script_path",
+                yolo_correction_config.get("script"),
+            ),
+            DEFAULT_YOLO_EDITOR_SCRIPT,
+        )
+        if self.yolo_manual_correction_enabled and not os.path.isfile(
+            self.yolo_editor_script_path
+        ):
+            raise FileNotFoundError(
+                f"YOLO 检测框修正子进程脚本不存在: {self.yolo_editor_script_path}"
             )
 
         detection_model_path = src_path(
@@ -999,12 +1038,28 @@ class ImageProcessor:
         except Exception as exc:
             rospy.logwarn("终止高位 Mask 编辑子进程失败: %s", exc)
 
+    def terminate_yolo_editor_process(self):
+        """节点退出时终止仍在等待人工输入的 YOLO 修正 GUI 子进程。"""
+        with self.yolo_editor_process_lock:
+            process = self.active_yolo_editor_process
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2.0)
+        except Exception as exc:
+            rospy.logwarn("终止 YOLO 修正子进程失败: %s", exc)
+
     def close_runtime_resources(self):
         """节点退出时统一关闭 GUI 子进程和调试视频。"""
         prompt_broker = getattr(self, "operator_prompt_broker", None)
         if prompt_broker is not None:
             prompt_broker.close()
         self.terminate_high_mask_editor_process()
+        self.terminate_yolo_editor_process()
         self.close_debug_video_recorders()
 
     def get_operator_prompt_service(self, _request):
@@ -1420,16 +1475,84 @@ class ImageProcessor:
                 raise RuntimeError(f"高位 Mask 编辑子进程异常退出，退出码={exit_code}")
             return 读取已提交高位Mask(manifest_path, blocks)
 
+    def _run_yolo_manual_correction(self, image, detections):
+        """在独立无 ROS 子进程中人工修正 YOLO 检测框，返回严格校验后的框列表。"""
+        if not getattr(self, "yolo_manual_correction_enabled", False):
+            return detections
+        if not os.environ.get("DISPLAY", "").strip():
+            raise RuntimeError(
+                "YOLO 检测框人工修正已启用，但图像节点环境中没有 DISPLAY；"
+                "请从图形桌面终端启动节点，或关闭 yolo_manual_correction.enabled"
+            )
+        if not os.path.isfile(self.yolo_editor_script_path):
+            raise RuntimeError(f"YOLO 修正脚本不存在: {self.yolo_editor_script_path}")
+
+        with tempfile.TemporaryDirectory(prefix="single_arm_tetris_yolo_edit_") as temp_dir:
+            manifest_path = 创建YOLO编辑会话(temp_dir, image, detections)
+            child_env = os.environ.copy()
+            child_env[YOLO会话环境变量] = str(manifest_path)
+            child_env["PYTHONUNBUFFERED"] = "1"
+
+            rospy.loginfo(
+                "等待 YOLO 检测框人工修正（%d 个框），按 Enter/Q 提交，Esc 取消本轮识别",
+                len(detections),
+            )
+            process = subprocess.Popen(
+                [sys.executable, self.yolo_editor_script_path],
+                cwd=SRC_DIR,
+                env=child_env,
+            )
+            with self.yolo_editor_process_lock:
+                if self.active_yolo_editor_process is not None:
+                    process.terminate()
+                    process.wait(timeout=2.0)
+                    raise RuntimeError("已有 YOLO 修正子进程正在运行")
+                self.active_yolo_editor_process = process
+            try:
+                while process.poll() is None:
+                    if rospy.is_shutdown():
+                        self.terminate_yolo_editor_process()
+                        raise RuntimeError("ROS 节点正在退出，已取消 YOLO 检测框修正")
+                    time.sleep(0.1)
+                exit_code = int(process.returncode)
+            finally:
+                with self.yolo_editor_process_lock:
+                    if self.active_yolo_editor_process is process:
+                        self.active_yolo_editor_process = None
+
+            if exit_code == 编辑取消退出码:
+                raise RuntimeError("用户取消了本轮 YOLO 检测框修正，请重新识别")
+            if exit_code != 0:
+                raise RuntimeError(f"YOLO 修正子进程异常退出，退出码={exit_code}")
+            corrected = 读取已提交YOLO检测(manifest_path)
+            rospy.loginfo(
+                "YOLO 检测框人工修正完成：%d -> %d 个框",
+                len(detections),
+                len(corrected),
+            )
+            return corrected
+
     def _detect_blocks_automatic(self, image):
         """自动识别高位方块，保留初始 Mask 和重匹配所需的完整数据。"""
         geometry = load_template_geometry("high")
-        blocks, debug_image = detect_blocks_in_image(
-            image,
-            self.model,
-            template_geometry=geometry,
-            crop_margin=8,
-            save_mask_overlay=self.save_top_surface_mask_vis,
-        )
+        if getattr(self, "yolo_manual_correction_enabled", False):
+            detections = detect_blocks_yolo(image, self.model)
+            detections = self._run_yolo_manual_correction(image, detections)
+            blocks, debug_image = process_block_detections(
+                image,
+                detections,
+                template_geometry=geometry,
+                crop_margin=8,
+                save_mask_overlay=self.save_top_surface_mask_vis,
+            )
+        else:
+            blocks, debug_image = detect_blocks_in_image(
+                image,
+                self.model,
+                template_geometry=geometry,
+                crop_margin=8,
+                save_mask_overlay=self.save_top_surface_mask_vis,
+            )
         if not blocks:
             raise RuntimeError("高位没有识别到方块")
         return blocks, debug_image, geometry

@@ -162,9 +162,37 @@ def rematch_blocks_from_masks(
     return rematched_blocks, debug_image
 
 
-def detect_blocks_in_image(
+def detect_blocks_yolo(img_bgr, model, expected_category=""):
+    """只跑 YOLO 检测，返回方块类别的原始检测框列表。
+
+    供人工修正检测框使用：每个元素为
+    {"category": str, "score": float, "box": (x1, y1, x2, y2)}。
+    board 类和与 expected_category 不一致的类别直接过滤。
+    """
+    if img_bgr is None or img_bgr.size == 0:
+        return []
+    expected_category = normalize_category_name(expected_category.strip()) if expected_category else ""
+
+    detections = []
+    result = model(img_bgr, iou=0.5, conf=0.45)
+    for det in result[0].boxes.data.tolist():
+        x1, y1, x2, y2, score, cid = det
+        category = normalize_category_name(model.names[int(cid)])
+        if category == "board":
+            continue
+        if expected_category and category != expected_category:
+            continue
+        detections.append({
+            "category": category,
+            "score": float(score),
+            "box": (float(x1), float(y1), float(x2), float(y2)),
+        })
+    return detections
+
+
+def process_block_detections(
     img_bgr,
-    model,
+    detections,
     template_geometry=None,
     template_profile=None,
     crop_margin=8,
@@ -175,33 +203,26 @@ def detect_blocks_in_image(
     angle_values=None,
     search_center=None,
     search_radius=None,
-    expected_category="",
 ):
-    """检测当前图像里的所有方块，并返回每个方块的吸取点像素和角度。
+    """对给定检测框逐个做上表面分割和模板匹配，返回方块列表。
 
-    这个函数把原来 process.py 里的 YOLO 检测、上表面分割、模板匹配、
-    L 型特殊吸取点修正集中到一处。视觉伺服和原有全场识别都调用它，
-    避免后续两套识别逻辑漂移。
+    detections 元素格式与 detect_blocks_yolo 输出一致；人工修正后的
+    框（删框/画框/改类别）与 YOLO 原生框走完全相同的下游。
     """
     if img_bgr is None or img_bgr.size == 0:
         return [], _empty_detection("输入图像为空")
 
     if template_geometry is None:
         template_geometry = load_template_geometry(template_profile)
-    expected_category = normalize_category_name(expected_category.strip()) if expected_category else ""
     image_h, image_w = img_bgr.shape[:2]
     debug_image = np.copy(img_bgr)
     mask_vis_img = np.copy(img_bgr) if save_mask_overlay else None
-    result = model(img_bgr, iou=0.5, conf=0.45)
     blocks = []
 
-    for det in result[0].boxes.data.tolist():
-        x1, y1, x2, y2, score, cid = det
-        category = normalize_category_name(model.names[int(cid)])
-        if category == "board":
-            continue
-        if expected_category and category != expected_category:
-            continue
+    for det in detections:
+        x1, y1, x2, y2 = det["box"]
+        category = normalize_category_name(det["category"])
+        score = det.get("score", 1.0)
 
         crop_x1 = max(0, int(x1) - crop_margin)
         crop_y1 = max(0, int(y1) - crop_margin)
@@ -251,3 +272,45 @@ def detect_blocks_in_image(
         })
 
     return blocks, debug_image
+
+
+def detect_blocks_in_image(
+    img_bgr,
+    model,
+    template_geometry=None,
+    template_profile=None,
+    crop_margin=8,
+    save_mask_overlay=False,
+    angle_step=1,
+    angle_center=None,
+    angle_window=None,
+    angle_values=None,
+    search_center=None,
+    search_radius=None,
+    expected_category="",
+):
+    """检测当前图像里的所有方块，并返回每个方块的吸取点像素和角度。
+
+    这个函数把原来 process.py 里的 YOLO 检测、上表面分割、模板匹配、
+    L 型特殊吸取点修正集中到一处。视觉伺服和原有全场识别都调用它，
+    避免后续两套识别逻辑漂移。内部先经 detect_blocks_yolo 出框，再交
+    process_block_detections 逐框精定位，行为与拆分前完全一致。
+    """
+    if img_bgr is None or img_bgr.size == 0:
+        return [], _empty_detection("输入图像为空")
+
+    detections = detect_blocks_yolo(img_bgr, model, expected_category=expected_category)
+    return process_block_detections(
+        img_bgr,
+        detections,
+        template_geometry=template_geometry,
+        template_profile=template_profile,
+        crop_margin=crop_margin,
+        save_mask_overlay=save_mask_overlay,
+        angle_step=angle_step,
+        angle_center=angle_center,
+        angle_window=angle_window,
+        angle_values=angle_values,
+        search_center=search_center,
+        search_radius=search_radius,
+    )

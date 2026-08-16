@@ -238,6 +238,15 @@ FIELD_OVERRIDES = {
     "perception.high_mask_manual_editor.preview_device": {
         "label": "Mask 预览设备", "options": ["cpu", "cuda"],
     },
+    "perception.yolo_manual_correction": {
+        "label": "YOLO 检测框人工修正",
+    },
+    "perception.yolo_manual_correction.enabled": {
+        "label": "启用检测框人工修正",
+    },
+    "perception.yolo_manual_correction.script": {
+        "label": "检测框修正脚本", "risk": "danger",
+    },
     "perception.calibration": {
         "label": "标定文件", "risk": "danger",
     },

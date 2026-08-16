@@ -37,6 +37,13 @@ high_mask_manual_editor:
   # 人工编辑期间不运行其他 GPU 推理时使用 cuda；需要隔离显存时可改为 cpu。
   preview_device: cuda
 
+# 高位 YOLO 检测出框后、上表面分割和模板匹配前人工修正检测框：
+# 选类别画框（漏检）、删除错误框（多检）、改选中框类别（识别错）。
+# 修正后的框与 YOLO 原生框走完全相同的下游；GUI 运行在独立无 ROS 子进程中。
+yolo_manual_correction:
+  enabled: true
+  script: tools/yolo_box_editor/yolo_box_editor.py
+
 calibration:
   # 正式运行部署副本；也可由对应 ROS 私有参数覆盖。
   block_pixel_to_tcp: image_process/config/block_pixel_to_tcp_calibration.yaml
