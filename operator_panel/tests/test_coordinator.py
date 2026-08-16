@@ -932,3 +932,30 @@ def test执行配置应用硬件范围会重启硬件和感知(monkeypatch):
         "start_runtime:formal",
         "perception_ready",
     ]
+
+
+def test任务输出tee同步写入网页日志和文件(tmp_path):
+    import io
+
+    from operator_panel_lib.coordinator import _TaskOutputTee
+
+    bus = EventBus()
+    fallback = io.StringIO()
+    tee = _TaskOutputTee(bus, tmp_path / "任务执行.log", "===== 任务测试 =====")
+
+    tee.write("[视觉伺服] 第 1 轮误差=(+2.00,-1.00)px，修正=(+0.500,-0.250)mm\n", fallback)
+    tee.write("无换行的尾巴", fallback)
+    tee.close()
+
+    content = (tmp_path / "任务执行.log").read_text(encoding="utf-8")
+    assert "===== 任务测试 =====" in content
+    assert "修正=(+0.500,-0.250)mm" in content
+    assert "无换行的尾巴" in content
+    assert "结束" not in content  # close 不写结束行，结束行由上下文管理器补
+
+    logs = [event for event in bus.snapshot("log")]
+    messages = [entry["data"]["message"] for entry in logs]
+    assert any("修正=(+0.500,-0.250)mm" in message for message in messages)
+    assert all(entry["data"]["source"] == "任务执行" for entry in logs)
+    # 原始终端流照常收到内容。
+    assert "修正=(+0.500,-0.250)mm" in fallback.getvalue()

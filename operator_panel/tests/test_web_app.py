@@ -314,6 +314,7 @@ def testlaunch日志接口列出文件并返回尾部内容(web):
     assert files["hardware"]["exists"] is False
     assert files["runtime"]["exists"] is True
     assert files["runtime"]["path"].endswith("perception.launch.log")
+    assert files["task"]["exists"] is False
 
     content = client.get("/api/launch-log/runtime?lines=2", **url("x"))
     assert content.status_code == 200

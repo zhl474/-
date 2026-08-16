@@ -110,6 +110,7 @@ class PanelRuntime:
             self.config_manager, self.store, self.config,
             exit_callback=self.request_exit,
             direct_hardware=self.direct,
+            launch_log_dir=self.launch_log_dir,
         )
         self.ros.state_callback = self.coordinator.on_ros_health
         self.supervisor.state_callback = self.coordinator.on_process_state

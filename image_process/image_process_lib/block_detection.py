@@ -7,6 +7,8 @@ from ultralytics import YOLO
 import sys
 import tensorrt
 
+from image_process_lib.template_match.kernels_create import _l_grab_point
+
 print("实际解释器：", sys.executable)
 print("TensorRT 路径：", tensorrt.__file__)
 SRC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -249,36 +251,22 @@ def draw_mask_on_full_image(full_image, mask, crop_x1, crop_y1, color=(0, 255, 0
 def get_length(point1,point2):
         return math.sqrt((point1[0]-point2[0])**2+(point1[1]-point2[1])**2)
 def coreect_LL_location(box,mask,rect):#获取L方块长边偏下的位置，L方块系中间吸不到（不用细看）
-    px=0
-    py=0
-    if(rect[1][0]>rect[1][1]):
-        long_side=rect[1][0]
-    else:
-        long_side=rect[1][1]
-    px=rect[0][0]
-    py=rect[0][1]
-    l1=get_length(box[0],box[1])
-    l2=get_length(box[0],box[2])
-    l3=get_length(box[0],box[3])
-    if(l1/long_side>=0.9 and l1/long_side<=1.1):
-        long1=[box[0],box[1]]
-        long2=[box[2],box[3]]
-    elif(l2/long_side>=0.9 and l2/long_side<=1.1):
-        long1=[box[0],box[2]]
-        long2=[box[1],box[3]]
-    elif(l3/long_side>=0.9 and l3/long_side<=1.1):
-        long1=[box[0],box[3]]
-        long2=[box[1],box[2]]
-    point1=[int((px+(long1[0][0]+long1[1][0])/2.0)/2.0),int((py+(long1[0][1]+long1[1][1])/2.0)/2.0)]
-    point2=[int((px+(long2[0][0]+long2[1][0])/2.0)/2.0),int((py+(long2[0][1]+long2[1][1])/2.0)/2.0)]
-    # print("mask1:",mask[point1[0]][point1[1]],point1)
-    # print("mask2:",mask[point2[0]][point2[1]],point2)
-    # mask[point1[0]][point1[1]]=255
-    # mask[point2[0]][point2[1]]=255
-    if(mask[point1[1]][point1[0]]>=1):#是是方块内
-        return point1[0],point1[1]
-    else:
-        return point2[0],point2[1]
+    """方案A：实体长边中点沿内向法向量实测横条厚度，抓点=横条(中间格)中心。
+
+    算法与 kernels_create._template_l_pick_in_canvas 共用 _l_grab_point，保证两处严格一致。
+    """
+    center_x, center_y = rect[0]
+    height, width = mask.shape
+
+    def _sample(x, y):
+        if 0 <= y < height and 0 <= x < width:
+            return mask[y, x]
+        return None
+
+    pick = _l_grab_point(box, _sample, rect[1], (center_x, center_y))
+    if pick is None:
+        return int(round(center_x)), int(round(center_y))
+    return pick
 
 
 def fill_holes(mask):#对检测到的mask进行填充

@@ -1,11 +1,13 @@
 """网页控制台所有可变操作的单一协调器。"""
 
 from collections import deque
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
 import json
 import math
 import os
+from pathlib import Path
 import signal
 import subprocess
 import sys
@@ -19,7 +21,96 @@ from .constants import (
     BLOCK_CATEGORY_NAMES,
     WRITABLE_CONFIG_FILES,
 )
+from .process_supervisor import (
+    ANSI_PATTERN,
+    LAUNCH_LOG_FILES,
+    ProcessSupervisor,
+)
 from .usb_occupancy import probe_usb_occupancy
+
+
+class _TaskStreamProxy:
+    """任务线程里顶替 sys.stdout / sys.stderr 的转发流。"""
+
+    def __init__(self, tee, fallback):
+        self._tee = tee
+        self._fallback = fallback
+        self.encoding = getattr(fallback, "encoding", "utf-8")
+        self.errors = getattr(fallback, "errors", "replace")
+
+    def write(self, text):
+        return self._tee.write(text, self._fallback)
+
+    def flush(self):
+        self._fallback.flush()
+
+    def isatty(self):
+        return False
+
+
+class _TaskOutputTee:
+    """TaskRunner 在控制台进程内直接 print；同步转成网页日志和任务日志文件。"""
+
+    SOURCE = "任务执行"
+
+    def __init__(self, event_bus, log_path, note):
+        self.event_bus = event_bus
+        self._handle = None
+        if log_path is not None:
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                self._handle = log_path.open("a", encoding="utf-8", errors="replace")
+            except Exception as exc:
+                self._publish_warning(f"无法打开任务日志文件 {log_path}：{exc}；本次任务不落盘。")
+        self._lock = threading.Lock()
+        self._pending = ""
+        self._append(note)
+
+    def _publish_warning(self, message):
+        self.event_bus.publish("log", {
+            "source": self.SOURCE, "level": "warning", "message": message,
+        })
+
+    def _append(self, line):
+        if self._handle is None:
+            return
+        try:
+            self._handle.write(line + "\n")
+            self._handle.flush()
+        except Exception as exc:
+            self._handle = None
+            self._publish_warning(f"写入任务日志失败：{exc}；已停止落盘。")
+
+    def _emit(self, line):
+        line = ANSI_PATTERN.sub("", line.rstrip("\r"))
+        if not line.strip():
+            return
+        self._append(line)
+        self.event_bus.publish("log", {
+            "source": self.SOURCE,
+            "level": ProcessSupervisor._level(line),
+            "message": line,
+        })
+
+    def write(self, text, fallback):
+        fallback.write(text)
+        with self._lock:
+            self._pending += str(text)
+            *lines, self._pending = self._pending.split("\n")
+            for line in lines:
+                self._emit(line)
+
+    def close(self):
+        with self._lock:
+            if self._pending:
+                self._emit(self._pending)
+                self._pending = ""
+        if self._handle is not None:
+            try:
+                self._handle.close()
+            except Exception:
+                pass
+            self._handle = None
 
 
 class OperationBusy(RuntimeError):
@@ -49,6 +140,7 @@ class OperationCoordinator:
         exit_callback=None,
         direct_hardware=None,
         usb_probe=None,
+        launch_log_dir=None,
     ):
         self.event_bus = event_bus
         self.supervisor = supervisor
@@ -59,6 +151,7 @@ class OperationCoordinator:
         self.exit_callback = exit_callback
         self.direct = direct_hardware
         self.usb_probe = usb_probe or probe_usb_occupancy
+        self.launch_log_dir = Path(launch_log_dir) if launch_log_dir else None
         self._lock = threading.RLock()
         self._stop_channel_lock = threading.Lock()
         self._active_operation = None
@@ -295,6 +388,29 @@ class OperationCoordinator:
         self.event_bus.publish("log", {
             "source": source, "level": str(level), "message": str(message),
         })
+
+    @contextmanager
+    def _task_output(self, phase_name):
+        """任务运行期间接管本进程 stdout/stderr：print 进网页日志和任务日志文件。
+
+        任务运行时常规操作串行拒绝并发，其它线程基本不 print，可以安全接管。
+        """
+        note = f"===== {self._now()} {phase_name} ====="
+        path = (
+            self.launch_log_dir / LAUNCH_LOG_FILES["task"]
+            if self.launch_log_dir is not None else None
+        )
+        tee = _TaskOutputTee(self.event_bus, path, note)
+        stdout, stderr = sys.stdout, sys.stderr
+        sys.stdout = _TaskStreamProxy(tee, stdout)
+        sys.stderr = _TaskStreamProxy(tee, stderr)
+        try:
+            yield
+        finally:
+            sys.stdout = stdout
+            sys.stderr = stderr
+            tee._append(f"===== {self._now()} {phase_name}结束 =====")
+            tee.close()
 
     def submit(self, kind, operation, source="控制台"):
         """提交一个常规异步操作；忙时直接拒绝，不积压现场指令。"""
@@ -698,18 +814,19 @@ class OperationCoordinator:
                     "message": "", "error": "", "current": 0, "total": 0,
                 })
             self._publish_state()
-            try:
-                response = runner.prepare(
-                    advanced=bool(advanced and mode == "formal"),
-                    place_order=place_order,
-                )
-            except Exception as exc:
-                with self._lock:
-                    if token.requested:
-                        self._state["task"].update({"state": "已中止", "error": str(exc)})
-                    else:
-                        self._state["task"].update({"state": "失败", "error": str(exc)})
-                raise
+            with self._task_output("任务准备"):
+                try:
+                    response = runner.prepare(
+                        advanced=bool(advanced and mode == "formal"),
+                        place_order=place_order,
+                    )
+                except Exception as exc:
+                    with self._lock:
+                        if token.requested:
+                            self._state["task"].update({"state": "已中止", "error": str(exc)})
+                        else:
+                            self._state["task"].update({"state": "失败", "error": str(exc)})
+                    raise
             success = bool(getattr(response, "success", False))
             message = str(getattr(response, "message", ""))
             counts = {
@@ -873,14 +990,15 @@ class OperationCoordinator:
             status = "完成"
             message = ""
             try:
-                if mode == "calibration":
-                    runner.execute_all(
-                        counts["task_count"],
-                        block_count=counts["block_count"],
-                        tray_count=counts["tray_count"],
-                    )
-                else:
-                    runner.execute_all(counts["task_count"])
+                with self._task_output("任务执行"):
+                    if mode == "calibration":
+                        runner.execute_all(
+                            counts["task_count"],
+                            block_count=counts["block_count"],
+                            tray_count=counts["tray_count"],
+                        )
+                    else:
+                        runner.execute_all(counts["task_count"])
                 with self._lock:
                     self._state["task"].update({
                         "state": "完成", "phase": "任务完成",

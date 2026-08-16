@@ -2131,7 +2131,6 @@ const LAUNCH_LOG_REFRESH_MS = 2000;
 
 const launchLogViewer = {
   timer: 0,
-  pinned: true,
   allMode: false,
 };
 
@@ -2159,37 +2158,40 @@ async function loadLaunchLogMeta(kind) {
     }
     $('#launch-log-meta').textContent = meta.exists
       ? `${meta.path} · ${formatBytes(meta.size)} · 更新 ${meta.modified_at || '—'}${launchLogViewer.allMode ? ' · 已显示全部行（自动刷新暂停）' : ' · 每 2 秒自动刷新'}`
-      : `${meta.path} · 尚未生成（还没有通过控制台启动过该 launch）`;
+      : `${meta.path} · 尚未生成（还没有产生过该类输出）`;
     download.hidden = !meta.exists;
   } catch (error) {
     $('#launch-log-meta').textContent = formatError(error);
   }
 }
 
-async function loadLaunchLog() {
+async function loadLaunchLog(options = {}) {
   const kind = app.launchLogKind;
   const content = $('#launch-log-content');
-  // 已在底部（或一直跟随）就贴住底部；用户往上翻阅时保持原位不被拽走。
+  const follow = $('#launch-log-follow').checked;
+  const hadContent = content.textContent !== '' && content.textContent !== '读取中…';
+  // 替换内容前记录滚动状态：在底部且开启跟随才贴底，否则还原原位置，绝不拽走阅读位置。
   const atBottom = content.scrollHeight - content.scrollTop - content.clientHeight < 40;
-  const pinned = launchLogViewer.pinned || atBottom;
+  const scrollFromTop = content.scrollTop;
   loadLaunchLogMeta(kind);
-  content.textContent = '读取中…';
+  if (options.showLoading || !hadContent) content.textContent = '读取中…';
   try {
     const text = await api(launchLogUrl(kind, launchLogViewer.allMode ? LAUNCH_LOG_ALL_LINES : LAUNCH_LOG_TAIL_LINES));
     content.textContent = text || '（暂无输出）';
   } catch (error) {
-    content.textContent = '';
+    if (!hadContent) content.textContent = '';
     toast('读取 launch 日志失败', formatError(error), 'error');
+    return;
   }
-  launchLogViewer.pinned = pinned;
-  if (pinned) content.scrollTop = content.scrollHeight;
+  if (follow && atBottom) content.scrollTop = content.scrollHeight;
+  else if (hadContent) content.scrollTop = scrollFromTop;
 }
 
 function bindLaunchLogs() {
   const dialog = $('#launch-log-dialog');
   $('#launch-log-open').addEventListener('click', () => {
     launchLogViewer.allMode = false;
-    launchLogViewer.pinned = true;
+    $('#launch-log-content').textContent = '';
     launchLogViewer.timer = window.setInterval(() => {
       // 「显示全部行」时数据量太大，暂停自动刷新，避免每 2 秒重传整份日志。
       if (!launchLogViewer.allMode) loadLaunchLog();
@@ -2199,7 +2201,10 @@ function bindLaunchLogs() {
   });
   dialog.addEventListener('close', () => window.clearInterval(launchLogViewer.timer));
   $('#launch-log-close').addEventListener('click', () => dialog.close());
-  $('#launch-log-refresh').addEventListener('click', () => { launchLogViewer.allMode = false; loadLaunchLog(); });
+  $('#launch-log-refresh').addEventListener('click', () => {
+    launchLogViewer.allMode = false;
+    loadLaunchLog({ showLoading: true });
+  });
   $('#launch-log-all').addEventListener('click', async () => {
     const content = $('#launch-log-content');
     launchLogViewer.allMode = true;
@@ -2216,7 +2221,7 @@ function bindLaunchLogs() {
   $$('.launch-log-tabs button').forEach((button) => button.addEventListener('click', () => {
     app.launchLogKind = button.dataset.launchLogKind;
     launchLogViewer.allMode = false;
-    launchLogViewer.pinned = true;
+    $('#launch-log-content').textContent = '';
     $$('.launch-log-tabs button').forEach((item) => item.classList.toggle('active', item === button));
     loadLaunchLog();
   }));

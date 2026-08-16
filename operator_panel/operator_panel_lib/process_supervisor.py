@@ -16,6 +16,7 @@ ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 LAUNCH_LOG_FILES = {
     "hardware": "hardware.launch.log",
     "runtime": "perception.launch.log",
+    "task": "任务执行.log",
 }
 
 
@@ -204,6 +205,10 @@ class ProcessSupervisor:
                     "检测到外部 ROS 节点占用：" + "、".join(conflicts)
                     + "。控制台不会结束外部节点。"
                 )
+            # 节点 print() 走管道时 Python 默认块缓冲，稀疏消息会积压很久；
+            # 注入 PYTHONUNBUFFERED 让 launch 原始输出实时可见。
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
             process = self.popen_factory(
                 list(command),
                 stdin=subprocess.DEVNULL,
@@ -212,7 +217,7 @@ class ProcessSupervisor:
                 text=True,
                 bufsize=1,
                 start_new_session=True,
-                env=os.environ.copy(),
+                env=env,
             )
             self._processes[kind] = process
             self._requested_stop[kind] = False

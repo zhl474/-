@@ -175,6 +175,35 @@ class HighPixelToTcpLocalizer:
             )
         return self._calibrations[subject]
 
+    def calibration_summary(self, subject: str) -> dict:
+        """只读暴露标定元信息，供定位全景导出留档。"""
+        calibration = self._subject_calibration(subject, (0.0, 0.0))
+        document = calibration.metadata
+        z_plane = calibration.z_plane_coefficients
+        coverage = document.get("coverage")
+        return {
+            "schema_version": int(calibration.schema_version),
+            "实验批次": document.get("generation_id"),
+            "XY模型": calibration.model_name,
+            "Z平面系数a_b_c": (
+                None if z_plane is None else [float(value) for value in z_plane]
+            ),
+            "凸包顶点数": int(len(calibration.pixel_convex_hull)),
+            "标定样本数": (
+                None if not isinstance(coverage, dict) else coverage.get("sample_count")
+            ),
+        }
+
+    def is_pixel_within_coverage(
+        self,
+        subject: str,
+        pixel_xy: Sequence[float],
+        tolerance_px: float = 0.0,
+    ) -> bool:
+        """判断像素是否在标定采集凸包内，仅作诊断不限制预测。"""
+        calibration = self._subject_calibration(subject, pixel_xy)
+        return calibration.is_pixel_within_coverage(pixel_xy, tolerance_px=tolerance_px)
+
     def predict_tcp_xyz(self, subject: str, pixel_xy: Sequence[float]) -> np.ndarray:
         """预测并校验 TCP XYZ；标定样本凸包不作为正式抓取范围。"""
         assessment = self.assess(subject, pixel_xy)

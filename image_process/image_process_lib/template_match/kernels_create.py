@@ -276,66 +276,137 @@ def create_rotation_kernels(
     )
 
 
+def _l_long_edges(box, long_side):
+    """从 box 顶点中找出两条长边（对边）。
+
+    约定 box[0] 是矩形一个角：box[0]-box[1] 与 box[0]-box[3] 是两条邻边，
+    box[0]-box[2] 是对角线（对 3:2 的 L，对角线/长边≈1.19，永不在 0.9~1.1 内，仅作兜底）。
+    """
+    for (a, b), (c, d) in zip(
+        ((0, 1), (0, 2), (0, 3)),
+        ((2, 3), (1, 3), (1, 2)),
+    ):
+        edge_len = math.hypot(box[a][0] - box[b][0], box[a][1] - box[b][1])
+        if 0.9 * long_side <= edge_len <= 1.1 * long_side:
+            return (box[a], box[b]), (box[c], box[d])
+    return (box[0], box[1]), (box[2], box[3])
+
+
+def _edge_midpoint(edge):
+    return (
+        (edge[0][0] + edge[1][0]) / 2.0,
+        (edge[0][1] + edge[1][1]) / 2.0,
+    )
+
+
+def _edge_solid_ratio(edge, sample, samples=20):
+    """沿边等距采样，返回落在实体上的比例。
+
+    sample(x, y) 越界返回 None；越界视为非实体（紧边框外的点本来就是背景），
+    分母恒为采样总数，避免把出窗样本剔出分母而人为抬高占比。
+    """
+    p1, p2 = edge
+    solid = 0
+    for i in range(samples + 1):
+        t = i / float(samples)
+        x = int(round(p1[0] + (p2[0] - p1[0]) * t))
+        y = int(round(p1[1] + (p2[1] - p1[1]) * t))
+        value = sample(x, y)
+        if value is not None and value >= 1:
+            solid += 1
+    return solid / float(samples + 1)
+
+
+def _inward_direction(edge, center):
+    """返回从边指向矩形内部的单位法向；退化边返回 None。"""
+    edge_len = math.hypot(edge[1][0] - edge[0][0], edge[1][1] - edge[0][1])
+    if edge_len <= 0:
+        return None
+    ux = (edge[1][0] - edge[0][0]) / edge_len
+    uy = (edge[1][1] - edge[0][1]) / edge_len
+    n1 = (-uy, ux)
+    n2 = (uy, -ux)
+    mx, my = _edge_midpoint(edge)
+    cx, cy = center
+    if n2[0] * (cx - mx) + n2[1] * (cy - my) > n1[0] * (cx - mx) + n1[1] * (cy - my):
+        return n2
+    return n1
+
+
+def _scan_first_run(mx, my, inward, sample, max_steps):
+    """从 (mx, my) 沿 inward 扫描，返回第一段连续实体的 (起点偏移, 长度)；无实体返回 None。"""
+    solid_start = None
+    last_solid = 0
+    for t in range(max_steps):
+        x = int(round(mx + inward[0] * t))
+        y = int(round(my + inward[1] * t))
+        value = sample(x, y)
+        if value is not None and value >= 1:
+            if solid_start is None:
+                solid_start = t
+            last_solid = t
+        elif solid_start is not None:
+            break
+    if solid_start is None:
+        return None
+    return solid_start, last_solid - solid_start + 1
+
+
+def _l_grab_point(box, sample, rect_size, center):
+    """方案A：实体长边中点沿内向法向量实测横条厚度，抓点 = 横条(中间格)中心。
+
+    找不到实体或抓点不在实体上时返回 None，由调用方回退到矩形中心。
+    """
+    long_side, short_side = max(rect_size), min(rect_size)
+
+    long1, long2 = _l_long_edges(box, long_side)
+    solid_edge = (
+        long1
+        if _edge_solid_ratio(long1, sample) >= _edge_solid_ratio(long2, sample)
+        else long2
+    )
+
+    mx, my = _edge_midpoint(solid_edge)
+    inward = _inward_direction(solid_edge, center)
+    if inward is None:
+        return None
+
+    run = _scan_first_run(mx, my, inward, sample, int(round(long_side + short_side)) + 2)
+    if run is None:
+        return None
+    solid_start, cell = run
+
+    gx = int(round(mx + inward[0] * (solid_start + cell / 2.0)))
+    gy = int(round(my + inward[1] * (solid_start + cell / 2.0)))
+    value = sample(gx, gy)
+    if value is not None and value >= 1:
+        return (gx, gy)
+    return None
+
+
 def _template_l_pick_in_canvas(binary, bbox, anchor, rect_size, template_angle):
     """按 coreect_LL_location 相同规则计算 L 形模板抓取点（画布坐标）。
 
     binary 为模板紧边框二值图，bbox 为其在画布中的左上角，anchor 为旋转中心
-    相对紧边框左上角的偏移；返回抓取点画布坐标，两候选都无实体时回退到矩形中心。
+    相对紧边框左上角的偏移；抓取点不在实体上时回退到矩形中心。
     """
     x1, y1 = bbox[0], bbox[1]
     center_x = anchor[0] + x1
     center_y = anchor[1] + y1
     rect = ((float(center_x), float(center_y)), rect_size, -1.0 * float(template_angle))
     box = np.intp(cv2.boxPoints(rect))
-    long_side = rect_size[0] if rect_size[0] > rect_size[1] else rect_size[1]
 
-    def _edge_length(point_a, point_b):
-        return math.sqrt(
-            (float(point_a[0]) - float(point_b[0])) ** 2
-            + (float(point_a[1]) - float(point_b[1])) ** 2
-        )
-
-    l1 = _edge_length(box[0], box[1])
-    l2 = _edge_length(box[0], box[2])
-    l3 = _edge_length(box[0], box[3])
-    if 0.9 * long_side <= l1 <= 1.1 * long_side:
-        long1, long2 = (box[0], box[1]), (box[2], box[3])
-    elif 0.9 * long_side <= l2 <= 1.1 * long_side:
-        long1, long2 = (box[0], box[2]), (box[1], box[3])
-    elif 0.9 * long_side <= l3 <= 1.1 * long_side:
-        long1, long2 = (box[0], box[3]), (box[1], box[2])
-    else:
-        long1, long2 = (box[0], box[1]), (box[2], box[3])
-
-    def _edge_midpoint(edge):
-        return (
-            (float(edge[0][0]) + float(edge[1][0])) / 2.0,
-            (float(edge[0][1]) + float(edge[1][1])) / 2.0,
-        )
-
-    mid1 = _edge_midpoint(long1)
-    mid2 = _edge_midpoint(long2)
-    point1 = (
-        int((center_x + mid1[0]) / 2.0),
-        int((center_y + mid1[1]) / 2.0),
-    )
-    point2 = (
-        int((center_x + mid2[0]) / 2.0),
-        int((center_y + mid2[1]) / 2.0),
-    )
-
-    def _covered(point):
-        px = point[0] - x1
-        py = point[1] - y1
+    def _sample(x, y):
+        px = x - x1
+        py = y - y1
         if 0 <= px < binary.shape[1] and 0 <= py < binary.shape[0]:
-            return bool(binary[py, px] >= 1)
-        return False
+            return binary[py, px]
+        return None
 
-    if _covered(point1):
-        return point1
-    if _covered(point2):
-        return point2
-    return (int(round(center_x)), int(round(center_y)))
+    pick = _l_grab_point(box, _sample, rect_size, (center_x, center_y))
+    if pick is None:
+        return (int(round(center_x)), int(round(center_y)))
+    return pick
 
 
 def create_pick_aligned_kernels(

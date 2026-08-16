@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime
 
 import rospy
 from sensor_msgs.msg import Image
@@ -42,6 +43,10 @@ from image_process_lib.advanced_planner import AdvancedPlanner
 from image_process_lib.debug_output import DebugVideoRecorder, save_image_to_path
 from image_process_lib.depth_rough_localization import DepthRoughLocalizer, fit_z_plane
 from image_process_lib.high_pixel_to_tcp_localizer import HighPixelToTcpLocalizer
+from image_process_lib.localization_panorama import (
+    build_calibration_panorama_document,
+    build_formal_panorama_document,
+)
 from image_process_lib.high_mask_edit_session import (
     会话环境变量,
     创建高位Mask编辑会话,
@@ -378,6 +383,12 @@ class ImageProcessor:
             "~visual_board_grid_debug_path",
             os.path.join(DEFAULT_DEBUG_DIR, "托盘格点粗定位.jpg")
         )
+        # 高位定位全景 JSON（140 格点 + 方块）每次 prepare 落盘到该目录，文件名带模式与时间戳。
+        self.localization_panorama_dir = str(
+            rospy.get_param("~localization_panorama_dir", "/home/zhl/桌面")
+        ).strip()
+        if not self.localization_panorama_dir:
+            raise ValueError("localization_panorama_dir 不能为空")
         board_servo = perception_config["board_servo"]
         block_servo = perception_config["block_servo"]
         self.board_low_roi_half_size = rospy.get_param("~board_low_roi_half_size", board_servo["roi_half_size"])
@@ -1871,6 +1882,59 @@ class ImageProcessor:
         except Exception as exc:
             rospy.logwarn("动态盘面选择报告写入失败，不影响本轮任务: %s", exc)
 
+    def _write_localization_panorama(self, mode_label, document):
+        """把定位全景 JSON 写入桌面目录；文件名带模式与秒级时间戳，不覆盖历史。"""
+        output_dir = self.localization_panorama_dir
+        os.makedirs(output_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        panorama_path = os.path.join(
+            output_dir,
+            f"高位定位全景_{mode_label}_{timestamp}.json",
+        )
+        atomic_write_json(panorama_path, document)
+        rospy.loginfo("高位定位全景已写入: %s", panorama_path)
+
+    def _save_formal_localization_panorama(self, observed_blocks, image_shape):
+        """正式模式：当次 140 格点与方块的标定预测 TCP 全量留档，失败不影响任务。"""
+        try:
+            document = build_formal_panorama_document(
+                generated_at=datetime.now().isoformat(timespec="seconds"),
+                image_shape=image_shape,
+                board_angle_deg=getattr(self, "board_theta", None),
+                board_grid_points=self.board_grid_points,
+                observed_blocks=observed_blocks,
+                localizer=self.high_tcp_localizer,
+                pick_surface_offset_mm=self.pick_surface_offset_mm,
+                block_calibration_sha256=sha256_file(self.block_calibration_path),
+                tray_calibration_sha256=sha256_file(self.tray_calibration_path),
+            )
+            self._write_localization_panorama("正式模式", document)
+        except Exception as exc:
+            rospy.logwarn("高位定位全景（正式）写入失败，不影响本轮任务: %s", exc)
+
+    def _save_calibration_localization_panorama(
+        self,
+        observed_blocks,
+        placement_targets,
+        block_plane,
+        image_shape,
+    ):
+        """标定模式：深度实测世界坐标与拟合 Z 平面留档，失败不影响标定。"""
+        try:
+            document = build_calibration_panorama_document(
+                generated_at=datetime.now().isoformat(timespec="seconds"),
+                image_shape=image_shape,
+                board_angle_deg=getattr(self, "board_theta", None),
+                board_grid_points=self.board_grid_points,
+                observed_blocks=observed_blocks,
+                placement_targets=placement_targets,
+                block_plane=block_plane,
+                pick_surface_offset_mm=self.pick_surface_offset_mm,
+            )
+            self._write_localization_panorama("标定模式", document)
+        except Exception as exc:
+            rospy.logwarn("高位定位全景（标定）写入失败，不影响本轮标定: %s", exc)
+
     def _make_task_sequence_optimizer_config(self):
         """把已校验的执行配置投影为纯规划器配置。"""
         return TaskSequenceOptimizerConfig(
@@ -2271,6 +2335,8 @@ class ImageProcessor:
             for index, block in enumerate(observed_blocks)
         ]
         tray_targets = []
+        block_plane = None
+        placement_targets = []
         if tray_found:
             block_plane = self._fit_calibration_block_plane(observed_blocks)
             placement_targets = self._build_calibration_tray_targets(
@@ -2321,6 +2387,12 @@ class ImageProcessor:
                 )
                 for index, target in enumerate(placement_targets)
             ]
+        self._save_calibration_localization_panorama(
+            observed_blocks,
+            placement_targets,
+            block_plane,
+            image.shape,
+        )
         return block_targets, tray_targets
 
     def prepare_task(self, request):
@@ -2421,6 +2493,11 @@ class ImageProcessor:
 
                 observed_blocks = self._build_observed_blocks_for_task(
                     final_blocks,
+                    image.shape,
+                )
+                # 规划前先留档当次定位全景，规划失败也能保留现场用于分析。
+                self._save_formal_localization_panorama(
+                    observed_blocks,
                     image.shape,
                 )
                 dynamic_mode = (

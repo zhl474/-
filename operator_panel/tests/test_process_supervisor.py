@@ -30,9 +30,11 @@ class FakeProcess:
 
 def test只会构造固定硬件和感知launch命令():
     commands = []
+    environments = []
 
-    def popen(command, **_kwargs):
+    def popen(command, **kwargs):
         commands.append(command)
+        environments.append(kwargs.get("env") or {})
         return FakeProcess()
 
     supervisor = ProcessSupervisor(
@@ -45,6 +47,8 @@ def test只会构造固定硬件和感知launch命令():
     assert commands[1][:3] == ["roslaunch", "competition", "perception.launch"]
     assert "calibration_mode:=true" in commands[1]
     assert "interaction_mode:=web" in commands[1]
+    # 节点 print 不被管道块缓冲，原始输出才能实时进日志。
+    assert all(env.get("PYTHONUNBUFFERED") == "1" for env in environments)
     with pytest.raises(ValueError):
         supervisor.start_runtime("任意launch")
 

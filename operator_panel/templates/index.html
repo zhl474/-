@@ -517,12 +517,14 @@
     <div class="launch-log-tabs" role="tablist" aria-label="launch 日志类别">
       <button type="button" data-launch-log-kind="hardware" class="active">硬件 hardware.launch</button>
       <button type="button" data-launch-log-kind="runtime">感知 perception.launch</button>
+      <button type="button" data-launch-log-kind="task">任务执行 TaskRunner</button>
     </div>
     <p id="launch-log-meta" class="launch-log-meta">尚未读取</p>
     <div class="launch-log-actions">
       <button id="launch-log-refresh" class="button ghost compact" type="button">刷新</button>
       <button id="launch-log-all" class="button ghost compact" type="button">显示全部行</button>
       <a id="launch-log-download" class="button ghost compact" href="#" download>下载完整文件</a>
+      <label class="switch"><input id="launch-log-follow" type="checkbox" checked><span></span>跟随新输出</label>
     </div>
     <pre id="launch-log-content" class="diff-content launch-log-content"></pre>
   </dialog>

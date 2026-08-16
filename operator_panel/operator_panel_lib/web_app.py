@@ -26,7 +26,7 @@ from .coordinator import OperationBusy, OperationRejected
 from .process_supervisor import LAUNCH_LOG_FILES, tail_lines
 
 
-LAUNCH_LOG_LABELS = {"hardware": "硬件", "runtime": "感知"}
+LAUNCH_LOG_LABELS = {"hardware": "硬件", "runtime": "感知", "task": "任务执行"}
 
 
 def create_app(
@@ -384,7 +384,7 @@ def create_app(
         files = []
         if launch_log_dir is not None:
             root = Path(launch_log_dir)
-            for kind in ("hardware", "runtime"):
+            for kind in ("hardware", "runtime", "task"):
                 path = root / LAUNCH_LOG_FILES[kind]
                 stat = path.stat() if path.is_file() else None
                 files.append({
