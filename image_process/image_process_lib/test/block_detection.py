@@ -18,6 +18,7 @@ SEG_CONF = 0.25
 TOP_SURFACE_CLASS_NAME = "top_surface"
 _SEG_MODEL = None
 ALLOW_COLOR_FALLBACK = True
+last_ll_method = None
 
 
 def detect_dominant_color(image, v_threshold=120, h_bins=30, s_bins=32):
@@ -251,17 +252,15 @@ def draw_mask_on_full_image(full_image, mask, crop_x1, crop_y1, color=(0, 255, 0
 def get_length(point1,point2):
         return math.sqrt((point1[0]-point2[0])**2+(point1[1]-point2[1])**2)
 def coreect_LL_location(box,mask,rect):#获取L方块长边偏下的位置，L方块系中间吸不到（不用细看）
-    """获取L型长臂3格的几何中心（软投票法优先，边缘扫描法兜底）。
-
-    从掩码+外接矩形估算参数，用软投票法定位B格子中心；
-    失败时回退到边缘扫描法（_l_grab_point）。
-    """
+    """获取L型长臂3格的几何中心（软投票法优先，边缘扫描法兜底）。"""
+    global last_ll_method
     center_x, center_y = rect[0]
     height, width = mask.shape
     long_side, short_side = max(rect[1]), min(rect[1])
 
     ys, xs = np.where(mask > 0)
     if len(xs) < 10:
+        last_ll_method = "fallback"
         return int(round(center_x)), int(round(center_y))
 
     pts = np.column_stack([xs, ys]).astype(np.float64)
@@ -278,10 +277,8 @@ def coreect_LL_location(box,mask,rect):#获取L方块长边偏下的位置，L�
         b_est = long_side / 3.0
         c_est = 0.0
 
-    # 用PCA质心代替minAreaRect中心，更接近L型几何中心
     pca_cx, pca_cy = mean_pt[0], mean_pt[1]
 
-    # 判断短臂在哪侧：将前景像素投影到长轴，检查两端的垂直展幅
     cos_a = math.cos(angle)
     sin_a = math.sin(angle)
     pu = (xs - pca_cx) * cos_a + (ys - pca_cy) * sin_a
@@ -294,7 +291,6 @@ def coreect_LL_location(box,mask,rect):#获取L方块长边偏下的位置，L�
     v_range_lo = float(pv[lo_mask].max() - pv[lo_mask].min()) if lo_mask.any() else 0.0
     v_range_hi = float(pv[hi_mask].max() - pv[hi_mask].min()) if hi_mask.any() else 0.0
 
-    # 短臂在v展幅更大的一端；v_offset符号取该端像素v值的中位数方向
     if v_range_hi >= v_range_lo:
         pv_end = pv[hi_mask]
     else:
@@ -306,6 +302,7 @@ def coreect_LL_location(box,mask,rect):#获取L方块长边偏下的位置，L�
 
     pick = _l_grab_point_v2(mask, angle, (pca_cx, pca_cy), b_est, c_est, b_local=b_local)
     if pick is not None:
+        last_ll_method = "soft_vote"
         return pick
 
     def _sample(x, y):
@@ -315,7 +312,9 @@ def coreect_LL_location(box,mask,rect):#获取L方块长边偏下的位置，L�
 
     pick = _l_grab_point(box, _sample, rect[1], (center_x, center_y))
     if pick is None:
+        last_ll_method = "fallback"
         return int(round(center_x)), int(round(center_y))
+    last_ll_method = "fallback"
     return pick
 
 

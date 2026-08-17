@@ -35,7 +35,10 @@ RESULT_ROOT = SRC_DIR / "tools" / "vision" / "像素-tcp标定结果与数据分
 BLOCK_INPUT_CSV = Path("/home/zhl/桌面/标定数据/方块视觉伺服.csv")
 TRAY_INPUT_CSV = Path("/home/zhl/桌面/标定数据/托盘视觉伺服.csv")
 # 2026-08-17 批次 z_blue 高位漏检 2 个，方块只有 33 个；高位识别恢复后回到 35。
-BLOCK_EXPECTED_SUCCESS_RANGE = (33, 35)
+# 2026-08-17 深夜手工挑样本重拟合：只保留队友肉眼确认过的 15 条（panel-180621
+# 任务序号 1,3,4,5,9,11,13,16,19,20,21,23,29,34,35），疑似/未确认的 20 条已剔除；
+# 上限放宽到 49 以便后续可混入 194117 批次样本。
+BLOCK_EXPECTED_SUCCESS_RANGE = (15, 49)
 TRAY_EXPECTED_SUCCESS_RANGE = (34, 34)
 
 # TCP 点云的最小主轴/次小主轴不超过 1% 时认为近似共面。

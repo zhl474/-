@@ -384,35 +384,6 @@ def _l_grab_point(box, sample, rect_size, center):
     return None
 
 
-def _template_l_pick_in_canvas(binary, bbox, anchor, rect_size, template_angle, b, c):
-    """按 coreect_LL_location 相同规则计算 L 形模板抓取点（画布坐标）。
-
-    binary 为模板紧边框二值图，bbox 为其在画布中的左上角，anchor 为旋转中心
-    相对紧边框左上角的偏移；抓点不在实体上时回退到矩形中心。
-    """
-    x1, y1 = bbox[0], bbox[1]
-    center_x = anchor[0] + x1
-    center_y = anchor[1] + y1
-
-    angle_rad = math.radians(template_angle)
-
-    # B格子中心相对旋转中心的未旋转偏移（L型拓扑）
-    # 长臂3格: A(-b-c,0) → B(0,0) → C(b+c,0)，短臂垂直伸出
-    # B在未旋转坐标系中相对旋转中心的偏移: (-(b+c), 0.5*(b+c))
-    bx_unrot, by_unrot = -(b + c), 0.5 * (b + c)
-    cos_a = math.cos(angle_rad)
-    sin_a = math.sin(angle_rad)
-    pu_b = bx_unrot * cos_a + by_unrot * sin_a
-    pv_b = -bx_unrot * sin_a + by_unrot * cos_a
-
-    pick = _l_grab_point_v2(binary, angle_rad, (center_x, center_y), b, c,
-                            b_local=(pu_b, pv_b))
-    if pick is not None:
-        return pick
-
-    return (int(round(center_x)), int(round(center_y)))
-
-
 def _l_grab_point_v2(mask, angle, center, b, c, b_local=(0.0, 0.0)):
     """软投票法：用L型拓扑先验让像素认领B格子，取加权质心。
 
@@ -469,6 +440,35 @@ def _l_grab_point_v2(mask, angle, center, b, c, b_local=(0.0, 0.0)):
     dist_sq = (xs - gx) ** 2 + (ys - gy) ** 2
     nearest = int(np.argmin(dist_sq))
     return (int(xs[nearest]), int(ys[nearest]))
+
+
+def _template_l_pick_in_canvas(binary, bbox, anchor, rect_size, template_angle, b, c):
+    """按 coreect_LL_location 相同规则计算 L 形模板抓取点（画布坐标）。
+
+    binary 为模板紧边框二值图，bbox 为其在画布中的左上角，anchor 为旋转中心
+    相对紧边框左上角的偏移；抓点不在实体上时回退到矩形中心。
+    """
+    x1, y1 = bbox[0], bbox[1]
+    center_x = anchor[0] + x1
+    center_y = anchor[1] + y1
+
+    angle_rad = math.radians(template_angle)
+
+    # B格子中心相对旋转中心的未旋转偏移（L型拓扑）
+    # 长臂3格: A(-b-c,0) → B(0,0) → C(b+c,0)，短臂垂直伸出
+    # B在未旋转坐标系中相对旋转中心的偏移: (-(b+c), 0.5*(b+c))
+    bx_unrot, by_unrot = -(b + c), 0.5 * (b + c)
+    cos_a = math.cos(angle_rad)
+    sin_a = math.sin(angle_rad)
+    pu_b = bx_unrot * cos_a + by_unrot * sin_a
+    pv_b = -bx_unrot * sin_a + by_unrot * cos_a
+
+    pick = _l_grab_point_v2(binary, angle_rad, (center_x, center_y), b, c,
+                            b_local=(pu_b, pv_b))
+    if pick is not None:
+        return pick
+
+    return (int(round(center_x)), int(round(center_y)))
 
 
 def create_pick_aligned_kernels(

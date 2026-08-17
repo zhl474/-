@@ -103,7 +103,7 @@ block_recognition:
     # Z/C 粗调、T 精确输入），提交后按锁定角度重匹配位置，L 抓点自动跟随。
     # Esc 放弃修改按原结果继续。GUI 独立无 ROS 子进程；仅 v2 模式生效。
     angle_lock_editor:
-      enabled: false
+      enabled: true
       script: tools/angle_lock_editor/angle_lock_editor.py
 
 # 仅在 execution.yaml 的 calibration_mode=true 时使用。

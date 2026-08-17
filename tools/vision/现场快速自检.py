@@ -91,7 +91,7 @@ def main():
     stamp = re.search(r'(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.json$', os.path.basename(path)).group(1)
     print(f'检查文件: {os.path.basename(path)}')
     print(f"部署标定: 批次={r['cal_batch']} sha={r['cal_sha']}"
-          f"{'（=今晚ef77851c，正常）' if r['cal_sha'] == 'ef77851c' else '（注意：不是今晚最后部署的批次！）'}")
+          f"{'（=深夜挑样版 c5faef65，正常）' if r['cal_sha'] == 'c5faef65' else '（注意：不是深夜挑样版 c5faef65！）'}")
     print(f"格点n={len(pts)} 残差RMS={r['res_rms']:.2f}mm 方块n={r['n_blocks']}(凸包外{r['n_outside']})")
     print()
 
