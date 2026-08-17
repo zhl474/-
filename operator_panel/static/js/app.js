@@ -874,6 +874,9 @@ function renderState(state) {
   const stopOperation = state.operation?.stop;
   const active = state.operation?.active || (stopOperation?.status === 'running' ? stopOperation : null);
 
+  // 正式识别/任务执行期间让 YOLO 预览自动停掉，不与正式流程抢 GPU。
+  if (['准备识别', '执行中'].includes(task.state)) cameraTuneCard.pauseForTask();
+
   setStatus('ros', health.ros_master, health.ros_master ? '在线' : '离线');
   setStatus('camera', health.camera_frame_fresh, health.camera_frame_fresh ? '画面正常' : (health.camera_node ? '等待画面' : '未连接'), health.camera_node && !health.camera_frame_fresh);
   setStatus('arm', health.control_services_ready, health.control_services_ready ? '服务就绪' : (health.control_node ? '启动中' : '未连接'), health.control_node && !health.control_services_ready);

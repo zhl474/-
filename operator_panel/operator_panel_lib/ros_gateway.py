@@ -9,6 +9,14 @@ import threading
 import time
 
 
+class PerceptionNotReady(Exception):
+    """感知节点未启动，YOLO 预览需要退避等待。"""
+
+
+class PerceptionBusy(Exception):
+    """感知节点正在识别/执行任务，预览主动让路。"""
+
+
 class RosGateway:
     """只暴露控制台需要的固定服务和低帧率 JPEG 缓存。"""
 

@@ -362,6 +362,10 @@ def create_app(
                 "code": "camera_unavailable",
             }), 503
 
+    @app.get("/api/camera/yolo-preview")
+    def get_yolo_preview():
+        return jsonify({"enabled": ros_gateway.is_yolo_preview_enabled()})
+
     @app.post("/api/camera/yolo-preview")
     def set_yolo_preview():
         return jsonify(ros_gateway.set_yolo_preview_enabled(bool(body().get("enabled", False))))

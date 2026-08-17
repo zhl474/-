@@ -29,12 +29,23 @@ export class CameraTuneCard {
   }
 
   async enter() {
-    this.setYoloPreview(true);
+    // 进入视图只同步状态，不自动开 YOLO 预览：识别刷新必须手动点击开启，
+    // 避免占用 GPU 或在感知未启动时反复重试。
+    try {
+      const state = await this.hooks.api('/api/camera/yolo-preview');
+      this.previewEnabled = Boolean(state.enabled);
+      this.renderYoloToggle();
+    } catch (_error) { /* 状态同步失败不影响曝光调参 */ }
     await this.refresh();
   }
 
   leave() {
     this.setYoloPreview(false);
+  }
+
+  pauseForTask() {
+    // 正式识别/任务执行期间自动让路（只关不自动重开，结束后手动再开）。
+    if (this.previewEnabled) this.setYoloPreview(false);
   }
 
   onYoloFrame(data) {
@@ -196,7 +207,7 @@ export class CameraTuneCard {
 
   renderYoloToggle() {
     if (!this.yoloToggleButton) return;
-    this.yoloToggleButton.textContent = this.previewEnabled ? '暂停识别刷新' : '恢复识别刷新';
+    this.yoloToggleButton.textContent = this.previewEnabled ? '暂停识别刷新' : '开始识别刷新';
   }
 
   async persistToConfig() {

@@ -496,7 +496,7 @@
           <h1 class="page-title">相机调参</h1>
           <div class="camera-tune-actions">
             <button id="ct-refresh" class="button ghost compact" type="button">读取当前值</button>
-            <button id="ct-yolo-toggle" class="button ghost compact" type="button">暂停识别刷新</button>
+            <button id="ct-yolo-toggle" class="button ghost compact" type="button">开始识别刷新</button>
             <button id="ct-persist" class="button primary compact" type="button">写入相机配置（重启后生效）</button>
           </div>
         </div>
@@ -547,7 +547,7 @@
                 <li>滑杆或数字框松手即写入相机，实时生效，数据流不中断、不重连。</li>
                 <li>手动调曝光/增益会自动关闭该相机自动曝光；重新勾选即恢复自动。</li>
                 <li>「写入相机配置」把当前值存入 camera 配置文件，下次重启硬件后按此值启动。</li>
-                <li>YOLO 画面需要感知节点已启动；离开本页自动暂停识别节省算力。</li>
+                <li>YOLO 识别画面需手动点击「开始识别刷新」，且需感知节点已启动；识别/任务执行期间自动让路，离开本页自动停止。</li>
                 <li>OrbbecViewer 等上位机与本项目相机是 USB 独占，调参期间请勿同时打开。</li>
               </ul>
             </article>

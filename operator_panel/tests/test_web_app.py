@@ -39,6 +39,15 @@ class FakeRos:
         self.exposure_calls = []
         self.yolo_preview_calls = []
         self.exposure_error = None
+        self.yolo_preview_enabled = False
+
+    def is_yolo_preview_enabled(self):
+        return self.yolo_preview_enabled
+
+    def set_yolo_preview_enabled(self, enabled):
+        self.yolo_preview_calls.append(bool(enabled))
+        self.yolo_preview_enabled = bool(enabled)
+        return {"enabled": bool(enabled)}
 
     def image_bytes(self):
         return b"\xff\xd8\xff\xd9", "now"
@@ -68,10 +77,6 @@ class FakeRos:
         if self.exposure_error:
             raise self.exposure_error
         return {"success": True, "applied": value, "message": "设置成功"}
-
-    def set_yolo_preview_enabled(self, enabled):
-        self.yolo_preview_calls.append(bool(enabled))
-        return {"enabled": bool(enabled)}
 
     def ros_system_snapshot(self):
         return {
@@ -546,3 +551,13 @@ def testYOLO识别图接口返回缓存JPEG(web_ros):
     assert response.status_code == 200
     assert response.mimetype == "image/jpeg"
     assert response.data == b"\xff\xd8\xff\xd9-yolo"
+
+
+def testYOLO预览状态查询接口(web_ros):
+    client, ros = web_ros
+    assert client.get("/api/camera/yolo-preview", **url("/api/camera/yolo-preview")).get_json() == {"enabled": False}
+    client.post(
+        "/api/camera/yolo-preview", json={"enabled": True},
+        headers=write_headers(), **url("/api/camera/yolo-preview"),
+    )
+    assert client.get("/api/camera/yolo-preview", **url("/api/camera/yolo-preview")).get_json() == {"enabled": True}
