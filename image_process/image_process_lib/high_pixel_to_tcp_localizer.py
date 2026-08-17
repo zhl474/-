@@ -13,6 +13,7 @@ from image_process_lib.pixel_to_tcp_calibration import (
     PixelToTcpCalibration,
     load_pixel_to_tcp_calibration,
 )
+from image_process_lib.sucker_offset import classify_pixel_side
 
 
 PACKAGE_DIR = Path(__file__).resolve().parents[1]
@@ -153,6 +154,9 @@ class HighPixelToTcpLocalizer:
         tcp_max_xyz: Sequence[Optional[float]] = DEFAULT_TCP_MAX_XYZ,
         safety_xy_offset: Sequence[float] = (0.0, 0.0),
         fixed_tcp_z_mm: Optional[Mapping[str, float]] = None,
+        block_calibration_left_path: Optional[str | Path] = None,
+        block_calibration_right_path: Optional[str | Path] = None,
+        split_models: bool = False,
     ) -> None:
         shooting = _finite_vector(shooting_pose, 6, "高位拍摄位姿")
         self._shooting_rpy = shooting[3:6].copy()
@@ -173,7 +177,22 @@ class HighPixelToTcpLocalizer:
             2,
             "safety_xy_offset",
         )
-        self._calibrations = {
+        if (block_calibration_left_path is None) != (
+            block_calibration_right_path is None
+        ):
+            raise ValueError(
+                "左右方块标定必须成对配置：block_calibration_left_path 与 "
+                "block_calibration_right_path 要么同时提供，要么都不提供"
+            )
+        if split_models and (
+            block_calibration_left_path is None
+            or block_calibration_right_path is None
+        ):
+            raise ValueError(
+                "分侧模型模式（split_models=True）必须同时提供左右方块标定文件"
+            )
+        self._split_models = bool(split_models)
+        self._calibrations: dict[str, PixelToTcpCalibration] = {
             "block": self._load_subject_calibration(
                 block_calibration_path,
                 "block",
@@ -183,15 +202,35 @@ class HighPixelToTcpLocalizer:
                 "tray",
             ),
         }
-        block = self._calibrations["block"]
-        tray = self._calibrations["tray"]
-        if block.schema_version != tray.schema_version:
-            raise ValueError("方块与托盘标定 schema 版本不一致，禁止混用")
-        if block.schema_version == 2:
-            block_generation = block.metadata.get("generation_id")
-            tray_generation = tray.metadata.get("generation_id")
-            if block_generation != tray_generation:
-                raise ValueError("方块与托盘 schema v2 标定批次不一致")
+        if block_calibration_left_path is not None:
+            self._calibrations["block_left"] = self._load_subject_calibration(
+                block_calibration_left_path,
+                "block",
+            )
+            self._calibrations["block_right"] = self._load_subject_calibration(
+                block_calibration_right_path,
+                "block",
+            )
+        self._validate_calibration_consistency()
+
+    def _validate_calibration_consistency(self) -> None:
+        """全部已加载标定必须同 schema 版本，v2 时同 generation_id 批次。"""
+        loaded = list(self._calibrations.values())
+        schema_versions = {calibration.schema_version for calibration in loaded}
+        if len(schema_versions) != 1:
+            raise ValueError(
+                "已加载标定的 schema 版本不一致（方块/左右方块/托盘），禁止混用"
+            )
+        if self._calibrations["block"].schema_version == 2:
+            generations = {
+                calibration.metadata.get("generation_id")
+                for calibration in loaded
+            }
+            if len(generations) != 1:
+                raise ValueError(
+                    "已加载标定的 schema v2 批次不一致（方块/左右方块/托盘"
+                    "必须来自同一次标定生成）"
+                )
 
     @staticmethod
     def _load_subject_calibration(
@@ -209,11 +248,21 @@ class HighPixelToTcpLocalizer:
         subject: str,
         pixel_xy: Sequence[float],
     ) -> PixelToTcpCalibration:
-        if not isinstance(subject, str) or subject not in self._calibrations:
+        if not isinstance(subject, str) or subject not in ("block", "tray"):
             raise ValueError(
                 f"主体 {subject} 的高位像素 {pixel_xy!r} 无法定位："
                 "主体仅支持 block 或 tray"
             )
+        if subject == "block" and self._split_models:
+            side = classify_pixel_side(pixel_xy)
+            if (
+                side is not None
+                and "block_left" in self._calibrations
+                and "block_right" in self._calibrations
+            ):
+                return self._calibrations[f"block_{side}"]
+            # 像素缺失/无效（含 (0,0) 标记）时回退单模型。
+            return self._calibrations["block"]
         return self._calibrations[subject]
 
     @property
@@ -250,8 +299,34 @@ class HighPixelToTcpLocalizer:
             self._shooting_rpy = shooting[3:6].copy()
 
     def calibration_summary(self, subject: str) -> dict:
-        """只读暴露标定元信息，供定位全景导出留档。"""
+        """只读暴露标定元信息，供定位全景导出留档。
+
+        分侧模型模式下方块返回 {"模式": "左右分区", "左": {...}, "右": {...}}，
+        顶层同时保留单模型摘要键（兼容既有调用与固定 Z 对照日志）。
+        """
         calibration = self._subject_calibration(subject, (0.0, 0.0))
+        summary = self._summary_of(calibration, subject)
+        if (
+            subject == "block"
+            and self._split_models
+            and "block_left" in self._calibrations
+        ):
+            summary["模式"] = "左右分区"
+            summary["左"] = self._summary_of(
+                self._calibrations["block_left"],
+                "block",
+            )
+            summary["右"] = self._summary_of(
+                self._calibrations["block_right"],
+                "block",
+            )
+        return summary
+
+    def _summary_of(
+        self,
+        calibration: PixelToTcpCalibration,
+        subject: str,
+    ) -> dict:
         document = calibration.metadata
         z_plane = calibration.z_plane_coefficients
         coverage = document.get("coverage")
@@ -306,8 +381,14 @@ class HighPixelToTcpLocalizer:
         self,
         subject: str,
         pixel_xy: Sequence[float],
+        safety_xy_offset: Optional[Sequence[float]] = None,
     ) -> HighTcpSafetyAssessment:
-        """预测目标 TCP 并返回非抛出式安全结果；标定预测错误仍由调用方处理。"""
+        """预测目标 TCP 并返回非抛出式安全结果；标定预测错误仍由调用方处理。
+
+        safety_xy_offset 为 None 时使用构造/热更新时的全局偏移（旧调用行为不变）；
+        传入时用该偏移做安全校验，供开环模式按目标分区（方块左右/托盘中间）使用
+        不同的实际执行偏移。
+        """
         calibration = self._subject_calibration(subject, pixel_xy)
         label = _SUBJECT_LABELS[subject]
         try:
@@ -321,7 +402,14 @@ class HighPixelToTcpLocalizer:
             tcp_xyz[2] = self._fixed_tcp_z_mm[subject]
 
         safety_tcp_xyz = tcp_xyz.copy()
-        safety_tcp_xyz[:2] += self._safety_xy_offset
+        if safety_xy_offset is None:
+            safety_tcp_xyz[:2] += self._safety_xy_offset
+        else:
+            safety_tcp_xyz[:2] += _finite_vector(
+                safety_xy_offset,
+                2,
+                "safety_xy_offset",
+            )
         # 场地变动后 XY 安全范围已停用：XY 只保留有限性校验，范围拦截仅剩 Z 下限。
         violated_axes = tuple(
             axis_name

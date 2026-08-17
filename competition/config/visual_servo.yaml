@@ -10,6 +10,22 @@ pixel_to_robot_matrix:
 # 该值 = 工作区中心点实测基线（步骤B 吸盘对准位姿 - 步骤A 相机对准位姿）。
 camera_to_sucker_offset_mm: [-85.264, -13.905]
 
+# 吸盘偏移标定策略：
+#   SINGLE_CALIBRATION  单参数策略（默认，等价旧行为）：方块、托盘全部使用上方中间偏移，
+#                       高位拟合模型使用单模型（block_pixel_to_tcp_calibration.yaml）。
+#   THREE_CALIBRATION   三参数策略：托盘恒用中间偏移与托盘模型；方块按高位检测像素 u
+#                       相对图像中线（1280 宽图，u=640）分左右——偏移分别用下方
+#                       left/right 两套偏移，高位拟合模型分别用 perception.yaml 的
+#                       calibration.block_pixel_to_tcp_left/right 两套标定文件。
+# 切换策略后需要重启 competition 与 image_process 两个节点生效。
+sucker_offset_strategy: SINGLE_CALIBRATION
+# 左侧方块偏移（THREE_CALIBRATION 策略下 u < 640 使用），单位 mm。
+# 初始与中间一致（等价旧行为），实测左侧方块后替换。
+camera_to_sucker_offset_left_mm: [-85.264, -13.905]
+# 右侧方块偏移（THREE_CALIBRATION 策略下 u >= 640 使用），单位 mm。
+# 初始与中间一致（等价旧行为），实测右侧方块后替换。
+camera_to_sucker_offset_right_mm: [-85.264, -13.905]
+
 # 位置相关吸盘偏移残差模型（v3 方案：7 点十字采样，采集后填系数）。
 # 残差 Δv = 当前位置实测吸盘偏移 - 中心基线（camera_to_sucker_offset_mm）。
 # 判定规则（数据回来后二选一）：

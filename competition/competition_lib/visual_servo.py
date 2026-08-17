@@ -5,6 +5,8 @@ from typing import Callable, Optional, Sequence
 
 import numpy as np
 
+from image_process_lib.sucker_offset import resolve_sucker_offset
+
 
 def _finite_float(value):
     """把服务字段转成有限数值；缺失或无效时留空以便写入 CSV。"""
@@ -115,11 +117,21 @@ def pixel_error_to_robot_delta(dx_px, dy_px, matrix, max_step_mm, min_step_mm=0.
     return limit_xy_step(raw_delta, max_step_mm, min_step_mm)
 
 
-def apply_camera_to_sucker_offset(camera_pose: Sequence[float], config: dict):
-    """把相机对准位姿转换为吸盘对准位姿，支持位置相关偏移残差模型。
+def apply_camera_to_sucker_offset(
+    camera_pose: Sequence[float],
+    config: dict,
+    subject: str = "tray",
+    pixel_xy: Optional[Sequence[float]] = None,
+):
+    """把相机对准位姿转换为吸盘对准位姿。
 
-    残差 Δv = 当前位置实测吸盘偏移 - 中心基线（camera_to_sucker_offset_mm）。
-    sucker_offset_model.type 支持：
+    偏移按 sucker_offset_strategy 选择（与感知端共用 image_process_lib.sucker_offset）：
+      SINGLE_CALIBRATION（默认）：方块与托盘全部使用中间 camera_to_sucker_offset_mm；
+      THREE_CALIBRATION：托盘恒用中间；方块（subject="block"）按高位检测像素
+        pixel_xy 的 u 相对图像中线（640）分左右，分别用 left/right 两套偏移。
+    subject 缺省为 "tray"，因此不传新参数的旧调用行为与旧版完全一致。
+
+    位置相关偏移残差模型（sucker_offset_model）保留但当前不使用（type 必须为 none）：
       none                  仅使用固定偏移（未标定时兜底）
       linear_1d_x_residual  Δvx = k_x·(X − x0)，Δvy = 0
       linear_2d             Δvx = kx·(X − x0) + ky·(Y − y0)
@@ -129,7 +141,8 @@ def apply_camera_to_sucker_offset(camera_pose: Sequence[float], config: dict):
     pose = list(float(value) for value in camera_pose)
     if len(pose) != 6:
         raise ValueError("相机位姿必须包含 6 个数值")
-    vx, vy = config["camera_to_sucker_offset_mm"]
+    offset, _side = resolve_sucker_offset(config, subject, pixel_xy)
+    vx, vy = offset
     model = config.get("sucker_offset_model") or {}
     kind = model.get("type", "none")
     if kind == "linear_1d_x_residual":

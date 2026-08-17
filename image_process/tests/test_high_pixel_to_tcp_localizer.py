@@ -301,6 +301,205 @@ def test_open_loop_safety_offset_no_longer_gates_xy(tmp_path):
     assert assessment.safe is True
 
 
+def test_assess_per_call_safety_offset_overrides_global(tmp_path):
+    """逐目标传入 safety_xy_offset 覆盖全局偏移；None 时沿用全局（旧调用兼容）。"""
+    block_path, tray_path = _write_calibrations(tmp_path)
+    localizer = HighPixelToTcpLocalizer(
+        block_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+        safety_xy_offset=[-94.1, -13.8],
+    )
+    default_assessment = localizer.assess("block", [0.0, 0.0])
+    assert default_assessment.safety_tcp_xyz == pytest.approx(
+        (-394.1, -13.8, 200.0)
+    )
+    overridden = localizer.assess(
+        "block",
+        [0.0, 0.0],
+        safety_xy_offset=[-83.0, -12.0],
+    )
+    assert overridden.safety_tcp_xyz == pytest.approx((-383.0, -12.0, 200.0))
+    # 偏移只影响待执行 TCP 报告，不改变标定模型预测。
+    assert default_assessment.predicted_tcp_xyz == overridden.predicted_tcp_xyz
+
+
+def test_assess_rejects_invalid_per_call_safety_offset(tmp_path):
+    block_path, tray_path = _write_calibrations(tmp_path)
+    localizer = HighPixelToTcpLocalizer(
+        block_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+    )
+    with pytest.raises(ValueError, match="safety_xy_offset 必须包含 2 个有限数值"):
+        localizer.assess("block", [0.0, 0.0], safety_xy_offset=[-83.0])
+
+
+def _write_split_calibrations(tmp_path):
+    """单模型/左右模型/托盘：v1 仿射模型，两侧基准不同以便区分。"""
+    single_path = tmp_path / "方块单模型.yaml"
+    left_path = tmp_path / "方块左模型.yaml"
+    right_path = tmp_path / "方块右模型.yaml"
+    tray_path = tmp_path / "托盘标定.yaml"
+    single_path.write_text(
+        yaml.safe_dump(_affine_payload("block", [-300.0, 0.0, 200.0]), sort_keys=False),
+        encoding="utf-8",
+    )
+    left_path.write_text(
+        yaml.safe_dump(_affine_payload("block", [-310.0, -5.0, 200.0]), sort_keys=False),
+        encoding="utf-8",
+    )
+    right_path.write_text(
+        yaml.safe_dump(_affine_payload("block", [-320.0, 10.0, 200.0]), sort_keys=False),
+        encoding="utf-8",
+    )
+    tray_path.write_text(
+        yaml.safe_dump(_affine_payload("tray", [-250.0, 50.0, 210.0]), sort_keys=False),
+        encoding="utf-8",
+    )
+    return single_path, left_path, right_path, tray_path
+
+
+def test_split_models_select_by_pixel_side(tmp_path):
+    """split_models=True：左侧像素用左模型，右侧像素用右模型。"""
+    single_path, left_path, right_path, tray_path = _write_split_calibrations(tmp_path)
+    localizer = HighPixelToTcpLocalizer(
+        single_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+        block_calibration_left_path=left_path,
+        block_calibration_right_path=right_path,
+        split_models=True,
+    )
+    # 左模型基准 (-310, -5)：predict([100, 220]) = (-210, 215, 200)。
+    assert localizer.locate_block([100.0, 220.0])[:3] == pytest.approx(
+        [-210.0, 215.0, 200.0]
+    )
+    # 右模型基准 (-320, 10)：predict([900, 220]) = (580, 230, 200)。
+    assert localizer.locate_block([900.0, 220.0])[:3] == pytest.approx(
+        [580.0, 230.0, 200.0]
+    )
+    # 托盘恒用托盘模型，不受分侧影响。
+    assert localizer.locate_tray([900.0, 220.0])[:3] == pytest.approx(
+        [650.0, 270.0, 210.0]
+    )
+
+
+def test_split_models_disabled_uses_single_model(tmp_path):
+    """split_models 缺省 False：左右文件被忽略，全部用单模型。"""
+    single_path, left_path, right_path, tray_path = _write_split_calibrations(tmp_path)
+    localizer = HighPixelToTcpLocalizer(
+        single_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+        block_calibration_left_path=left_path,
+        block_calibration_right_path=right_path,
+    )
+    assert localizer.locate_block([100.0, 220.0])[:3] == pytest.approx(
+        [-200.0, 220.0, 200.0]
+    )
+    assert localizer.locate_block([900.0, 220.0])[:3] == pytest.approx(
+        [600.0, 220.0, 200.0]
+    )
+
+
+def test_split_models_zero_pixel_falls_back_to_single(tmp_path):
+    """(0,0) 缺失标记像素回退单模型。"""
+    single_path, left_path, right_path, tray_path = _write_split_calibrations(tmp_path)
+    localizer = HighPixelToTcpLocalizer(
+        single_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+        block_calibration_left_path=left_path,
+        block_calibration_right_path=right_path,
+        split_models=True,
+    )
+    assert localizer.locate_block([0.0, 0.0])[:3] == pytest.approx(
+        [-300.0, 0.0, 200.0]
+    )
+
+
+def test_split_models_rejects_single_sided_config(tmp_path):
+    single_path, left_path, _right_path, tray_path = _write_split_calibrations(tmp_path)
+    with pytest.raises(ValueError, match="必须成对配置"):
+        HighPixelToTcpLocalizer(
+            single_path,
+            tray_path,
+            shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+            block_calibration_left_path=left_path,
+        )
+
+
+def test_split_models_enabled_requires_both_files(tmp_path):
+    single_path, _left_path, _right_path, tray_path = _write_split_calibrations(tmp_path)
+    with pytest.raises(ValueError, match="必须同时提供左右方块标定文件"):
+        HighPixelToTcpLocalizer(
+            single_path,
+            tray_path,
+            shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+            split_models=True,
+        )
+
+
+def test_split_models_v2_generation_mismatch_is_rejected(tmp_path):
+    """v2 标定下左右模型必须与单模型、托盘同批次。"""
+    single_path = tmp_path / "方块单模型.yaml"
+    left_path = tmp_path / "方块左模型.yaml"
+    right_path = tmp_path / "方块右模型.yaml"
+    tray_path = tmp_path / "托盘标定.yaml"
+    single_path.write_text(
+        yaml.safe_dump(_v2_affine_payload("block", "batch_a", 200.0), sort_keys=False),
+        encoding="utf-8",
+    )
+    left_path.write_text(
+        yaml.safe_dump(_v2_affine_payload("block", "batch_a", 200.0), sort_keys=False),
+        encoding="utf-8",
+    )
+    right_path.write_text(
+        yaml.safe_dump(_v2_affine_payload("block", "batch_b", 200.0), sort_keys=False),
+        encoding="utf-8",
+    )
+    tray_path.write_text(
+        yaml.safe_dump(_v2_affine_payload("tray", "batch_a", 210.0), sort_keys=False),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="批次不一致"):
+        HighPixelToTcpLocalizer(
+            single_path,
+            tray_path,
+            shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+            block_calibration_left_path=left_path,
+            block_calibration_right_path=right_path,
+            split_models=True,
+        )
+
+
+def test_calibration_summary_split_mode_reports_both_sides(tmp_path):
+    single_path, left_path, right_path, tray_path = _write_split_calibrations(tmp_path)
+    localizer = HighPixelToTcpLocalizer(
+        single_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+        block_calibration_left_path=left_path,
+        block_calibration_right_path=right_path,
+        split_models=True,
+    )
+    summary = localizer.calibration_summary("block")
+    assert summary["模式"] == "左右分区"
+    assert summary["左"]["XY模型"] == "affine"
+    assert summary["右"]["XY模型"] == "affine"
+    # 顶层保留单模型摘要键，兼容既有调用与固定 Z 对照日志。
+    assert "Z平面系数a_b_c" in summary
+    assert "实验批次" in summary
+    # SINGLE（不分侧）时结构与旧版一致。
+    plain = HighPixelToTcpLocalizer(
+        single_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+    )
+    assert "模式" not in plain.calibration_summary("block")
+
+
 def test_open_loop_safety_offset_reports_raw_offset_and_executed_tcp(tmp_path):
     block_path = tmp_path / "偏移越界方块标定.yaml"
     tray_path = tmp_path / "安全托盘标定.yaml"

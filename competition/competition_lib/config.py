@@ -7,6 +7,8 @@ from typing import Sequence
 import numpy as np
 import yaml
 
+from image_process_lib.sucker_offset import validate_sucker_offset_config
+
 
 PACKAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DEFAULT_EXECUTION_CONFIG_PATH = os.path.join(PACKAGE_DIR, "config", "execution.yaml")
@@ -327,4 +329,10 @@ def load_visual_servo_config(config_path: str = DEFAULT_VISUAL_SERVO_CONFIG_PATH
         if not isinstance(model, dict):
             raise ValueError("sucker_offset_model 必须是字典")
         config["sucker_offset_model"] = _validate_sucker_offset_model(model)
+    normalized_offsets = validate_sucker_offset_config(config)
+    config["sucker_offset_strategy"] = normalized_offsets["strategy"]
+    if normalized_offsets["left"] is not None:
+        config["camera_to_sucker_offset_left_mm"] = normalized_offsets["left"]
+    if normalized_offsets["right"] is not None:
+        config["camera_to_sucker_offset_right_mm"] = normalized_offsets["right"]
     return config

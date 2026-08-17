@@ -50,6 +50,12 @@ from image_process_lib.debug_output import DebugVideoRecorder, save_image_to_pat
 from image_process_lib.depth_rough_localization import DepthRoughLocalizer, fit_z_plane
 from image_process_lib.edge_template_detector import EdgeTemplateConfig, EdgeTemplateMatcher
 from image_process_lib.high_pixel_to_tcp_localizer import HighPixelToTcpLocalizer
+from image_process_lib.sucker_offset import (
+    STRATEGY_SINGLE_CALIBRATION,
+    STRATEGY_THREE_CALIBRATION,
+    resolve_sucker_offset,
+    validate_sucker_offset_config,
+)
 from image_process_lib.localization_panorama import (
     build_calibration_panorama_document,
     build_formal_panorama_document,
@@ -271,6 +277,12 @@ class ImageProcessor:
             raw_path = str(value or fallback)
             return raw_path if os.path.isabs(raw_path) else os.path.join(SRC_DIR, raw_path)
 
+        def optional_src_path(value):
+            """可选源文件路径：未配置时返回 None，绝不生成 SRC_DIR/\"None\"。"""
+            if not value:
+                return None
+            return src_path(value, None)
+
         manual_editor_config = perception_config.get("high_mask_manual_editor", {})
         if not isinstance(manual_editor_config, dict):
             raise ValueError("perception.yaml 的 high_mask_manual_editor 必须是字典")
@@ -351,8 +363,30 @@ class ImageProcessor:
             ),
             DEFAULT_TRAY_CALIBRATION_PATH,
         )
+        # 左右方块标定文件：可选成对（THREE_CALIBRATION 策略下必须提供）。
+        block_calibration_left_path = optional_src_path(
+            rospy.get_param(
+                "~block_pixel_to_tcp_calibration_left_path",
+                calibration_config.get("block_pixel_to_tcp_left"),
+            )
+        )
+        block_calibration_right_path = optional_src_path(
+            rospy.get_param(
+                "~block_pixel_to_tcp_calibration_right_path",
+                calibration_config.get("block_pixel_to_tcp_right"),
+            )
+        )
+        if (block_calibration_left_path is None) != (
+            block_calibration_right_path is None
+        ):
+            raise ValueError(
+                "calibration.block_pixel_to_tcp_left 与 "
+                "calibration.block_pixel_to_tcp_right 必须成对配置"
+            )
         self.block_calibration_path = block_calibration_path
         self.tray_calibration_path = tray_calibration_path
+        self.block_calibration_left_path = block_calibration_left_path
+        self.block_calibration_right_path = block_calibration_right_path
         hand_eye_matrix_path = src_path(
             calibration_config.get("hand_eye_matrix"),
             os.path.join(SRC_DIR, "camera", "config", "T_wrist2camera.npy"),
@@ -599,6 +633,9 @@ class ImageProcessor:
             )
 
         self._reload_dynamic_config()
+        # 吸盘偏移标定策略只在启动时读取并固定；网页切换策略后需重启
+        # competition 与 image_process 两个节点生效，避免两端策略不一致。
+        self.sucker_offset_strategy = self.sucker_offsets["strategy"]
 
         optimizer_config = perception_config.get("task_sequence_optimizer", {})
         if not isinstance(optimizer_config, dict):
@@ -949,6 +986,18 @@ class ImageProcessor:
             else:
                 rospy.loginfo("标定模式：高位粗定位使用批量稳定深度 XYZ")
         else:
+            if (
+                self.sucker_offset_strategy == STRATEGY_THREE_CALIBRATION
+                and (
+                    block_calibration_left_path is None
+                    or block_calibration_right_path is None
+                )
+            ):
+                raise ValueError(
+                    "THREE_CALIBRATION 策略必须同时配置 perception.yaml 的 "
+                    "calibration.block_pixel_to_tcp_left 与 "
+                    "calibration.block_pixel_to_tcp_right 方块标定文件"
+                )
             self.high_tcp_localizer = HighPixelToTcpLocalizer(
                 block_calibration_path=block_calibration_path,
                 tray_calibration_path=tray_calibration_path,
@@ -957,11 +1006,22 @@ class ImageProcessor:
                 tcp_max_xyz=(safe_x_range_mm[1], safe_y_range_mm[1], None),
                 safety_xy_offset=self.high_tcp_safety_xy_offset,
                 fixed_tcp_z_mm=fixed_tcp_z_mm,
+                block_calibration_left_path=block_calibration_left_path,
+                block_calibration_right_path=block_calibration_right_path,
+                split_models=(
+                    self.sucker_offset_strategy == STRATEGY_THREE_CALIBRATION
+                ),
             )
             safety_mode = "闭环原始预测 TCP" if self.visual_servo_enabled else "开环吸盘偏置后 TCP"
+            model_note = (
+                "分侧模型"
+                if self.sucker_offset_strategy == STRATEGY_THREE_CALIBRATION
+                else "单模型"
+            )
             rospy.loginfo(
-                "正式模式：高位 TCP 标定已加载，方块=%s，托盘=%s，安全校验=%s",
+                "正式模式：高位 TCP 标定已加载，方块=%s（%s），托盘=%s，安全校验=%s",
                 block_calibration_path,
+                model_note,
                 tray_calibration_path,
                 safety_mode,
             )
@@ -2623,10 +2683,30 @@ class ImageProcessor:
             candidates.append((f"托盘目标 {target_index}", "tray", point))
 
         violations = []
+        # 开环正式任务且启用三参数策略时，按目标分区选择实际执行偏移：
+        # 托盘恒用中间、方块按高位像素分左右；其余情况不传（沿用全局偏移：
+        # 闭环/标定为 (0,0)，SINGLE 开环为中间，与历史行为一致）。
+        zone_open_loop = (
+            getattr(self, "sucker_offset_strategy", STRATEGY_SINGLE_CALIBRATION)
+            == STRATEGY_THREE_CALIBRATION
+            and not self.visual_servo_enabled
+        )
         for label, subject, pixel_xy in candidates:
             pixel_text = self._format_pixel_xy(pixel_xy)
             try:
-                assessment = self.high_tcp_localizer.assess(subject, pixel_xy)
+                if zone_open_loop:
+                    offset, _side = resolve_sucker_offset(
+                        self.visual_servo_config,
+                        subject,
+                        pixel_xy,
+                    )
+                    assessment = self.high_tcp_localizer.assess(
+                        subject,
+                        pixel_xy,
+                        safety_xy_offset=offset,
+                    )
+                else:
+                    assessment = self.high_tcp_localizer.assess(subject, pixel_xy)
             except Exception as exc:
                 violations.append(
                     f"{label}：像素坐标 {pixel_text} px，TCP 预测失败：{exc}"
@@ -2966,6 +3046,17 @@ class ImageProcessor:
             np.isfinite(camera_to_sucker_offset)
         ):
             raise ValueError("camera_to_sucker_offset_mm 必须包含 2 个有限数值")
+
+        # 三套分区偏移与策略的共用校验（与 competition 执行端同一套规则）。
+        normalized_offsets = validate_sucker_offset_config(visual_servo_config)
+        # 行为上使用启动时固定的策略：磁盘上的策略变更需重启节点后生效，
+        # 避免感知端与执行端策略不一致。校验仍按磁盘当前值执行（非法配置 fail-fast）。
+        frozen_strategy = getattr(self, "sucker_offset_strategy", None)
+        if frozen_strategy is not None:
+            normalized_offsets["strategy"] = frozen_strategy
+            visual_servo_config["sucker_offset_strategy"] = frozen_strategy
+        self.sucker_offsets = normalized_offsets
+        self.visual_servo_config = visual_servo_config
 
         try:
             shooting_angle = [float(value) for value in execution_config["shooting_pose"]]

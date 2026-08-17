@@ -847,7 +847,13 @@ class TaskRunner:
             camera_pose = rough_pose
 
         # 相机位姿转换到吸盘 XY 后，直接斜向进入动态预抓取位并等待停稳。
-        pre_pick_pose = apply_camera_to_sucker_offset(camera_pose, self.visual_config)
+        # 方块按高位检测像素分左右（THREE_CALIBRATION 策略下生效，SINGLE 恒用中间）。
+        pre_pick_pose = apply_camera_to_sucker_offset(
+            camera_pose,
+            self.visual_config,
+            subject="block",
+            pixel_xy=getattr(target, "pick_high_detected_pixel_xy", None),
+        )
         pre_pick_pose[2] = pre_pick_z_mm
         pre_pick_pose = self._validate_motion_pose(pre_pick_pose, "预抓取位")
         self._timed_call(
@@ -913,9 +919,11 @@ class TaskRunner:
         rough_pose = self._validate_motion_pose(target.place_observation_pose, "托盘观察位")
         open_loop_place_pose = None
         if not self.visual_servo_enabled:
+            # 托盘恒用中间标定偏移，不参与左右分区。
             open_loop_place_pose = apply_camera_to_sucker_offset(
                 rough_pose,
                 self.visual_config,
+                subject="tray",
             )
             # 托盘高位标定给出的 Z 就是释放 Z，只应用吸盘 XY 偏移。
             open_loop_place_pose = self._validate_motion_pose(
@@ -982,7 +990,11 @@ class TaskRunner:
                 last_response=last_response,
             )
 
-            place_pose = apply_camera_to_sucker_offset(camera_pose, self.visual_config)
+            place_pose = apply_camera_to_sucker_offset(
+                camera_pose,
+                self.visual_config,
+                subject="tray",
+            )
             # 托盘标定给出的观察 Z 同时就是吹气释放 Z，此处只应用吸盘 XY 偏移。
             place_pose = self._validate_motion_pose(place_pose, "最终摆放位")
         else:

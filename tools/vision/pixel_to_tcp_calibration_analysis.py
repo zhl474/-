@@ -51,6 +51,16 @@ PIXEL_COVERAGE_GAP_WARNING_RATIO = 0.25
 MAX_SELECTED_CV_RMSE_MM: Optional[float] = None
 MAX_SELECTED_CV_P95_MM: Optional[float] = None
 
+# ----------------------------- 左右分侧标定 -----------------------------
+# True 时方块标定额外按高位检测像素 u 分左右两套模型输出：
+#   block_pixel_to_tcp_calibration_left.yaml  （u < SIDE_SPLIT_U_PX）
+#   block_pixel_to_tcp_calibration_right.yaml （u >= SIDE_SPLIT_U_PX）
+# 单文件 block_pixel_to_tcp_calibration.yaml 照常输出（SINGLE 策略与回退用）。
+# 每侧成功样本数少于 MIN_SAMPLES_PER_SIDE 时该侧不写文件并判定整个方块标定失败。
+SPLIT_BLOCK_SIDES = True
+SIDE_SPLIT_U_PX = 640.0
+MIN_SAMPLES_PER_SIDE = 5
+
 
 COL_CATEGORY = "方块类别"
 COL_EVENT = "事件"
@@ -641,8 +651,12 @@ def build_v2_document(
     z_source,
     tray_offset_mm=None,
     z_plane_rmse_mm=None,
+    zone=None,
 ):
-    """生成 XY 模型与 Z 平面解耦的 schema v2 标定文档。"""
+    """生成 XY 模型与 Z 平面解耦的 schema v2 标定文档。
+
+    zone 为 "left"/"right" 时写入分区元数据，供左右分侧标定留档。
+    """
     document = {
         "schema_version": 2,
         "generation_id": generation_id,
@@ -684,6 +698,12 @@ def build_v2_document(
         },
         "usage_note": "正式运行仅使用离线 XY 模型和独立 Z 平面，不查询深度相机。",
     }
+    if zone is not None:
+        document["zone"] = str(zone)
+        document["usage_note"] = (
+            f"左右分侧标定（{zone}侧，u 相对中线 {SIDE_SPLIT_U_PX:g} 分侧）；"
+            "正式运行仅使用离线 XY 模型和独立 Z 平面，不查询深度相机。"
+        )
     if z_plane_rmse_mm is not None:
         document["metrics"]["external_depth_z_plane_rmse_mm"] = float(z_plane_rmse_mm)
     if tray_offset_mm is not None:
@@ -940,8 +960,9 @@ def _read_v2_success_rows(job):
     }
 
 
-def _fit_v2_xy_job(job, rows, report):
-    """完成一个主体的 XY 模型比较、选择和全量拟合。"""
+def _fit_v2_xy_job(job, rows, report, side=None):
+    """完成一个主体（或左右分区中的一侧）的 XY 模型比较、选择和全量拟合。"""
+    side_label = "" if side is None else f"{side}侧"
     uv = rows[COL_PIXEL].to_numpy(dtype=float)
     tcp_xy = rows[COL_TCP_XY].to_numpy(dtype=float)
     summaries = []
@@ -961,7 +982,7 @@ def _fit_v2_xy_job(job, rows, report):
         except Exception as exc:  # noqa: BLE001
             failures[model_name] = str(exc)
     if not summaries:
-        raise ValueError(f"{job.label}所有 XY 候选模型均无法完成交叉验证")
+        raise ValueError(f"{job.label}{side_label}所有 XY 候选模型均无法完成交叉验证")
     selection = choose_xy_model(summaries)
     selected_name = selection["推荐最简模型"]
     selected_summary = next(row for row in summaries if row["模型"] == selected_name)
@@ -970,10 +991,16 @@ def _fit_v2_xy_job(job, rows, report):
     training_rmse = float(
         np.sqrt(np.mean(np.sum((training_prediction - tcp_xy) ** 2, axis=1)))
     )
-    report["XY映射模型交叉验证"] = summaries
-    report["XY映射模型失败原因"] = failures
-    report["XY模型选择"] = selection
-    report["XY全数据训练RMSE_mm"] = training_rmse
+    if side is None:
+        report["XY映射模型交叉验证"] = summaries
+        report["XY映射模型失败原因"] = failures
+        report["XY模型选择"] = selection
+        report["XY全数据训练RMSE_mm"] = training_rmse
+    else:
+        report[f"{side}侧XY映射模型交叉验证"] = summaries
+        report[f"{side}侧XY映射模型失败原因"] = failures
+        report[f"{side}侧XY模型选择"] = selection
+        report[f"{side}侧XY全数据训练RMSE_mm"] = training_rmse
 
     error_table = rows[[COL_CATEGORY, *COL_PIXEL, *COL_TCP_XY]].copy()
     for model_name, prediction in predictions.items():
@@ -982,11 +1009,25 @@ def _fit_v2_xy_job(job, rows, report):
             axis=1,
         )
     error_table.to_csv(
-        job.output_dir / "逐点OOF误差.csv",
+        job.output_dir / f"逐点OOF误差{side_label}.csv",
         index=False,
         encoding="utf-8-sig",
     )
     return uv, selected_name, selected_model, selected_summary, training_rmse
+
+
+def _split_block_sides(rows, side_u_px: float = SIDE_SPLIT_U_PX):
+    """按高位检测像素 u 把方块成功行分成左右两份（u < 阈值 → left）。"""
+    u = rows[COL_PIXEL[0]].to_numpy(dtype=float)
+    left_rows = rows.loc[u < side_u_px].copy()
+    right_rows = rows.loc[u >= side_u_px].copy()
+    return left_rows, right_rows
+
+
+def _side_calibration_filename(job, side: str):
+    """左右分侧标定输出文件名：block_pixel_to_tcp_calibration_left/right.yaml。"""
+    calibration_path = Path(job.calibration_filename)
+    return f"{calibration_path.stem}_{side}{calibration_path.suffix}"
 
 
 def _numeric_matrix(rows, columns):
@@ -1506,16 +1547,17 @@ def analyze_calibration_pair(block_job, tray_job) -> bool:
             _analyze_experiment_log(job, rows, reports[job.subject])
 
         generation_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        block_z_source = (
+            "fixed_constant_block_observation_z"
+            if fixed_z_enabled
+            else "external_depth_block_surface_plus_observation_height"
+        )
         documents = {}
         for job in jobs:
             uv, name, model, summary, training_rmse = fitted[job.subject]
             if job.subject == "block":
                 z_coefficients = block_z_coefficients
-                z_source = (
-                    "fixed_constant_block_observation_z"
-                    if fixed_z_enabled
-                    else "external_depth_block_surface_plus_observation_height"
-                )
+                z_source = block_z_source
                 offset = None
                 plane_rmse = None if fixed_z_enabled else block_z_rmse
             else:
@@ -1541,6 +1583,44 @@ def analyze_calibration_pair(block_job, tray_job) -> bool:
                 z_plane_rmse_mm=plane_rmse,
             )
 
+        # 左右分侧模型：同一批次、同一 Z 平面/常数，仅 XY 模型按侧独立拟合。
+        side_documents = {}
+        if SPLIT_BLOCK_SIDES:
+            left_rows, right_rows = _split_block_sides(block_rows)
+            reports["block"]["左右分区"] = {
+                "分侧阈值u": SIDE_SPLIT_U_PX,
+                "左侧样本数": int(len(left_rows)),
+                "右侧样本数": int(len(right_rows)),
+                "最少样本数门禁": MIN_SAMPLES_PER_SIDE,
+            }
+            for side, side_rows in (("left", left_rows), ("right", right_rows)):
+                if len(side_rows) < MIN_SAMPLES_PER_SIDE:
+                    raise ValueError(
+                        f"方块{side}侧成功样本数 {len(side_rows)} 少于 "
+                        f"最少样本数 {MIN_SAMPLES_PER_SIDE}，左右分侧标定失败"
+                    )
+                side_uv, side_name, side_model, side_summary, side_rmse = (
+                    _fit_v2_xy_job(
+                        block_job,
+                        side_rows,
+                        reports["block"],
+                        side=side,
+                    )
+                )
+                side_documents[side] = build_v2_document(
+                    block_job,
+                    side_uv,
+                    side_name,
+                    side_model,
+                    side_summary,
+                    side_rmse,
+                    block_z_coefficients,
+                    generation_id,
+                    block_z_source,
+                    z_plane_rmse_mm=None if fixed_z_enabled else block_z_rmse,
+                    zone=side,
+                )
+
         staged_paths = {}
         for job in jobs:
             calibration_path = job.output_dir / job.calibration_filename
@@ -1553,14 +1633,32 @@ def analyze_calibration_pair(block_job, tray_job) -> bool:
                     sort_keys=False,
                 )
             staged_paths[job.subject] = staged_path
+        side_staged = []
+        for side, document in side_documents.items():
+            target = block_job.output_dir / _side_calibration_filename(block_job, side)
+            staged = target.with_suffix(target.suffix + ".tmp")
+            with staged.open("w", encoding="utf-8") as file_handle:
+                yaml.safe_dump(
+                    document,
+                    file_handle,
+                    allow_unicode=True,
+                    sort_keys=False,
+                )
+            side_staged.append((target, staged))
 
-        # 两份内容均成功序列化后才替换候选文件；任何异常都会在下方统一清理。
+        # 全部内容均成功序列化后才替换候选文件；任何异常都会在下方统一清理。
         for job in jobs:
             calibration_path = job.output_dir / job.calibration_filename
             os.replace(staged_paths[job.subject], calibration_path)
             reports[job.subject]["质量门禁通过"] = True
             reports[job.subject]["生成标定YAML"] = str(calibration_path)
             reports[job.subject]["生成批次"] = generation_id
+        for target, staged in side_staged:
+            os.replace(staged, target)
+        if side_staged:
+            reports["block"]["左右分区"]["生成YAML"] = [
+                str(target) for target, _staged in side_staged
+            ]
     except Exception as exc:  # noqa: BLE001
         for job in jobs:
             remove_stale_calibration(job.output_dir / job.calibration_filename)
@@ -1569,6 +1667,12 @@ def analyze_calibration_pair(block_job, tray_job) -> bool:
                     Path(job.calibration_filename).suffix + ".tmp"
                 )
             )
+            for side in ("left", "right"):
+                side_path = job.output_dir / _side_calibration_filename(job, side)
+                remove_stale_calibration(side_path)
+                remove_stale_calibration(
+                    side_path.with_suffix(side_path.suffix + ".tmp")
+                )
             reports[job.subject]["质量门禁通过"] = False
             reports[job.subject].pop("生成标定YAML", None)
             reports[job.subject].pop("生成批次", None)

@@ -280,6 +280,73 @@ def test_闭环抓取使用动态预抓取和托盘伺服高度抬升(
     assert clients.suction_states == [module.RobotClients.SUCK]
 
 
+def test_three_strategy_pick_uses_left_zone_offset(monkeypatch):
+    """THREE_CALIBRATION：左侧方块（u < 640）使用 left 偏移（端到端）。"""
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    visual_config = load_visual_servo_config()
+    visual_config["sucker_offset_strategy"] = "THREE_CALIBRATION"
+    visual_config["camera_to_sucker_offset_left_mm"] = [-80.0, -10.0]
+    visual_config["camera_to_sucker_offset_right_mm"] = [-90.0, -20.0]
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=_execution_config(),
+        visual_config=visual_config,
+    )
+    runner._align = lambda *_args, **_kwargs: (
+        True,
+        [1, 2, 200, -180, 0, 90],
+        None,
+        "成功",
+    )
+    target = clients.get_task_target(0)
+    target.pick_surface_z_mm = 22.0
+    target.pick_high_detected_pixel_xy = [120.5, 220.5]  # u < 640 → 左侧
+
+    runner._pick(target)
+
+    # 相机对准位姿 (1, 2) + 左侧偏移 (-80, -10) → 预抓取/抓取/抬升 XY 均为 (-79, -8)。
+    for move in clients.moves[1:]:
+        assert move[0][:2] == pytest.approx([-79.0, -8.0])
+
+
+def test_three_strategy_pick_uses_right_zone_offset_and_tray_keeps_center(monkeypatch):
+    """THREE_CALIBRATION：右侧方块（u >= 640）用 right 偏移；托盘摆放恒用中间。"""
+    module = _load_task_runner(monkeypatch)
+    clients = _FakeClients()
+    visual_config = load_visual_servo_config()
+    visual_config["sucker_offset_strategy"] = "THREE_CALIBRATION"
+    visual_config["camera_to_sucker_offset_left_mm"] = [-80.0, -10.0]
+    visual_config["camera_to_sucker_offset_right_mm"] = [-90.0, -20.0]
+    runner = module.TaskRunner(
+        clients=clients,
+        execution_config=_execution_config(),
+        visual_config=visual_config,
+    )
+    runner._align = lambda *_args, **_kwargs: (
+        True,
+        [1, 2, 200, -180, 0, 90],
+        None,
+        "成功",
+    )
+    target = clients.get_task_target(0)
+    target.pick_surface_z_mm = 22.0
+    target.pick_high_detected_pixel_xy = [900.5, 220.5]  # u >= 640 → 右侧
+
+    runner._pick(target)
+
+    # 相机对准位姿 (1, 2) + 右侧偏移 (-90, -20) → XY 均为 (-89, -18)。
+    for move in clients.moves[1:]:
+        assert move[0][:2] == pytest.approx([-89.0, -18.0])
+
+    # 托盘摆放（闭环）恒用中间偏移，不受分区影响：最后一步 XY = 相机位姿 + 中间偏移。
+    center = visual_config["camera_to_sucker_offset_mm"]
+    runner._place(target, place_rotation=_completed_rotation(module))
+    assert clients.moves[-1][0][:2] == pytest.approx(
+        [1.0 + center[0], 2.0 + center[1]]
+    )
+
+
 def test_开环抓取直接到动态预抓取位并抬到托盘伺服高度(monkeypatch):
     module = _load_task_runner(monkeypatch)
     clients = _FakeClients()

@@ -29,6 +29,7 @@ from image_process_lib.block_servo_detector import (
     detect_block_with_high_prior_roi,
 )
 from image_process_lib.final_board_selector import FinalBoardSelectorConfig
+from image_process_lib.sucker_offset import resolve_sucker_offset
 from image_process_lib.template_config import (
     load_color_segmentation_config,
     load_template_geometry,
@@ -858,6 +859,8 @@ def _load_process_module_with_stubs(monkeypatch, module_name):
         "PrepareTaskResponse",
         "RespondOperatorPrompt",
         "RespondOperatorPromptResponse",
+        "YoloPreview",
+        "YoloPreviewResponse",
     ):
         setattr(image_process.srv, name, type(name, (ServiceStub,), {}))
 
@@ -1061,9 +1064,14 @@ def test_image_node_selects_high_tcp_safety_offset_from_servo_mode(
     _stub_image_processor_runtime(monkeypatch, image_node_module)
     received = {}
 
+    class _LocalizerStub:
+        """构造后 __init__ 会读取 fixed_tcp_z_mm，stub 必须提供该属性。"""
+
+        fixed_tcp_z_mm = None
+
     def make_localizer(**kwargs):
         received.update(kwargs)
-        return object()
+        return _LocalizerStub()
 
     monkeypatch.setattr(image_node_module, "HighPixelToTcpLocalizer", make_localizer)
 
@@ -1185,6 +1193,246 @@ def test_image_node_rejects_invalid_camera_to_sucker_offset(
 
     with pytest.raises(ValueError, match="camera_to_sucker_offset_mm 必须包含 2 个有限数值"):
         module.ImageProcessor()
+
+
+def test_image_node_rejects_invalid_sucker_offset_strategy(monkeypatch, tmp_path):
+    module = _load_process_module_with_stubs(
+        monkeypatch,
+        "process_invalid_sucker_offset_strategy",
+    )
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    visual_config_path = tmp_path / "visual_servo.yaml"
+    visual_config_path.write_text(
+        yaml.safe_dump(
+            {
+                "camera_to_sucker_offset_mm": [-85.264, -13.905],
+                "sucker_offset_strategy": "invented",
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        image_node_module,
+        "VISUAL_SERVO_CONFIG_PATH",
+        str(visual_config_path),
+    )
+    _stub_image_processor_runtime(monkeypatch, image_node_module)
+
+    with pytest.raises(ValueError, match="sucker_offset_strategy 只能是"):
+        module.ImageProcessor()
+
+
+def test_image_node_three_strategy_requires_left_right(monkeypatch, tmp_path):
+    module = _load_process_module_with_stubs(
+        monkeypatch,
+        "process_three_strategy_without_left_right",
+    )
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    visual_config_path = tmp_path / "visual_servo.yaml"
+    visual_config_path.write_text(
+        yaml.safe_dump(
+            {
+                "camera_to_sucker_offset_mm": [-85.264, -13.905],
+                "sucker_offset_strategy": "THREE_CALIBRATION",
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        image_node_module,
+        "VISUAL_SERVO_CONFIG_PATH",
+        str(visual_config_path),
+    )
+    _stub_image_processor_runtime(monkeypatch, image_node_module)
+
+    with pytest.raises(ValueError, match="THREE_CALIBRATION 策略必须同时配置"):
+        module.ImageProcessor()
+
+
+def test_image_node_strategy_is_frozen_at_startup(monkeypatch, tmp_path):
+    """策略只在启动时读取并固定；磁盘上的策略变更不影响运行中行为。"""
+    module = _load_process_module_with_stubs(
+        monkeypatch,
+        "process_strategy_frozen_at_startup",
+    )
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    execution_data = yaml.safe_load(
+        open(image_node_module.EXECUTION_CONFIG_PATH, "r", encoding="utf-8")
+    )
+    execution_path = tmp_path / "execution.yaml"
+    execution_path.write_text(
+        yaml.safe_dump(execution_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(image_node_module, "EXECUTION_CONFIG_PATH", str(execution_path))
+    visual_config_path = tmp_path / "visual_servo.yaml"
+    visual_config_path.write_text(
+        yaml.safe_dump(
+            {
+                "camera_to_sucker_offset_mm": [-85.264, -13.905],
+                "sucker_offset_strategy": "THREE_CALIBRATION",
+                "camera_to_sucker_offset_left_mm": [-83.0, -12.0],
+                "camera_to_sucker_offset_right_mm": [-87.0, -15.5],
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        image_node_module,
+        "VISUAL_SERVO_CONFIG_PATH",
+        str(visual_config_path),
+    )
+    _stub_image_processor_runtime(monkeypatch, image_node_module)
+    monkeypatch.setattr(
+        image_node_module,
+        "HighPixelToTcpLocalizer",
+        lambda **_kwargs: types.SimpleNamespace(
+            fixed_tcp_z_mm=None,
+            update_dynamic_bounds=lambda **kwargs: None,
+        ),
+    )
+
+    processor = module.ImageProcessor()
+
+    assert processor.sucker_offset_strategy == "THREE_CALIBRATION"
+    assert processor.sucker_offsets["left"] == [-83.0, -12.0]
+    assert processor.sucker_offsets["right"] == [-87.0, -15.5]
+    # 磁盘改回 SINGLE 后，每轮重读只刷新校验与数值，策略保持启动时的 THREE。
+    visual_config_path.write_text(
+        yaml.safe_dump(
+            {
+                "camera_to_sucker_offset_mm": [-85.264, -13.905],
+                "sucker_offset_strategy": "SINGLE_CALIBRATION",
+                "camera_to_sucker_offset_left_mm": [-83.0, -12.0],
+                "camera_to_sucker_offset_right_mm": [-87.0, -15.5],
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    processor._reload_dynamic_config()
+
+    assert processor.sucker_offset_strategy == "THREE_CALIBRATION"
+    assert processor.sucker_offsets["strategy"] == "THREE_CALIBRATION"
+    assert processor.visual_servo_config["sucker_offset_strategy"] == "THREE_CALIBRATION"
+    # 冻结策略继续驱动安全校验的分区选择。
+    offset, side = resolve_sucker_offset(
+        processor.visual_servo_config,
+        "block",
+        [100.0, 200.0],
+    )
+    assert side == "left"
+    assert offset == [-83.0, -12.0]
+
+
+def _rewrite_perception_without_side_calibrations(monkeypatch, tmp_path, module):
+    """复制 perception.yaml 并移除左右方块标定键，模拟旧配置。"""
+    perception_data = yaml.safe_load(
+        open(module.PERCEPTION_CONFIG_PATH, "r", encoding="utf-8")
+    )
+    perception_data["calibration"].pop("block_pixel_to_tcp_left", None)
+    perception_data["calibration"].pop("block_pixel_to_tcp_right", None)
+    perception_path = tmp_path / "perception.yaml"
+    perception_path.write_text(
+        yaml.safe_dump(perception_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "PERCEPTION_CONFIG_PATH", str(perception_path))
+
+
+def _set_three_strategy_visual_servo(monkeypatch, tmp_path, module):
+    """复制 visual_servo.yaml 并把策略改为 THREE_CALIBRATION。"""
+    visual_data = yaml.safe_load(
+        open(module.VISUAL_SERVO_CONFIG_PATH, "r", encoding="utf-8")
+    )
+    visual_data["sucker_offset_strategy"] = "THREE_CALIBRATION"
+    visual_path = tmp_path / "visual_servo_three.yaml"
+    visual_path.write_text(
+        yaml.safe_dump(visual_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "VISUAL_SERVO_CONFIG_PATH", str(visual_path))
+
+
+def test_image_node_three_strategy_requires_left_right_calibrations(
+    monkeypatch,
+    tmp_path,
+):
+    """THREE_CALIBRATION 策略下缺少左右方块标定文件时启动失败。"""
+    module = _load_process_module_with_stubs(
+        monkeypatch,
+        "process_three_strategy_missing_side_calibrations",
+    )
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    execution_data = yaml.safe_load(
+        open(image_node_module.EXECUTION_CONFIG_PATH, "r", encoding="utf-8")
+    )
+    execution_data["calibration_mode"] = False
+    execution_path = tmp_path / "execution.yaml"
+    execution_path.write_text(
+        yaml.safe_dump(execution_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(image_node_module, "EXECUTION_CONFIG_PATH", str(execution_path))
+    _rewrite_perception_without_side_calibrations(
+        monkeypatch, tmp_path, image_node_module
+    )
+    _set_three_strategy_visual_servo(monkeypatch, tmp_path, image_node_module)
+    _stub_image_processor_runtime(monkeypatch, image_node_module)
+
+    with pytest.raises(ValueError, match="THREE_CALIBRATION 策略必须同时配置"):
+        module.ImageProcessor()
+
+
+@pytest.mark.parametrize("strategy", ["SINGLE_CALIBRATION", "THREE_CALIBRATION"])
+def test_image_node_passes_split_models_flag_by_strategy(
+    monkeypatch,
+    tmp_path,
+    strategy,
+):
+    """split_models 由启动策略决定：THREE=True、SINGLE=False。"""
+    module = _load_process_module_with_stubs(
+        monkeypatch,
+        f"process_split_models_{strategy}",
+    )
+    image_node_module = sys.modules[module.ImageProcessor.__module__]
+    execution_data = yaml.safe_load(
+        open(image_node_module.EXECUTION_CONFIG_PATH, "r", encoding="utf-8")
+    )
+    execution_data["calibration_mode"] = False
+    execution_path = tmp_path / "execution.yaml"
+    execution_path.write_text(
+        yaml.safe_dump(execution_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(image_node_module, "EXECUTION_CONFIG_PATH", str(execution_path))
+    if strategy == "THREE_CALIBRATION":
+        _set_three_strategy_visual_servo(monkeypatch, tmp_path, image_node_module)
+    _stub_image_processor_runtime(monkeypatch, image_node_module)
+    received = {}
+
+    class _LocalizerStub:
+        fixed_tcp_z_mm = None
+
+    def make_localizer(**kwargs):
+        received.update(kwargs)
+        return _LocalizerStub()
+
+    monkeypatch.setattr(image_node_module, "HighPixelToTcpLocalizer", make_localizer)
+
+    processor = module.ImageProcessor()
+
+    assert processor.sucker_offset_strategy == strategy
+    assert received["split_models"] is (strategy == "THREE_CALIBRATION")
+    assert received["block_calibration_left_path"] is not None
+    assert received["block_calibration_right_path"] is not None
 
 
 def test_calibration_initialization_creates_batch_depth_client_without_waiting(

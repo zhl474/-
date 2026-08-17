@@ -165,6 +165,22 @@ FIELD_OVERRIDES = {
     "visual_servo.camera_to_sucker_offset_mm": {
         "label": "相机到吸盘偏移", "unit": "mm", "risk": "danger",
     },
+    "visual_servo.sucker_offset_strategy": {
+        "label": "吸盘偏移标定策略",
+        "options": ["SINGLE_CALIBRATION", "THREE_CALIBRATION"],
+        "risk": "danger",
+        "description": "SINGLE_CALIBRATION=单参数（全部用中间偏移与单模型）；"
+        "THREE_CALIBRATION=三参数（托盘用中间，方块按中线分左右："
+        "偏移分区 + 高位拟合模型分侧）。切换后需重启两个节点生效。",
+    },
+    "visual_servo.camera_to_sucker_offset_left_mm": {
+        "label": "相机到吸盘偏移（左）", "unit": "mm", "risk": "danger",
+        "description": "THREE_CALIBRATION 策略下左侧方块（u < 640）使用。",
+    },
+    "visual_servo.camera_to_sucker_offset_right_mm": {
+        "label": "相机到吸盘偏移（右）", "unit": "mm", "risk": "danger",
+        "description": "THREE_CALIBRATION 策略下右侧方块（u >= 640）使用。",
+    },
     # --- 图像识别参数（perception）分组与字段大字号中文名 ---
     "perception.models": {
         "label": "推理模型", "risk": "danger",
@@ -264,6 +280,16 @@ FIELD_OVERRIDES = {
     },
     "perception.calibration.block_pixel_to_tcp": {
         "label": "方块像素-TCP 标定文件", "risk": "danger",
+    },
+    "perception.calibration.block_pixel_to_tcp_left": {
+        "label": "方块像素-TCP 标定文件（左）", "risk": "danger",
+        "description": "THREE_CALIBRATION 策略下左侧方块（u < 640）使用；"
+        "由离线标定工具分侧生成后替换。",
+    },
+    "perception.calibration.block_pixel_to_tcp_right": {
+        "label": "方块像素-TCP 标定文件（右）", "risk": "danger",
+        "description": "THREE_CALIBRATION 策略下右侧方块（u >= 640）使用；"
+        "由离线标定工具分侧生成后替换。",
     },
     "perception.calibration.tray_pixel_to_tcp": {
         "label": "托盘像素-TCP 标定文件", "risk": "danger",
@@ -822,6 +848,26 @@ class ConfigManager:
         offset = _require_sequence(_nested(data, "camera_to_sucker_offset_mm"), 2, "camera_to_sucker_offset_mm")
         for index, value in enumerate(offset):
             _finite_number(value, f"camera_to_sucker_offset_mm[{index}]")
+        # 吸盘偏移标定策略：SINGLE_CALIBRATION（默认）/ THREE_CALIBRATION，
+        # 与运行时校验规则保持一致，保证网页保存的配置一定能被两个节点接受。
+        strategy = data.get("sucker_offset_strategy", "SINGLE_CALIBRATION")
+        if strategy not in ("SINGLE_CALIBRATION", "THREE_CALIBRATION"):
+            raise ConfigError("sucker_offset_strategy 只能是 SINGLE_CALIBRATION 或 THREE_CALIBRATION")
+        left = data.get("camera_to_sucker_offset_left_mm")
+        right = data.get("camera_to_sucker_offset_right_mm")
+        if (left is None) != (right is None):
+            raise ConfigError("camera_to_sucker_offset_left_mm 与 camera_to_sucker_offset_right_mm 必须成对配置")
+        for name, value in (
+            ("camera_to_sucker_offset_left_mm", left),
+            ("camera_to_sucker_offset_right_mm", right),
+        ):
+            if value is None:
+                continue
+            pair = _require_sequence(value, 2, name)
+            for index, item in enumerate(pair):
+                _finite_number(item, f"{name}[{index}]")
+        if strategy == "THREE_CALIBRATION" and left is None:
+            raise ConfigError("THREE_CALIBRATION 策略必须同时配置 camera_to_sucker_offset_left_mm 与 camera_to_sucker_offset_right_mm")
 
     def _validate_perception(self, data):
         models = _require_mapping(_nested(data, "models"), "models")
@@ -875,6 +921,13 @@ class ConfigManager:
         calibration = _require_mapping(_nested(data, "calibration"), "calibration")
         for key in ("block_pixel_to_tcp", "tray_pixel_to_tcp", "hand_eye_matrix"):
             self._require_existing_source_file(calibration[key], f"calibration.{key}")
+        left_calibration = calibration.get("block_pixel_to_tcp_left")
+        right_calibration = calibration.get("block_pixel_to_tcp_right")
+        if (left_calibration is None) != (right_calibration is None):
+            raise ConfigError("calibration.block_pixel_to_tcp_left 与 calibration.block_pixel_to_tcp_right 必须成对配置")
+        for key in ("block_pixel_to_tcp_left", "block_pixel_to_tcp_right"):
+            if calibration.get(key) is not None:
+                self._require_existing_source_file(calibration[key], f"calibration.{key}")
         for path in (
             "high_tcp_localization.safe_x_range_mm",
             "high_tcp_localization.safe_y_range_mm",

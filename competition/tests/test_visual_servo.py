@@ -11,6 +11,7 @@ from competition_lib.config import (
     load_visual_servo_config,
 )
 from competition_lib.visual_servo import (
+    apply_camera_to_sucker_offset,
     limit_xy_step,
     pixel_error_to_robot_delta,
     run_offset_visual_servo_alignment,
@@ -654,3 +655,39 @@ def test_alignment_motion_requests_stability_wait():
 
     assert len(move_calls) == 1
     assert move_calls[0][1]["wait_until_stable"] is True
+
+
+def test_apply_camera_to_sucker_offset_old_signature_uses_center():
+    """旧签名（不传 subject）等价旧版：托盘语义，恒用中间偏移。"""
+    config = load_visual_servo_config()
+    center = config["camera_to_sucker_offset_mm"]
+    pose = [10.0, 20.0, 300.0, -180.0, 0.0, 90.0]
+    result = apply_camera_to_sucker_offset(pose, config)
+    assert result == pytest.approx(
+        [10.0 + center[0], 20.0 + center[1], 300.0, -180.0, 0.0, 90.0]
+    )
+
+
+def test_apply_camera_to_sucker_offset_three_strategy_splits_blocks():
+    """THREE_CALIBRATION 策略：方块按高位像素分左右，托盘恒用中间。"""
+    config = load_visual_servo_config()
+    config["sucker_offset_strategy"] = "THREE_CALIBRATION"
+    config["camera_to_sucker_offset_left_mm"] = [-83.0, -12.0]
+    config["camera_to_sucker_offset_right_mm"] = [-87.0, -15.5]
+    center = config["camera_to_sucker_offset_mm"]
+    pose = [10.0, 20.0, 300.0, -180.0, 0.0, 90.0]
+
+    left = apply_camera_to_sucker_offset(
+        pose, config, subject="block", pixel_xy=[100.0, 220.0]
+    )
+    assert left == pytest.approx([10.0 - 83.0, 20.0 - 12.0, 300.0, -180.0, 0.0, 90.0])
+    right = apply_camera_to_sucker_offset(
+        pose, config, subject="block", pixel_xy=[900.0, 220.0]
+    )
+    assert right == pytest.approx(
+        [10.0 - 87.0, 20.0 - 15.5, 300.0, -180.0, 0.0, 90.0]
+    )
+    tray = apply_camera_to_sucker_offset(pose, config, subject="tray")
+    assert tray == pytest.approx(
+        [10.0 + center[0], 20.0 + center[1], 300.0, -180.0, 0.0, 90.0]
+    )

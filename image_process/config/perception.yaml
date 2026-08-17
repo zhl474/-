@@ -49,6 +49,11 @@ calibration:
   block_pixel_to_tcp: image_process/config/block_pixel_to_tcp_calibration.yaml
   tray_pixel_to_tcp: image_process/config/tray_pixel_to_tcp_calibration.yaml
   hand_eye_matrix: camera/config/T_wrist2camera.npy
+  # 左右方块标定文件（THREE_CALIBRATION 策略下按方块像素 u<640/u>=640 分侧使用）：
+  # 由离线工具 tools/vision/pixel_to_tcp_calibration_analysis.py 分侧生成后替换。
+  # 当前占位与单文件一致（SINGLE 策略不使用；THREE 下未替换前两侧同模型，等价旧行为）。
+  block_pixel_to_tcp_left: image_process/config/block_pixel_to_tcp_calibration.yaml
+  block_pixel_to_tcp_right: image_process/config/block_pixel_to_tcp_calibration.yaml
 
 # 高位模板匹配：先按 Mask 白色前景宽高筛选候选角度，再用紧边框模板做无 padding 卷积。
 # 尺寸筛选不可靠时回退到全角度、same-padding 慢匹配；本轮不修改低位匹配。

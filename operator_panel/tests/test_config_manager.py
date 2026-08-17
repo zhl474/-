@@ -157,6 +157,75 @@ def test危险映射矩阵必须二次确认(manager):
     assert result["dangerous"] is True
 
 
+def test吸盘偏移标定策略非法值被拒绝(manager):
+    document = manager.get_config("visual_servo")
+    invalid = deepcopy(document["data"])
+    invalid["sucker_offset_strategy"] = "invented"
+    with pytest.raises(ConfigError, match="sucker_offset_strategy 只能是"):
+        manager.validate_document("visual_servo", invalid)
+
+
+def test吸盘偏移左右只配一个被拒绝(manager):
+    document = manager.get_config("visual_servo")
+    broken = deepcopy(document["data"])
+    del broken["camera_to_sucker_offset_left_mm"]
+    with pytest.raises(ConfigError, match="必须成对配置"):
+        manager.validate_document("visual_servo", broken)
+
+
+def test三参数策略缺少左右偏移被拒绝(manager):
+    document = manager.get_config("visual_servo")
+    broken = deepcopy(document["data"])
+    broken["sucker_offset_strategy"] = "THREE_CALIBRATION"
+    del broken["camera_to_sucker_offset_left_mm"]
+    del broken["camera_to_sucker_offset_right_mm"]
+    with pytest.raises(ConfigError, match="THREE_CALIBRATION 策略必须同时配置"):
+        manager.validate_document("visual_servo", broken)
+
+
+def test切换到三参数策略且左右齐全可保存(manager):
+    document = manager.get_config("visual_servo")
+    updated = deepcopy(document["data"])
+    updated["sucker_offset_strategy"] = "THREE_CALIBRATION"
+    result = manager.save_config(
+        "visual_servo", updated, document["revision"], confirm_dangerous=True
+    )
+    assert result["changed"] is True
+    saved = manager.get_config("visual_servo")
+    assert saved["data"]["sucker_offset_strategy"] == "THREE_CALIBRATION"
+
+
+def test左右方块标定文件必须成对(manager):
+    document = manager.get_config("perception")
+    broken = deepcopy(document["data"])
+    del broken["calibration"]["block_pixel_to_tcp_left"]
+    with pytest.raises(ConfigError, match="必须成对配置"):
+        manager.validate_document("perception", broken)
+
+
+def test左右方块标定文件路径必须存在(manager):
+    document = manager.get_config("perception")
+    broken = deepcopy(document["data"])
+    broken["calibration"]["block_pixel_to_tcp_left"] = (
+        "image_process/config/不存在的标定.yaml"
+    )
+    with pytest.raises(ConfigError, match="指向的文件不存在"):
+        manager.validate_document("perception", broken)
+
+
+def test左右方块标定文件路径合法可保存(manager):
+    """左右标定指向真实存在的单模型文件时（占位/同文件）校验与保存正常。"""
+    document = manager.get_config("perception")
+    updated = deepcopy(document["data"])
+    updated["calibration"]["block_pixel_to_tcp_left"] = (
+        document["data"]["calibration"]["block_pixel_to_tcp"]
+    )
+    updated["calibration"]["block_pixel_to_tcp_right"] = (
+        document["data"]["calibration"]["block_pixel_to_tcp"]
+    )
+    assert manager.validate_document("perception", updated) is not None
+
+
 def test数值有限值枚举和跨字段校验(manager):
     document = manager.get_config("execution")
     invalid = deepcopy(document["data"])
