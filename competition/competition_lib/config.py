@@ -255,6 +255,50 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
     return config
 
 
+_SUCKER_OFFSET_MODEL_TYPES = ("none", "linear_1d_x_residual", "linear_2d")
+
+
+def _validate_sucker_offset_model(model: dict) -> dict:
+    """校验 sucker_offset_model 并把参数归一化为 float。
+
+    type: none                   仅使用固定偏移，无需其他参数。
+    type: linear_1d_x_residual   Δvx = k_x·(X − x0)，Δvy = 0。
+    type: linear_2d              Δvx = kx·(X − x0) + ky·(Y − y0)，
+                                 Δvy = lx·(X − x0) + ly·(Y − y0)，lx/ly 可省略默认 0。
+    所有类型的位置参数都必须带 clamp 采样范围，禁止外推。
+    """
+    kind = model.get("type", "none")
+    if kind not in _SUCKER_OFFSET_MODEL_TYPES:
+        raise ValueError(f"未知 sucker_offset_model.type: {kind!r}")
+    normalized = {"type": kind}
+    if kind == "none":
+        return normalized
+    keys = ["clamp_min_x", "clamp_max_x"]
+    if kind == "linear_2d":
+        keys += ["kx", "ky", "x0", "y0", "clamp_min_y", "clamp_max_y"]
+        keys += [key for key in ("lx", "ly") if key in model]
+    else:
+        keys += ["k_x", "x0"]
+    missing = [key for key in keys if key not in model]
+    if missing:
+        raise ValueError(f"sucker_offset_model 缺少参数: {', '.join(missing)}")
+    try:
+        for key in keys:
+            normalized[key] = float(model[key])
+    except (TypeError, ValueError):
+        raise ValueError("sucker_offset_model 参数无效") from None
+    if not np.all(np.isfinite([normalized[key] for key in keys])):
+        raise ValueError("sucker_offset_model 参数无效")
+    if normalized["clamp_min_x"] >= normalized["clamp_max_x"]:
+        raise ValueError("sucker_offset_model X 采样范围无效")
+    if (
+        kind == "linear_2d"
+        and normalized["clamp_min_y"] >= normalized["clamp_max_y"]
+    ):
+        raise ValueError("sucker_offset_model Y 采样范围无效")
+    return normalized
+
+
 def load_visual_servo_config(config_path: str = DEFAULT_VISUAL_SERVO_CONFIG_PATH) -> dict:
     with open(config_path, "r", encoding="utf-8") as config_file:
         config = yaml.safe_load(config_file) or {}
@@ -264,4 +308,9 @@ def load_visual_servo_config(config_path: str = DEFAULT_VISUAL_SERVO_CONFIG_PATH
         raise ValueError("视觉伺服矩阵必须为 2x2，吸盘偏移必须包含 2 个数值")
     if not np.all(np.isfinite(matrix)) or not np.all(np.isfinite(offset)):
         raise ValueError("视觉伺服配置包含非有限数值")
+    model = config.get("sucker_offset_model")
+    if model is not None:
+        if not isinstance(model, dict):
+            raise ValueError("sucker_offset_model 必须是字典")
+        config["sucker_offset_model"] = _validate_sucker_offset_model(model)
     return config

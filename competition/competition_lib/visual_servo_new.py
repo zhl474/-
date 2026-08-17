@@ -116,34 +116,42 @@ def pixel_error_to_robot_delta(dx_px, dy_px, matrix, max_step_mm, min_step_mm=0.
 
 
 def apply_camera_to_sucker_offset(camera_pose: Sequence[float], config: dict):
-    """把相机对准位姿转换为吸盘对准位姿，支持位置相关偏移残差模型。
-
-    残差 Δv = 当前位置实测吸盘偏移 - 中心基线（camera_to_sucker_offset_mm）。
-    sucker_offset_model.type 支持：
-      none                  仅使用固定偏移（未标定时兜底）
-      linear_1d_x_residual  Δvx = k_x·(X − x0)，Δvy = 0
-      linear_2d             Δvx = kx·(X − x0) + ky·(Y − y0)
-                            Δvy = lx·(X − x0) + ly·(Y − y0)
-    X/Y 为相机对准位姿的 XY，计算前先 clamp 到采样范围，禁止外推。
-    """
     pose = list(float(value) for value in camera_pose)
     if len(pose) != 6:
         raise ValueError("相机位姿必须包含 6 个数值")
-    vx, vy = config["camera_to_sucker_offset_mm"]
-    model = config.get("sucker_offset_model") or {}
-    kind = model.get("type", "none")
-    if kind == "linear_1d_x_residual":
-        x = min(max(pose[0], model["clamp_min_x"]), model["clamp_max_x"])
-        vx += model["k_x"] * (x - model["x0"])
-    elif kind == "linear_2d":
-        x = min(max(pose[0], model["clamp_min_x"]), model["clamp_max_x"])
-        y = min(max(pose[1], model["clamp_min_y"]), model["clamp_max_y"])
-        dx, dy = x - model["x0"], y - model["y0"]
-        vx += model["kx"] * dx + model["ky"] * dy
-        vy += model.get("lx", 0.0) * dx + model.get("ly", 0.0) * dy
+    model = config.get("sucker_offset_model")
+    if model is None:
+        offset = config["camera_to_sucker_offset_mm"]
+        vx, vy = float(offset[0]), float(offset[1])
+    else:
+        vx, vy = _predict_sucker_offset(model, pose[0], pose[1])
     pose[0] += vx
     pose[1] += vy
     return pose
+
+
+def _predict_sucker_offset(model, x_mm, y_mm):
+    """按拟合模型预测相机位姿处的吸盘偏移；位置先 clamp 到采样范围，禁止外推。"""
+    clamp = model["clamp"]
+    kind = model["kind"]
+    if kind == "1d_x":
+        x = min(max(float(x_mm), clamp[0]), clamp[1])
+        row = np.array([1.0, x], dtype=float)
+    elif kind == "1d_y":
+        y = min(max(float(y_mm), clamp[0]), clamp[1])
+        row = np.array([1.0, y], dtype=float)
+    elif kind == "quad2":
+        x = min(max(float(x_mm), clamp[0]), clamp[1])
+        y = min(max(float(y_mm), clamp[2]), clamp[3])
+        row = np.array([1.0, x, y, x * x, x * y, y * y], dtype=float)
+    else:
+        x = min(max(float(x_mm), clamp[0]), clamp[1])
+        y = min(max(float(y_mm), clamp[2]), clamp[3])
+        row = np.array([1.0, x, y], dtype=float)
+    return (
+        float(np.dot(row, np.asarray(model["coef_vx"], dtype=float))),
+        float(np.dot(row, np.asarray(model["coef_vy"], dtype=float))),
+    )
 
 
 def run_offset_visual_servo_alignment(
