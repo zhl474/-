@@ -128,7 +128,7 @@ def test_localizer_allows_sample_hull_outside_pixel_but_rejects_unknown_subject(
         localizer.locate("board", [10.0, 20.0])
 
 
-def test_localizer_rejects_unsafe_xyz_and_accepts_injected_bounds(tmp_path):
+def test_localizer_rejects_tcp_below_minimum_z_and_accepts_injected_bounds(tmp_path):
     block_path, tray_path = _write_calibrations(tmp_path)
     restricted = HighPixelToTcpLocalizer(
         block_path,
@@ -150,17 +150,17 @@ def test_localizer_rejects_unsafe_xyz_and_accepts_injected_bounds(tmp_path):
     assert injected.locate_block([10.0, 20.0])[:3] == [-290.0, 20.0, 200.0]
 
 
-@pytest.mark.parametrize(
-    "base_xyz",
-    [
-        [-460.0, 0.0, 200.0],
-        [-100.0, 0.0, 200.0],
-        [-300.0, -300.0, 200.0],
-        [-300.0, 300.0, 200.0],
-        [-300.0, 0.0, 160.0],
-    ],
-)
-def test_localizer_rejects_each_configured_xyz_safety_boundary(tmp_path, base_xyz):
+_XY_VIOLATING_BASE_XYZ = [
+    [-460.0, 0.0, 200.0],
+    [-100.0, 0.0, 200.0],
+    [-300.0, -300.0, 200.0],
+    [-300.0, 300.0, 200.0],
+]
+
+
+@pytest.mark.parametrize("base_xyz", _XY_VIOLATING_BASE_XYZ)
+def test_localizer_accepts_xy_outside_configured_bounds(tmp_path, base_xyz):
+    """场地变动后 XY 安全限位已停用：越界 XY 预测直接放行，不再拦截。"""
     block_path = tmp_path / "越界方块标定.yaml"
     tray_path = tmp_path / "安全托盘标定.yaml"
     block_path.write_text(
@@ -175,6 +175,34 @@ def test_localizer_rejects_each_configured_xyz_safety_boundary(tmp_path, base_xy
         block_path,
         tray_path,
         shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+        tcp_min_xyz=[-444.224, -263.279, 148.0],
+        tcp_max_xyz=[-148.17, 315.925, None],
+    )
+
+    pose = localizer.locate_block([10.0, 20.0])
+
+    assert pose[:3] == pytest.approx(
+        [base_xyz[0] + 10.0, base_xyz[1] + 20.0, base_xyz[2]]
+    )
+
+
+def test_localizer_rejects_tcp_below_configured_minimum_z(tmp_path):
+    block_path = tmp_path / "低位方块标定.yaml"
+    tray_path = tmp_path / "安全托盘标定.yaml"
+    block_path.write_text(
+        yaml.safe_dump(_affine_payload("block", [-300.0, 0.0, 160.0]), sort_keys=False),
+        encoding="utf-8",
+    )
+    tray_path.write_text(
+        yaml.safe_dump(_affine_payload("tray", [-250.0, 50.0, 210.0]), sort_keys=False),
+        encoding="utf-8",
+    )
+    localizer = HighPixelToTcpLocalizer(
+        block_path,
+        tray_path,
+        shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+        tcp_min_xyz=[-444.224, -263.279, 180.0],
+        tcp_max_xyz=[-148.17, 315.925, None],
     )
 
     with pytest.raises(ValueError, match="超出安全范围"):
@@ -231,7 +259,8 @@ def test_localizer_xyz_safety_boundaries_are_inclusive(tmp_path, boundary_xyz):
     assert localizer.locate_block([0.0, 0.0])[:3] == boundary_xyz
 
 
-def test_open_loop_safety_offset_checks_executed_tcp_but_returns_raw_prediction(tmp_path):
+def test_open_loop_safety_offset_no_longer_gates_xy(tmp_path):
+    """XY 限位停用后，safety_xy_offset 只留在 assess 报告里，不再拦截定位。"""
     block_path = tmp_path / "开环方块标定.yaml"
     tray_path = tmp_path / "开环托盘标定.yaml"
     block_path.write_text(
@@ -248,8 +277,10 @@ def test_open_loop_safety_offset_checks_executed_tcp_but_returns_raw_prediction(
         tray_path,
         shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
     )
-    with pytest.raises(ValueError, match="预测 TCP XYZ.*超出安全范围"):
-        closed_loop.locate_block([0.0, 0.0])
+    # X=-140 已超旧上界 -148.17，XY 停用后直接放行。
+    assert closed_loop.locate_block([0.0, 0.0])[:3] == pytest.approx(
+        [-140.0, 20.0, 200.0]
+    )
 
     open_loop = HighPixelToTcpLocalizer(
         block_path,
@@ -258,13 +289,16 @@ def test_open_loop_safety_offset_checks_executed_tcp_but_returns_raw_prediction(
         safety_xy_offset=[-94.1, -13.8],
     )
 
-    # 校验使用偏移后的 [-234.1, 6.2]，返回值仍是标定模型的原始预测。
+    # 返回值仍是标定模型的原始预测，偏移只体现在 assess 的待执行 TCP 报告里。
     assert open_loop.locate_block([0.0, 0.0])[:3] == pytest.approx(
         [-140.0, 20.0, 200.0]
     )
     assert open_loop.locate_tray([0.0, 0.0])[:3] == pytest.approx(
         [-140.0, 20.0, 200.0]
     )
+    assessment = open_loop.assess("block", [0.0, 0.0])
+    assert assessment.safety_tcp_xyz == pytest.approx((-234.1, 6.2, 200.0))
+    assert assessment.safe is True
 
 
 def test_open_loop_safety_offset_reports_raw_offset_and_executed_tcp(tmp_path):
@@ -285,17 +319,13 @@ def test_open_loop_safety_offset_reports_raw_offset_and_executed_tcp(tmp_path):
         safety_xy_offset=[-94.1, -13.8],
     )
 
-    with pytest.raises(ValueError) as error:
-        localizer.locate_block([0.0, 0.0])
-
-    message = str(error.value)
-    assert "预测 TCP XYZ [-440.0, -250.0, 200.0]" in message
-    assert "安全校验 XY 偏移 [-94.1, -13.8]" in message
-    assert "待执行 TCP XYZ [-534.1, -263.8, 200.0]" in message
-    assert "超出安全范围" in message
+    # 偏移后的 [-534.1, -263.8] 已越旧 XY 边界，但 XY 限位停用后放行。
+    assert localizer.locate_block([0.0, 0.0])[:3] == pytest.approx(
+        [-440.0, -250.0, 200.0]
+    )
 
 
-def test_structured_assessment_reports_actual_tcp_and_all_violated_axes(tmp_path):
+def test_structured_assessment_reports_actual_tcp_and_z_violation(tmp_path):
     block_path = tmp_path / "结构化方块标定.yaml"
     tray_path = tmp_path / "结构化托盘标定.yaml"
     block_path.write_text(
@@ -310,6 +340,8 @@ def test_structured_assessment_reports_actual_tcp_and_all_violated_axes(tmp_path
         block_path,
         tray_path,
         shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+        tcp_min_xyz=[-444.224, -263.279, 180.0],
+        tcp_max_xyz=[-148.17, 315.925, None],
         safety_xy_offset=[-94.1, -13.8],
     )
 
@@ -317,10 +349,11 @@ def test_structured_assessment_reports_actual_tcp_and_all_violated_axes(tmp_path
 
     assert assessment.predicted_tcp_xyz == (-440.0, -260.0, 160.0)
     assert assessment.safety_tcp_xyz == pytest.approx((-534.1, -273.8, 160.0))
-    assert assessment.safety_min_xyz == (-444.224, -263.279, 163.0)
+    assert assessment.safety_min_xyz == (-444.224, -263.279, 180.0)
     assert assessment.safety_max_xyz[:2] == (-148.17, 315.925)
     assert np.isposinf(assessment.safety_max_xyz[2])
-    assert assessment.violated_axes == ("X", "Y", "Z")
+    # XY 越界不再计入 violated_axes，只有 Z 低于下限仍判定不安全。
+    assert assessment.violated_axes == ("Z",)
     assert assessment.safe is False
 
 
@@ -353,10 +386,12 @@ def test_safety_xy_offset_never_changes_z_validation(tmp_path):
         block_path,
         tray_path,
         shooting_pose=[-300.0, 0.0, 500.0, 180.0, 0.0, -90.0],
+        tcp_min_xyz=[-444.224, -263.279, 180.0],
+        tcp_max_xyz=[-148.17, 315.925, None],
         safety_xy_offset=[-94.1, -13.8],
     )
 
-    with pytest.raises(ValueError, match="待执行 TCP XYZ.*160.0.*超出安全范围"):
+    with pytest.raises(ValueError, match=r"预测 TCP XYZ.*160\.0.*超出安全范围"):
         localizer.locate_block([0.0, 0.0])
 
 
@@ -423,8 +458,9 @@ def test_reported_block_pixel_outside_sample_hull_is_accepted_when_tcp_is_safe()
 
     pose = localizer.locate_block([1063.0, 571.0])
 
+    # 2026-08-17 场地批次标定的预测值；XY 越界（X=-146.65 > -148.17）已不再拦截。
     assert pose == pytest.approx(
-        [-152.0510504722284, 216.944753678346, 203.99675126128128, 180.0, 0.0, -90.0],
+        [-146.65541938115277, 225.8348246471987, 173.46, 180.0, 0.0, -90.0],
         abs=1e-6,
     )
 

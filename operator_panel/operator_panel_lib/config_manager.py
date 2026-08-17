@@ -332,6 +332,15 @@ FIELD_OVERRIDES = {
     "perception.block_recognition.v2.search_margin_px": {
         "label": "平移搜索余量", "unit": "px",
     },
+    "perception.block_recognition.v2.angle_lock_editor": {
+        "label": "V2 角度锁定编辑",
+    },
+    "perception.block_recognition.v2.angle_lock_editor.enabled": {
+        "label": "启用角度锁定编辑",
+    },
+    "perception.block_recognition.v2.angle_lock_editor.script": {
+        "label": "角度锁定编辑脚本",
+    },
     "perception.calibration_depth": {
         "label": "深度标定",
     },
@@ -952,6 +961,19 @@ class ConfigManager:
             raise ConfigError("block_recognition.v2.gaussian_ksize 必须是奇数")
         for key in ("crop_margin_px", "kernel_margin_px", "search_margin_px"):
             _strict_integer(edge_v2[key], f"block_recognition.v2.{key}", nonnegative=True)
+        angle_lock_editor = _require_mapping(
+            edge_v2.get("angle_lock_editor", {}),
+            "block_recognition.v2.angle_lock_editor",
+        )
+        if not isinstance(angle_lock_editor.get("enabled", False), bool):
+            raise ConfigError(
+                "block_recognition.v2.angle_lock_editor.enabled 必须是布尔值"
+            )
+        angle_lock_script = angle_lock_editor.get("script")
+        if angle_lock_script is not None and not str(angle_lock_script).strip():
+            raise ConfigError(
+                "block_recognition.v2.angle_lock_editor.script 不能为空字符串"
+            )
 
         block_servo = _require_mapping(_nested(data, "block_servo"), "block_servo")
         for key in (

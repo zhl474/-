@@ -8,13 +8,13 @@ models:
 
 # 固定盘面最短摆放方案 V1。shadow 计算并记录新方案，但仍执行旧匈牙利方案。
 task_sequence_optimizer:
-  mode: legacy            # legacy / shadow / execute
+  mode: execute           # legacy / shadow / execute
   beam_width: 5000
   report_top_candidates: 20
 
 # 普通 260 分任务的 V5 动态盘面选择。shadow 完整计算并记录，但仍执行固定 YAML。
 dynamic_board_selection:
-  mode: disabled                # disabled / shadow / execute
+  mode: execute                 # disabled / shadow / execute
   library_path: image_process/config/v5_board_library_v1.npz
   coarse_top_k: 1000
   final_candidate_k: 100
@@ -94,6 +94,12 @@ block_recognition:
     kernel_margin_px: 2
     # ROI 补边平移搜索余量。
     search_margin_px: 20
+    # V2 角度锁定人工编辑：匹配结果出来后弹窗点选方块锁角度（A/D 微调、
+    # Z/C 粗调、T 精确输入），提交后按锁定角度重匹配位置，L 抓点自动跟随。
+    # Esc 放弃修改按原结果继续。GUI 独立无 ROS 子进程；仅 v2 模式生效。
+    angle_lock_editor:
+      enabled: false
+      script: tools/angle_lock_editor/angle_lock_editor.py
 
 # 仅在 execution.yaml 的 calibration_mode=true 时使用。
 # 每个目标像素在每帧先取 3×3 邻域有效深度的中位数，再对多帧结果计算中位数和 MAD。
@@ -127,8 +133,9 @@ calibration_depth:
   tray_tcp_below_block_observation_mm: -9.0
 
 high_tcp_localization:
-  # 当前模式下实际准备运动到的 TCP 必须落在实测安全 XY 范围内：
-  # 闭环检查高位标定预测的相机观察 TCP，开环检查预测 TCP 加相机到吸盘偏移后的目标。
+  # 2026-08-17 场地变动后 XY 安全限位已停用：代码不再按这两个范围拦截任何位姿，
+  # 仅保留 Z 下限（execution.yaml motion.minimum_tcp_z_mm）。键本身仅供
+  # 网页 z_plane 对照展示和配置校验使用，改数值不会恢复拦截。
   safe_x_range_mm: [-520.224, -148.17]
   safe_y_range_mm: [-305.0, 315.925]
 

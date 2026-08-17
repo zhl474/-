@@ -151,12 +151,44 @@ class EdgeTemplateMatcher:
             )
         return self._angle_metadata[category]
 
+    def _angles_for(self, category):
+        """该类别全角度网格（模板角，已归一到 [0, 周期)）。"""
+        return sorted(self._metadata_for(category))
+
+    def _select_angles_in_window(self, category, angle_center, angle_window):
+        """从全角度网格选出距 angle_center 折叠距离不超过窗口的子集。
+
+        窗口太窄没盖住任何网格角时退回最近的一个网格角（锁定语义）。
+        """
+        period = float(ROTATION_TOTAL_ANGLE[category])
+        center = float(angle_center) % period
+        window = float(angle_window)
+        if not np.isfinite(window) or window < 0.0:
+            raise ValueError("angle_window 必须是不小于 0 的有限数值")
+        all_angles = self._angles_for(category)
+
+        def folded_distance(angle):
+            folded = abs(angle - center) % period
+            return min(folded, period - folded)
+
+        selected = [
+            angle for angle in all_angles if folded_distance(angle) <= window + 1e-9
+        ]
+        if not selected:
+            selected = [min(all_angles, key=folded_distance)]
+        return selected
+
     def _kernels_for(self, category):
-        """构建该类别全角度居中线核；锚点记录旋转中心和抓点两套。"""
-        if category in self._kernel_cache:
-            return self._kernel_cache[category]
+        return self._kernels_for_angles(category, self._angles_for(category))
+
+    def _kernels_for_angles(self, category, angles):
+        """构建给定角度列表的居中线核；锚点记录旋转中心和抓点两套。"""
+        key = (str(category), tuple(float(angle) for angle in angles))
+        cached = self._kernel_cache.get(key)
+        if cached is not None:
+            return cached
         metadata = self._metadata_for(category)
-        angles = sorted(metadata)
+        angles = [float(angle) for angle in angles]
         binary_list = [metadata[angle]["binary"] for angle in angles]
         margin = self.config.kernel_margin_px
         max_h = max(binary.shape[0] for binary in binary_list) + 2 * margin
@@ -212,11 +244,15 @@ class EdgeTemplateMatcher:
             "anchors": anchors,
             "pick_anchors": pick_anchors,
         }
-        self._kernel_cache[category] = entry
+        self._kernel_cache[key] = entry
         return entry
 
-    def match_block(self, distance_field, detection):
-        """对单个 YOLO 检测框做全角度边缘模板匹配，返回 V1 口径结果。"""
+    def match_block(self, distance_field, detection, angle_center=None, angle_window=None):
+        """对单个 YOLO 检测框做边缘模板匹配，返回 V1 口径结果。
+
+        angle_center/angle_window（模板角，度）同时提供时只在折叠距离
+        不超过窗口的网格角里搜索，供人工锁定角度后的重匹配使用。
+        """
         category = normalize_category_name(detection["category"])
         if category not in ROTATION_TOTAL_ANGLE:
             raise ValueError(f"未知方块类别: {category}")
@@ -230,7 +266,17 @@ class EdgeTemplateMatcher:
             raise ValueError("检测框裁剪后为空")
 
         roi = distance_field[crop_y1:crop_y2, crop_x1:crop_x2]
-        entry = self._kernels_for(category)
+        if (angle_center is None) != (angle_window is None):
+            raise ValueError("angle_center 与 angle_window 必须同时提供")
+        if angle_center is None:
+            entry = self._kernels_for(category)
+        else:
+            selected_angles = self._select_angles_in_window(
+                category,
+                angle_center,
+                angle_window,
+            )
+            entry = self._kernels_for_angles(category, selected_angles)
         line_kernels = entry["kernels"]
         kernel_size = entry["size"]
         angles = entry["angles"]
@@ -281,6 +327,52 @@ class EdgeTemplateMatcher:
             "n_angles": len(angles),
         }
 
+    def _draw_block_annotation(self, debug_image, match):
+        """把单个方块匹配结果画到调试图：模板轮廓+中心十字+输出点+标签。"""
+        px = match["px"]
+        py = match["py"]
+        # 匹配角度的模板轮廓画在旋转中心处，与 V1 get_rect 的绿色轮廓同风格。
+        item = self._metadata_for(match["category"])[match["angle"]]
+        template_contours, _ = cv2.findContours(
+            item["binary"],
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+        template_origin = (
+            int(round(match["center_px"] - item["anchor"][0])),
+            int(round(match["center_py"] - item["anchor"][1])),
+        )
+        contour_color = (0, 200, 255) if match.get("angle_locked") else (0, 255, 0)
+        cv2.drawContours(
+            debug_image,
+            template_contours,
+            -1,
+            contour_color,
+            1,
+            offset=template_origin,
+        )
+        cv2.drawMarker(
+            debug_image,
+            (int(match["center_px"]), int(match["center_py"])),
+            (255, 0, 0),
+            markerType=cv2.MARKER_CROSS,
+            markerSize=10,
+            thickness=1,
+        )
+        cv2.circle(debug_image, (int(px), int(py)), 3, (0, 0, 255), 2)
+        label_x = max(0, int(match["detection_box"][0]))
+        label_y = max(15, int(match["detection_box"][1]) - 6)
+        cv2.putText(
+            debug_image,
+            f"{match['category']} ({px:.0f},{py:.0f})",
+            (label_x, label_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (0, 0, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
     def detect_blocks(self, img_bgr, detections):
         """对给定检测框逐个边缘匹配，返回方块列表和调试图。"""
         if img_bgr is None or img_bgr.size == 0:
@@ -294,50 +386,70 @@ class EdgeTemplateMatcher:
             except Exception as exc:
                 print(f"方块 {detection.get('category')} V2 边缘匹配失败，跳过。原因：{exc}")
                 continue
-            px = match["px"]
-            py = match["py"]
-            # 匹配角度的模板轮廓画在旋转中心处，与 V1 get_rect 的绿色轮廓同风格。
-            item = self._metadata_for(match["category"])[match["angle"]]
-            template_contours, _ = cv2.findContours(
-                item["binary"],
-                cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE,
-            )
-            template_origin = (
-                int(round(match["center_px"] - item["anchor"][0])),
-                int(round(match["center_py"] - item["anchor"][1])),
-            )
-            cv2.drawContours(
-                debug_image,
-                template_contours,
-                -1,
-                (0, 255, 0),
-                1,
-                offset=template_origin,
-            )
-            cv2.drawMarker(
-                debug_image,
-                (int(match["center_px"]), int(match["center_py"])),
-                (255, 0, 0),
-                markerType=cv2.MARKER_CROSS,
-                markerSize=10,
-                thickness=1,
-            )
-            cv2.circle(debug_image, (int(px), int(py)), 3, (0, 0, 255), 2)
-            label_x = max(0, int(match["detection_box"][0]))
-            label_y = max(15, int(match["detection_box"][1]) - 6)
-            cv2.putText(
-                debug_image,
-                f"{match['category']} ({px:.0f},{py:.0f})",
-                (label_x, label_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                (0, 0, 255),
-                1,
-                cv2.LINE_AA,
-            )
+            self._draw_block_annotation(debug_image, match)
             match["found"] = True
             match["debug_image"] = debug_image
             match["message"] = "V2 边缘模板匹配成功"
             blocks.append(match)
         return blocks, debug_image
+
+    def rematch_blocks_with_angle_locks(self, img_bgr, blocks, angle_locks):
+        """按人工锁定的正式 theta 重匹配对应方块，其余保持原结果。
+
+        angle_locks: {方块下标(0 起): 正式 theta(度，[-180, 180))}。
+        锁定后在最近网格角 ±(角度步进/2) 内只做位置搜索，px/py 与 L 抓点
+        随重匹配结果一起更新；输出 theta 是最近网格角的等价正式角度，
+        与人工输入最多差半个角度步进。未锁定的方块原样保留。
+        """
+        locks = {}
+        for raw_index, raw_theta in dict(angle_locks or {}).items():
+            index = int(raw_index)
+            if not 0 <= index < len(blocks):
+                raise ValueError(
+                    f"角度锁定下标越界：{index}（本轮共 {len(blocks)} 个方块）"
+                )
+            theta = float(raw_theta)
+            if not np.isfinite(theta):
+                raise ValueError(f"第 {index + 1} 个方块锁定角度不是有限数值")
+            locks[index] = theta
+
+        results = [dict(block) for block in blocks]
+        if not locks:
+            debug_image = np.copy(img_bgr)
+            for block in results:
+                self._draw_block_annotation(debug_image, block)
+                block["debug_image"] = debug_image
+            return results, debug_image
+
+        distance_field = build_edge_distance_field(img_bgr, self.config)
+        for index, theta in locks.items():
+            block = results[index]
+            category = block["category"]
+            period = float(ROTATION_TOTAL_ANGLE[category])
+            template_center = ((-theta) % 360.0) % period
+            detection = {
+                "category": category,
+                "score": block.get("score", 1.0),
+                "box": tuple(block["detection_box"]),
+            }
+            rematched = self.match_block(
+                distance_field,
+                detection,
+                angle_center=template_center,
+                angle_window=self.config.angle_step_deg / 2.0,
+            )
+            rematched["found"] = True
+            rematched["message"] = "V2 边缘模板匹配成功（人工锁定角度重匹配）"
+            rematched["angle_locked"] = True
+            results[index] = rematched
+            print(
+                f"方块 {category} 锁定角度 {theta:.1f}° 重匹配："
+                f"({rematched['px']:.1f},{rematched['py']:.1f}) "
+                f"theta={rematched['theta']:.1f}°"
+            )
+
+        debug_image = np.copy(img_bgr)
+        for block in results:
+            self._draw_block_annotation(debug_image, block)
+            block["debug_image"] = debug_image
+        return results, debug_image

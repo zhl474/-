@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 from datetime import datetime
+from dataclasses import asdict
 
 import rospy
 from sensor_msgs.msg import Image
@@ -64,6 +65,12 @@ from image_process_lib.yolo_edit_session import (
     YOLO会话环境变量,
     创建YOLO编辑会话,
     读取已提交YOLO检测,
+)
+from image_process_lib.angle_lock_edit_session import (
+    角度锁定会话环境变量,
+    创建角度锁定编辑会话,
+    读取已提交角度锁定,
+    编辑取消退出码 as 角度锁定取消退出码,
 )
 from image_process_lib.task_planner import (
     ObservedBlock,
@@ -162,6 +169,12 @@ DEFAULT_YOLO_EDITOR_SCRIPT = os.path.join(
     "yolo_box_editor",
     "yolo_box_editor.py",
 )
+DEFAULT_V2_ANGLE_LOCK_EDITOR_SCRIPT = os.path.join(
+    SRC_DIR,
+    "tools",
+    "angle_lock_editor",
+    "angle_lock_editor.py",
+)
 
 
 class HighTcpSafetyCheckError(RuntimeError):
@@ -196,6 +209,8 @@ class ImageProcessor:
         self.active_high_mask_editor_process = None
         self.yolo_editor_process_lock = threading.Lock()
         self.active_yolo_editor_process = None
+        self.angle_lock_editor_process_lock = threading.Lock()
+        self.active_angle_lock_editor_process = None
         self.latest_image = None
         self.latest_image_stamp = None
         self.fresh_image_timeout_sec = float(rospy.get_param("~fresh_image_timeout_sec", 0.5))
@@ -555,6 +570,33 @@ class ImageProcessor:
             "~high_template_match_v2_shadow_debug_path",
             os.path.join(DEFAULT_DEBUG_DIR, "高位方块V2shadow对比.jpg")
         )
+        angle_lock_config = (
+            block_recognition_config.get("v2", {}).get("angle_lock_editor", {})
+        )
+        if not isinstance(angle_lock_config, dict):
+            raise ValueError("block_recognition.v2.angle_lock_editor 必须是字典")
+        v2_angle_lock_enabled = rospy.get_param(
+            "~v2_angle_lock_editor_enabled",
+            angle_lock_config.get("enabled", False),
+        )
+        if not isinstance(v2_angle_lock_enabled, bool):
+            raise ValueError(
+                "block_recognition.v2.angle_lock_editor.enabled 必须是布尔值"
+            )
+        self.v2_angle_lock_editor_enabled = v2_angle_lock_enabled
+        self.v2_angle_lock_editor_script_path = src_path(
+            rospy.get_param(
+                "~v2_angle_lock_editor_script_path",
+                angle_lock_config.get("script"),
+            ),
+            DEFAULT_V2_ANGLE_LOCK_EDITOR_SCRIPT,
+        )
+        if self.v2_angle_lock_editor_enabled and not os.path.isfile(
+            self.v2_angle_lock_editor_script_path
+        ):
+            raise FileNotFoundError(
+                f"V2 角度锁定编辑子进程脚本不存在: {self.v2_angle_lock_editor_script_path}"
+            )
 
         self._reload_dynamic_config()
 
@@ -1017,6 +1059,21 @@ class ImageProcessor:
         except Exception as exc:
             rospy.logwarn("终止 YOLO 修正子进程失败: %s", exc)
 
+    def terminate_angle_lock_editor_process(self):
+        """节点退出时终止仍在等待人工输入的 V2 角度锁定 GUI 子进程。"""
+        with self.angle_lock_editor_process_lock:
+            process = self.active_angle_lock_editor_process
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2.0)
+        except Exception as exc:
+            rospy.logwarn("终止 V2 角度锁定编辑子进程失败: %s", exc)
+
     def close_runtime_resources(self):
         """节点退出时统一关闭 GUI 子进程和调试视频。"""
         prompt_broker = getattr(self, "operator_prompt_broker", None)
@@ -1024,6 +1081,7 @@ class ImageProcessor:
             prompt_broker.close()
         self.terminate_high_mask_editor_process()
         self.terminate_yolo_editor_process()
+        self.terminate_angle_lock_editor_process()
         self.close_debug_video_recorders()
 
     def get_operator_prompt_service(self, _request):
@@ -1304,30 +1362,14 @@ class ImageProcessor:
         return float(surface_z_mm), (0.0, 0.0)
 
     def _validate_calibration_pose(self, pose, label):
-        """校验深度粗定位生成的六维 TCP 位姿。"""
+        """校验深度粗定位生成的六维 TCP 位姿；XY 安全范围已停用，仅保留 Z 下限。"""
         values = np.asarray(pose, dtype=float)
         if values.shape != (6,) or not np.all(np.isfinite(values)):
             raise ValueError(f"{label}必须包含 6 个有限数值")
-        tcp_xyz = values[:3]
-        is_safe = (
-            self.safe_x_range_mm[0] <= tcp_xyz[0] <= self.safe_x_range_mm[1]
-            and self.safe_y_range_mm[0] <= tcp_xyz[1] <= self.safe_y_range_mm[1]
-            and tcp_xyz[2] >= self.minimum_tcp_z_mm
-        )
-        if not is_safe:
-            minimum_xyz = [
-                float(self.safe_x_range_mm[0]),
-                float(self.safe_y_range_mm[0]),
-                float(self.minimum_tcp_z_mm),
-            ]
-            maximum_xyz = [
-                float(self.safe_x_range_mm[1]),
-                float(self.safe_y_range_mm[1]),
-                None,
-            ]
+        if values[2] < self.minimum_tcp_z_mm:
             raise ValueError(
-                f"{label} TCP XYZ {tcp_xyz.tolist()} 超出安全范围："
-                f"最小值 {minimum_xyz}，最大值 {maximum_xyz}"
+                f"{label} TCP Z={values[2]:.3f} mm 低于安全下限 "
+                f"{self.minimum_tcp_z_mm:.3f} mm"
             )
         return values.tolist()
 
@@ -1561,6 +1603,88 @@ class ImageProcessor:
             raise RuntimeError("高位没有识别到方块")
         return blocks, debug_image, geometry
 
+    def _run_v2_angle_lock_editor(self, image, blocks, debug_image):
+        """在独立无 ROS 子进程中人工锁定方块角度，并按锁定结果重匹配。
+
+        Esc 取消视为放弃修改，按本轮原识别结果继续；只有子进程异常
+        才报错走 V2 失败回退。锁定后 px/py 与 L 抓点随重匹配一起更新。
+        """
+        if not os.environ.get("DISPLAY", "").strip():
+            raise RuntimeError(
+                "V2 角度锁定编辑已启用，但图像节点环境中没有 DISPLAY；"
+                "请从图形桌面终端启动节点，或关闭 "
+                "block_recognition.v2.angle_lock_editor.enabled"
+            )
+        if not os.path.isfile(self.v2_angle_lock_editor_script_path):
+            raise RuntimeError(
+                f"V2 角度锁定编辑脚本不存在: {self.v2_angle_lock_editor_script_path}"
+            )
+
+        matcher = self._get_edge_template_matcher()
+        with tempfile.TemporaryDirectory(prefix="single_arm_tetris_angle_lock_") as temp_dir:
+            manifest_path = 创建角度锁定编辑会话(
+                temp_dir,
+                image,
+                blocks,
+                load_template_geometry("high"),
+                asdict(self.edge_template_config),
+            )
+            child_env = os.environ.copy()
+            child_env[角度锁定会话环境变量] = str(manifest_path)
+            child_env["PYTHONUNBUFFERED"] = "1"
+
+            rospy.loginfo(
+                "等待 V2 角度锁定人工编辑（%d 个方块），按 Enter 提交，Esc 放弃修改",
+                len(blocks),
+            )
+            process = subprocess.Popen(
+                [sys.executable, self.v2_angle_lock_editor_script_path],
+                cwd=SRC_DIR,
+                env=child_env,
+            )
+            with self.angle_lock_editor_process_lock:
+                if self.active_angle_lock_editor_process is not None:
+                    process.terminate()
+                    process.wait(timeout=2.0)
+                    raise RuntimeError("已有 V2 角度锁定编辑子进程正在运行")
+                self.active_angle_lock_editor_process = process
+            try:
+                while process.poll() is None:
+                    if rospy.is_shutdown():
+                        self.terminate_angle_lock_editor_process()
+                        raise RuntimeError("ROS 节点正在退出，已取消 V2 角度锁定编辑")
+                    time.sleep(0.1)
+                exit_code = int(process.returncode)
+            finally:
+                with self.angle_lock_editor_process_lock:
+                    if self.active_angle_lock_editor_process is process:
+                        self.active_angle_lock_editor_process = None
+
+            if exit_code == 角度锁定取消退出码:
+                rospy.logwarn("用户放弃 V2 角度锁定修改，本轮按原识别结果继续")
+                return blocks, debug_image
+            if exit_code != 0:
+                raise RuntimeError(
+                    f"V2 角度锁定编辑子进程异常退出，退出码={exit_code}"
+                )
+            locks = 读取已提交角度锁定(manifest_path)
+            if not locks:
+                rospy.loginfo("V2 角度锁定编辑未锁定任何方块，按原识别结果继续")
+                return blocks, debug_image
+            zero_based_locks = {
+                int(index) - 1: theta for index, theta in locks.items()
+            }
+            blocks, debug_image = matcher.rematch_blocks_with_angle_locks(
+                image,
+                blocks,
+                zero_based_locks,
+            )
+            rospy.loginfo(
+                "V2 角度锁定重匹配完成：%d 个方块按锁定角度更新",
+                len(zero_based_locks),
+            )
+            return blocks, debug_image
+
     def _block_recognition_mode(self):
         """读取当前识别模式；rosparam 运行时覆盖 yaml 默认值，无需重启。
 
@@ -1604,6 +1728,14 @@ class ImageProcessor:
         )
         if not blocks:
             raise RuntimeError("V2 高位没有识别到方块")
+        if allow_manual_correction and getattr(
+            self, "v2_angle_lock_editor_enabled", False
+        ):
+            blocks, debug_image = self._run_v2_angle_lock_editor(
+                image,
+                blocks,
+                debug_image,
+            )
         debug_path = (
             self.high_template_match_v2_shadow_debug_path
             if shadow_mode

@@ -288,7 +288,6 @@ class HighPixelToTcpLocalizer:
         """预测并校验 TCP XYZ；标定样本凸包不作为正式抓取范围。"""
         assessment = self.assess(subject, pixel_xy)
         tcp_xyz = np.asarray(assessment.predicted_tcp_xyz, dtype=float)
-        safety_tcp_xyz = np.asarray(assessment.safety_tcp_xyz, dtype=float)
         if assessment.safe:
             return tcp_xyz.copy()
 
@@ -297,14 +296,6 @@ class HighPixelToTcpLocalizer:
             float(value) if np.isfinite(value) else None
             for value in self._tcp_max_xyz
         ]
-        if np.any(self._safety_xy_offset != 0.0):
-            raise ValueError(
-                f"{label}（{subject}）高位像素 {pixel_xy!r} 预测 TCP XYZ "
-                f"{tcp_xyz.tolist()} 加安全校验 XY 偏移 "
-                f"{self._safety_xy_offset.tolist()} 后的待执行 TCP XYZ "
-                f"{safety_tcp_xyz.tolist()} 超出安全范围："
-                f"最小值 {self._tcp_min_xyz.tolist()}，最大值 {maximum_text}"
-            )
         raise ValueError(
             f"{label}（{subject}）高位像素 {pixel_xy!r} 预测 TCP XYZ "
             f"{tcp_xyz.tolist()} 超出安全范围：最小值 {self._tcp_min_xyz.tolist()}，"
@@ -331,6 +322,7 @@ class HighPixelToTcpLocalizer:
 
         safety_tcp_xyz = tcp_xyz.copy()
         safety_tcp_xyz[:2] += self._safety_xy_offset
+        # 场地变动后 XY 安全范围已停用：XY 只保留有限性校验，范围拦截仅剩 Z 下限。
         violated_axes = tuple(
             axis_name
             for axis_name, value, minimum, maximum in zip(
@@ -339,7 +331,8 @@ class HighPixelToTcpLocalizer:
                 self._tcp_min_xyz,
                 self._tcp_max_xyz,
             )
-            if not np.isfinite(value) or value < minimum or value > maximum
+            if not np.isfinite(value)
+            or (axis_name == "Z" and (value < minimum or value > maximum))
         )
         return HighTcpSafetyAssessment(
             subject=subject,

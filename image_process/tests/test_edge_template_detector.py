@@ -240,3 +240,82 @@ def test_l_kernel_pick_anchors_differ_from_rotation_center():
     for anchor, pick in zip(l_entry["anchors"], l_entry["pick_anchors"]):
         assert abs(pick[0] - anchor[0]) <= max(rect_w, rect_h)
         assert abs(pick[1] - anchor[1]) <= max(rect_w, rect_h)
+
+
+def test_select_angles_in_window_wraps_period():
+    """角度窗口选择按类别周期折叠，跨界和零窗口都能选出正确网格角。"""
+    matcher = _make_matcher()  # T 周期 360，步进 10。
+    assert matcher._select_angles_in_window("T", 5.0, 6.0) == [0.0, 10.0]
+    assert matcher._select_angles_in_window("T", 355.0, 6.0) == [0.0, 350.0]
+    assert matcher._select_angles_in_window("T", 37.0, 0.0) == [40.0]
+    assert matcher._select_angles_in_window("T", 20.0, 10.0) == [10.0, 20.0, 30.0]
+    with pytest.raises(ValueError):
+        matcher._select_angles_in_window("T", 10.0, -1.0)
+
+
+def test_match_block_respects_angle_window():
+    """锁定角度后即使全角度会选别的角，也必须强制用锁定网格角。"""
+    image, _, _, box, _ = _render_synthetic_block("T", 30.0)
+    matcher = _make_matcher()
+    distance_field = build_edge_distance_field(image, matcher.config)
+    detection = {"category": "T", "score": 0.9, "box": box}
+
+    forced = matcher.match_block(
+        distance_field, detection, angle_center=100.0, angle_window=0.0
+    )
+    assert abs(forced["angle"] - 100.0) < 1e-6
+    assert abs(forced["theta"] - (-100.0)) < 1e-6
+
+    with pytest.raises(ValueError):
+        matcher.match_block(distance_field, detection, angle_center=100.0)
+
+
+def test_rematch_blocks_with_angle_locks():
+    """锁定重匹配：正确锁恢复正确中心，未锁定块不动，非法下标报错。"""
+    image, _, _, box, expected_center = _render_synthetic_block("L_blue", 30.0)
+    matcher = _make_matcher()
+    detections = [{"category": "L_blue", "score": 0.9, "box": box}]
+    blocks, _debug = matcher.detect_blocks(image, detections)
+    assert blocks
+
+    # 用错误角度先污染一个块，再用正确锁定角度重匹配拉回来。
+    polluted = dict(blocks[0])
+    polluted["theta"] = 150.0
+    correct_theta = blocks[0]["theta"]
+    results, debug_image = matcher.rematch_blocks_with_angle_locks(
+        image,
+        [polluted],
+        {0: correct_theta},
+    )
+    assert results[0]["angle_locked"] is True
+    assert math.hypot(
+        results[0]["center_px"] - expected_center[0],
+        results[0]["center_py"] - expected_center[1],
+    ) <= 2.0
+    assert debug_image is not None
+
+    # 空锁：数值原样保留并重画调试图。
+    untouched, _debug2 = matcher.rematch_blocks_with_angle_locks(image, results, {})
+    assert untouched[0]["px"] == results[0]["px"]
+    assert untouched[0]["theta"] == results[0]["theta"]
+
+    with pytest.raises(ValueError):
+        matcher.rematch_blocks_with_angle_locks(image, results, {5: 10.0})
+    with pytest.raises(ValueError):
+        matcher.rematch_blocks_with_angle_locks(image, results, {0: float("nan")})
+
+
+def test_rematch_wrong_lock_forces_wrong_grid_angle():
+    """故意锁错角度时输出跟随锁定网格角，验证锁定确实约束搜索。"""
+    image, _, _, box, _ = _render_synthetic_block("square", 20.0)
+    matcher = _make_matcher()
+    detections = [{"category": "square", "score": 0.9, "box": box}]
+    blocks, _debug = matcher.detect_blocks(image, detections)
+    results, _ = matcher.rematch_blocks_with_angle_locks(
+        image,
+        blocks,
+        {0: -50.0},
+    )
+    # square 周期 90：-50°正式角 = 模板角 50 → 网格 50。
+    assert abs(results[0]["angle"] - 50.0) < 1e-6
+    assert results[0]["angle_locked"] is True
