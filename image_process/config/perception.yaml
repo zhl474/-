@@ -8,13 +8,13 @@ models:
 
 # 固定盘面最短摆放方案 V1。shadow 计算并记录新方案，但仍执行旧匈牙利方案。
 task_sequence_optimizer:
-  mode: execute           # legacy / shadow / execute
+  mode: legacy            # legacy / shadow / execute
   beam_width: 5000
   report_top_candidates: 20
 
 # 普通 260 分任务的 V5 动态盘面选择。shadow 完整计算并记录，但仍执行固定 YAML。
 dynamic_board_selection:
-  mode: execute                 # disabled / shadow / execute
+  mode: disabled                # disabled / shadow / execute
   library_path: image_process/config/v5_board_library_v1.npz
   coarse_top_k: 1000
   final_candidate_k: 100

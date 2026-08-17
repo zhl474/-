@@ -25,9 +25,11 @@
 #endif
 
 //函数声明
-extern "C" API_SYMBOL char* IDBS(int block1, int block2, int block3, int block4, int block5, int block6, int block7,
-                                       int order1, int order2, int order3, int order4, int order5, int order6, int order7);
+extern "C" API_SYMBOL char* IDBS(int* blocks, int* orders);
 
-// V1 版本化接口：在原有类别、角度和中心之外返回四个运行时托盘占用格。
-extern "C" API_SYMBOL char* IDBSWithCells(int block1, int block2, int block3, int block4, int block5, int block6, int block7,
-                                                int order1, int order2, int order3, int order4, int order5, int order6, int order7);
+// 扩展接口：方块数量[7]、放置顺序[7]、抓取坐标[7][5][2]=70、
+// 托盘格点坐标[14][10][2]=280、初始拍摄姿态[3] 全部由调用方传入
+extern "C" API_SYMBOL char* IDBS_Config(const int* blocks, const int* orders,
+                                        const double* block_coord,    // [7][5][2] 共70个
+                                        const double* grid_coord,     // [14][10][2] 共280个
+                                        const double* shooting_pose); // [3]

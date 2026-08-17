@@ -5,7 +5,7 @@
 
 from dataclasses import dataclass
 import random
-from typing import Dict, Iterable, List, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 import yaml
@@ -108,6 +108,8 @@ class PlacementTarget:
     observation_pose: Sequence[float]
     # 该目标在 14×10 托盘上占据的四个权威整数格，格式为 (列, 行)。
     cells: Sequence[Sequence[int]] = ()
+    # 新版进阶动态库选定的抓取坐标下标；旧接口/动态盘面没有该字段时保持 None。
+    block_index: Optional[int] = None
     # 以下字段保留现有服务兼容性，并保存高位托盘像素标定诊断。
     high_detected_pixel_xy: Sequence[float] = (0.0, 0.0)
     high_depth_sample_pixel_xy: Sequence[float] = (0.0, 0.0)

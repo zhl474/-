@@ -1,10 +1,11 @@
 import pytest
 from pathlib import Path
-from ctypes import CDLL, c_char_p
+from ctypes import CDLL, POINTER, c_char_p, c_int
 
 import image_process_lib.advanced_planner as advanced_module
 from image_process_lib.advanced_planner import (
     AdvancedPlanner,
+    parse_idbs_config_result,
     parse_idbs_with_cells_result,
 )
 
@@ -44,8 +45,25 @@ def test_idbs_with_cells_parser_strictly_reads_version_count_and_cells():
         parse_idbs_with_cells_result(raw, 2)
 
 
+def test_idbs_config_parser_reconstructs_cells_and_keeps_block_index():
+    # 新格式：名称,角度,x,y,方块索引, ... ,满行数
+    raw = b"LR,-90,9.5,1.5,2,LL,-90,8.5,2.5,0,0"
+    layout, full_rows = parse_idbs_config_result(raw, expected_count=2)
+
+    assert full_rows == "0"
+    assert len(layout) == 2
+    assert layout[0]["category"] == "L_blue"
+    assert layout[0]["angle_deg"] == -90.0
+    assert layout[0]["col"] == 10.0
+    assert layout[0]["row"] == 2.0
+    assert layout[0]["block_index"] == 2
+    assert len(layout[0]["cells"]) == 4
+    assert len(set(layout[0]["cells"])) == 4
+    assert layout[1]["block_index"] == 0
+
+
 def test_real_advanced_library_returns_dynamic_cells_and_counts():
-    library_path = Path(__file__).resolve().parents[2] / "jinjie" / "jinjie_libtetris.so"
+    library_path = Path(__file__).resolve().parents[2] / "jinjie" / "IDBSA.so"
 
     layout, _full_rows = AdvancedPlanner(str(library_path)).build_layout(
         [1, 1, 0, 0, 0, 0, 0],
@@ -58,17 +76,21 @@ def test_real_advanced_library_returns_dynamic_cells_and_counts():
     assert len(cells) == 8
     assert len(set(cells)) == 8
     assert all(len(item["cells"]) == 4 for item in layout)
+    assert all("block_index" in item for item in layout)
 
-    # 旧符号必须继续存在，且新版中心必须与旧接口经 Python +0.5 后完全一致。
+    # 新版 IDBS 与 IDBS_Config 使用同一输出格式；不带坐标时走内置默认坐标。
     library = CDLL(str(library_path))
     library.IDBS.restype = c_char_p
-    old_fields = library.IDBS(
-        1, 1, 0, 0, 0, 0, 0,
-        0, 1, 2, 3, 4, 5, 6,
-    ).decode("gbk").split(",")
+    library.IDBS.argtypes = [POINTER(c_int), POINTER(c_int)]
+    counts = (c_int * 7)(1, 1, 0, 0, 0, 0, 0)
+    orders = (c_int * 7)(0, 1, 2, 3, 4, 5, 6)
+    raw_fields = library.IDBS(counts, orders).decode("gbk").split(",")
     for index, item in enumerate(layout):
-        offset = index * 4
-        assert item["category"] == old_fields[offset]
-        assert item["angle_deg"] == float(old_fields[offset + 1])
-        assert item["col"] == float(old_fields[offset + 2]) + 0.5
-        assert item["row"] == float(old_fields[offset + 3]) + 0.5
+        offset = index * 5
+        assert item["category"] == advanced_module.normalize_category_name(
+            raw_fields[offset]
+        )
+        assert item["angle_deg"] == float(raw_fields[offset + 1])
+        assert item["col"] == float(raw_fields[offset + 2]) + 0.5
+        assert item["row"] == float(raw_fields[offset + 3]) + 0.5
+        assert item["block_index"] == int(raw_fields[offset + 4])

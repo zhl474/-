@@ -22,6 +22,8 @@
            value="$(arg block_pixel_to_tcp_calibration_path)"/>
     <param name="tray_pixel_to_tcp_calibration_path"
            value="$(arg tray_pixel_to_tcp_calibration_path)"/>
+    <param name="advanced_library_path"
+           value="$(find image_process)/../jinjie/IDBSA.so"/>
     <param name="save_top_surface_mask_vis" value="true"/>
     <param name="top_surface_mask_vis_path" value="$(arg debug_output_dir)/方块上表面掩码.jpg"/>
     <param name="high_template_match_debug_path" value="$(arg debug_output_dir)/高位方块模板匹配结果.jpg"/>

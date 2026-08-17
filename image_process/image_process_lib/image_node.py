@@ -125,7 +125,7 @@ VISUAL_SERVO_CONFIG_PATH = os.path.join(COMPETITION_DIR, "config", "visual_servo
 DETECTION_MODEL_PATH = os.path.join(COMPETITION_DIR, "model", "best5.14.pt")
 BOARD_MODEL_PATH = os.path.join(COMPETITION_DIR, "model", "best.pt")
 SEGMENTATION_MODEL_PATH = os.path.join(COMPETITION_DIR, "model", "best_seg.engine")
-JINJIE_LIB_PATH = os.path.join(SRC_DIR, "jinjie", "jinjie_libtetris.so")
+JINJIE_LIB_PATH = os.path.join(SRC_DIR, "jinjie", "IDBSA.so")
 TASK_LAYOUT_PATH = os.path.join(PACKAGE_DIR, "config", "task_layout.yaml")
 PERCEPTION_CONFIG_PATH = os.path.join(PACKAGE_DIR, "config", "perception.yaml")
 DEFAULT_V5_BOARD_LIBRARY_PATH = os.path.join(
@@ -1672,14 +1672,77 @@ class ImageProcessor:
         blocks, count_list = self._detect_blocks_raw(image)
         return self._build_observed_blocks_for_task(blocks, image.shape), count_list
 
-    def _load_layout_for_request(self, request, cube_counts):
+    def _build_advanced_block_coord(self, blocks):
+        """按正式观察位相同排序生成新版 IDBS_Config 需要的 [7][5][2] 抓取坐标。"""
+        category_order = {
+            category: index for index, category in enumerate(BLOCK_CATEGORY_NAMES)
+        }
+        ordered_blocks = sorted(
+            blocks,
+            key=lambda block: (
+                category_order[normalize_category_name(block["category"])],
+                float(block["px"]),
+                float(block["py"]),
+                float(block["theta"]),
+            ),
+        )
+        by_category = {category: [] for category in BLOCK_CATEGORY_NAMES}
+        for block in ordered_blocks:
+            category = normalize_category_name(block["category"])
+            if category not in by_category or len(by_category[category]) >= 5:
+                continue
+            pose = self.high_tcp_localizer.locate_block(
+                (float(block["px"]), float(block["py"]))
+            )
+            by_category[category].append([float(pose[0]), float(pose[1])])
+
+        block_coord = []
+        for category in BLOCK_CATEGORY_NAMES:
+            row = list(by_category[category])
+            while len(row) < 5:
+                row.append([0.0, 0.0])
+            block_coord.append(row[:5])
+        return block_coord
+
+    def _build_advanced_grid_coord(self):
+        """把当前高位托盘 140 个格点转成新版 IDBS_Config 需要的 [14][10][2] 坐标。"""
+        if self.board_grid_points is None:
+            raise RuntimeError("进阶任务规划前必须先生成托盘格点")
+        grid_coord = []
+        for row in range(1, BOARD_ROW_COUNT + 1):
+            row_coords = []
+            for col in range(1, BOARD_COL_COUNT + 1):
+                pixel = interpolate_grid_point(
+                    self.board_grid_points,
+                    float(row),
+                    float(col),
+                )
+                pose = self.high_tcp_localizer.locate_tray(
+                    (float(pixel[0]), float(pixel[1]))
+                )
+                row_coords.append([float(pose[0]), float(pose[1])])
+            grid_coord.append(row_coords)
+        return grid_coord
+
+    def _load_layout_for_request(self, request, cube_counts, blocks=None):
         if not request.advanced:
             return load_task_layout(self.task_layout_path), "基础任务布局"
         if len(request.place_order) != 7:
             raise ValueError("进阶任务顺序必须正好包含 7 个整数")
-        layout, fill_line = AdvancedPlanner(self.advanced_library_path).build_layout(
-            cube_counts, request.place_order
-        )
+        planner = AdvancedPlanner(self.advanced_library_path)
+        if blocks is None:
+            # 兼容不传方块坐标的旧调用：使用动态库内置默认坐标。
+            layout, fill_line = planner.build_layout(
+                cube_counts, request.place_order
+            )
+        else:
+            layout, fill_line = planner.build_layout(
+                cube_counts,
+                request.place_order,
+                block_coord=self._build_advanced_block_coord(blocks),
+                grid_coord=self._build_advanced_grid_coord(),
+                shooting_pose=[float(value) for value in self.shooting_angle[:3]],
+            )
         return layout, f"进阶任务布局，极限填满 {fill_line} 行"
 
     @staticmethod
@@ -1738,6 +1801,11 @@ class ImageProcessor:
                     category=normalize_category_name(item["category"]),
                     observation_pose=tuple(servo_pose),
                     cells=tuple(tuple(cell) for cell in item["cells"]),
+                    block_index=(
+                        int(item["block_index"])
+                        if "block_index" in item and item["block_index"] is not None
+                        else None
+                    ),
                     **diagnostic,
                 )
             )
@@ -2669,7 +2737,14 @@ class ImageProcessor:
                 self._detect_board_for_task(image)
                 raw_blocks, raw_debug_image, geometry = self._detect_blocks_automatic(image)
                 preliminary_blocks, cube_counts = self._summarize_detected_blocks(raw_blocks)
-                layout, layout_message = self._load_layout_for_request(request, cube_counts)
+                if request.advanced:
+                    layout, layout_message = self._load_layout_for_request(
+                        request, cube_counts, preliminary_blocks
+                    )
+                else:
+                    layout, layout_message = self._load_layout_for_request(
+                        request, cube_counts
+                    )
                 self.last_board_layout = self._layout_to_board_dicts(layout)
                 dynamic_execute_requested = (
                     not request.advanced
