@@ -60,6 +60,13 @@ class RosGateway:
         self._subscribers = []
         self._started = False
         self._rospy = None
+        # YOLO 识别预览缓存（相机调参视图用，按需启停的 1Hz 拉取循环）
+        self._yolo_jpeg = None
+        self._yolo_summary = ""
+        self._yolo_updated_at = ""
+        self._yolo_preview_enabled = False
+        self._yolo_preview_started = False
+        self._yolo_last_error = ""
 
     def start(self):
         """ROS Master 就绪后启动单一 rospy 节点。"""
@@ -325,6 +332,142 @@ class RosGateway:
         with self._lock:
             return self._jpeg, self._last_frame_at
 
+    def get_exposure_state(self, timeout=3.0):
+        """读回彩色/深度相机当前曝光与增益状态及可调范围。"""
+        from camera.srv import GetExposureState, GetExposureStateRequest
+
+        self._wait_service("/camera/get_exposure_state", timeout)
+        proxy = self._rospy.ServiceProxy(
+            "/camera/get_exposure_state", GetExposureState, persistent=False
+        )
+        response = proxy(GetExposureStateRequest())
+        if not response.ok:
+            raise RuntimeError(str(response.message))
+        return {
+            "rgb": {
+                "auto_exposure": bool(response.rgb_auto_exposure),
+                "exposure": int(response.rgb_exposure),
+                "exposure_min": int(response.rgb_exposure_min),
+                "exposure_max": int(response.rgb_exposure_max),
+                "gain": int(response.rgb_gain),
+                "gain_min": int(response.rgb_gain_min),
+                "gain_max": int(response.rgb_gain_max),
+            },
+            "depth": {
+                "auto_exposure": bool(response.depth_auto_exposure),
+                "exposure": int(response.depth_exposure),
+                "exposure_min": int(response.depth_exposure_min),
+                "exposure_max": int(response.depth_exposure_max),
+                "gain": int(response.depth_gain),
+                "gain_min": int(response.depth_gain_min),
+                "gain_max": int(response.depth_gain_max),
+            },
+            "message": str(response.message),
+        }
+
+    def set_exposure_param(self, sensor, key, value, timeout=3.0):
+        """运行时写单个相机曝光/增益参数，流保持运行。"""
+        from camera.srv import SetExposureParam, SetExposureParamRequest
+
+        self._wait_service("/camera/set_exposure_param", timeout)
+        proxy = self._rospy.ServiceProxy(
+            "/camera/set_exposure_param", SetExposureParam, persistent=False
+        )
+        response = proxy(SetExposureParamRequest(
+            sensor=str(sensor),
+            key=str(key),
+            value=int(value),
+        ))
+        return {
+            "success": bool(response.ok),
+            "applied": int(response.applied),
+            "message": str(response.message),
+        }
+
+    def yolo_preview_snapshot(self):
+        """返回最近一次 YOLO 预览的 JPEG、摘要与时间戳。"""
+        with self._lock:
+            return self._yolo_jpeg, self._yolo_summary, self._yolo_updated_at
+
+    def is_yolo_preview_enabled(self):
+        with self._lock:
+            return self._yolo_preview_enabled
+
+    def set_yolo_preview_enabled(self, enabled):
+        """按需启停 YOLO 预览拉取（相机调参视图手动开启，离开时停止）。"""
+        enabled = bool(enabled)
+        with self._lock:
+            self._yolo_preview_enabled = enabled
+            self._yolo_last_error = ""
+        if enabled:
+            with self._lock:
+                already_started = self._yolo_preview_started
+                self._yolo_preview_started = True
+            if not already_started:
+                threading.Thread(
+                    target=self._yolo_preview_loop,
+                    name="operator-panel-yolo-preview",
+                    daemon=True,
+                ).start()
+        return {"enabled": enabled}
+
+    def _fetch_yolo_preview(self, timeout=1.0):
+        from image_process.srv import YoloPreview, YoloPreviewRequest
+
+        # 先看健康轮询维护的服务表：感知未启动时立即失败，绝不阻塞等超时。
+        if "/perception/yolo_preview" not in self.service_names():
+            raise PerceptionNotReady("感知节点未启动")
+        self._wait_service("/perception/yolo_preview", timeout)
+        proxy = self._rospy.ServiceProxy(
+            "/perception/yolo_preview", YoloPreview, persistent=False
+        )
+        response = proxy(YoloPreviewRequest(conf=0.0))
+        if not response.ok and "让路" in str(response.message):
+            # 正式识别/任务占用 GPU，属正常让路，不算错误。
+            raise PerceptionBusy(str(response.message))
+        if not response.ok:
+            raise RuntimeError(str(response.message))
+        return bytes(response.jpeg), str(response.summary)
+
+    def _yolo_preview_loop(self):
+        """按需调感知节点跑 YOLO 并缓存标注图；感知未启动时静默退避，不刷日志。"""
+        while not self._stop_event.is_set():
+            backoff_sec = 1.0
+            with self._lock:
+                enabled = self._yolo_preview_enabled
+            if enabled:
+                try:
+                    jpeg, summary = self._fetch_yolo_preview()
+                    with self._lock:
+                        self._yolo_jpeg = jpeg
+                        self._yolo_summary = summary
+                        self._yolo_updated_at = self._now()
+                        self._yolo_last_error = ""
+                    self.event_bus.publish("image", {
+                        "image_id": "yolo",
+                        "updated_at": self._yolo_updated_at,
+                        "summary": summary,
+                    })
+                except PerceptionBusy:
+                    pass  # 正在识别/执行，静默让路
+                except PerceptionNotReady:
+                    backoff_sec = 5.0  # 感知未启动，退避慢查
+                except Exception as exc:
+                    message = f"YOLO 预览不可用：{exc}"
+                    with self._lock:
+                        if self._yolo_last_error != message:
+                            self._yolo_last_error = message
+                            should_log = True
+                        else:
+                            should_log = False
+                    if should_log:
+                        self.event_bus.publish("log", {
+                            "source": "YOLO 预览", "level": "warning",
+                            "message": message,
+                        })
+                    backoff_sec = 5.0
+            self._stop_event.wait(backoff_sec)
+
     def wait_hardware_ready(self, timeout, frame_after=0.0):
         deadline = time.monotonic() + max(0.0, float(timeout))
         while time.monotonic() < deadline:
@@ -524,6 +667,8 @@ class RosGateway:
 
     def shutdown(self):
         self._stop_event.set()
+        with self._lock:
+            self._yolo_preview_enabled = False
         for subscriber in self._subscribers:
             try:
                 subscriber.unregister()

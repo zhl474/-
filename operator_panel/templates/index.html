@@ -46,6 +46,7 @@
         <button class="nav-item" data-view="readonly" type="button"><span>04</span>只读与标定</button>
         <button class="nav-item" data-view="ros" type="button"><span>05</span>ROS 系统</button>
         <button class="nav-item" data-view="logs" type="button"><span>06</span>运行日志</button>
+        <button class="nav-item" data-view="camera-tune" type="button"><span>07</span>相机调参</button>
       </nav>
       <div class="sidebar-bottom">
         <div class="pending-box">
@@ -145,6 +146,22 @@
                 <div><small>当前阶段</small><strong id="progress-phase">未开始</strong></div>
                 <div><small>当前方块</small><strong id="progress-category">—</strong></div>
                 <div><small>目标类型</small><strong id="progress-target">—</strong></div>
+              </div>
+            </article>
+
+            <article class="card tune-card">
+              <div class="card-heading">
+                <div><h2>运动调参</h2><small>保存后下一轮识别自动生效，无需重启节点</small></div>
+                <span id="tune-dirty" class="dirty-count">正在读取</span>
+              </div>
+              <div id="tune-body" class="tune-body"><p class="muted">正在读取 execution.yaml…</p></div>
+              <div class="tune-footer">
+                <small class="muted">完整参数与历史记录在「参数中心」</small>
+                <div class="button-group">
+                  <button id="tune-reload" class="button ghost compact" type="button">重读</button>
+                  <button id="tune-reset" class="button ghost compact" type="button" disabled>放弃修改</button>
+                  <button id="tune-save" class="button primary compact" type="button" disabled>保存（下一轮生效）</button>
+                </div>
               </div>
             </article>
           </div>
@@ -472,6 +489,70 @@
           <div class="log-header"><span>时间</span><span>级别</span><span>来源</span><span>消息</span></div>
           <div id="log-list" class="log-list"></div>
         </article>
+      </section>
+
+      <section id="view-camera-tune" class="view">
+        <div class="view-heading">
+          <h1 class="page-title">相机调参</h1>
+          <div class="camera-tune-actions">
+            <button id="ct-refresh" class="button ghost compact" type="button">读取当前值</button>
+            <button id="ct-yolo-toggle" class="button ghost compact" type="button">暂停识别刷新</button>
+            <button id="ct-persist" class="button primary compact" type="button">写入相机配置（重启后生效）</button>
+          </div>
+        </div>
+
+        <div class="camera-tune-grid">
+          <div class="camera-tune-images">
+            <article class="card">
+              <div class="card-heading">
+                <div><h2>原始画面</h2><small>调曝光实时可见 · 双击放大像素级查看</small></div>
+                <span id="ct-camera-time" class="mono muted">等待画面</span>
+              </div>
+              <div class="image-frame camera-frame">
+                <img id="ct-camera-image" alt="相机原始画面">
+                <div class="image-placeholder"><span>等待相机帧</span></div>
+              </div>
+            </article>
+            <article class="card">
+              <div class="card-heading">
+                <div><h2>YOLO 识别画面</h2><small>与正式识别同一模型 · 约 1 帧/秒</small></div>
+                <span id="ct-yolo-time" class="mono muted">等待识别</span>
+              </div>
+              <div class="image-frame camera-frame">
+                <img id="ct-yolo-image" alt="YOLO 识别画面">
+                <div class="image-placeholder"><span>启动感知后在此显示</span></div>
+              </div>
+              <p id="ct-yolo-summary" class="ct-yolo-summary muted">尚未识别</p>
+            </article>
+          </div>
+
+          <div class="camera-tune-controls">
+            <article class="card ct-sensor-card" data-sensor="rgb">
+              <div class="card-heading">
+                <div><h2>彩色相机</h2><small>YOLO 识别使用彩色画面</small></div>
+                <label class="switch"><input type="checkbox" data-key="auto_exposure"><span></span>自动曝光</label>
+              </div>
+              <div class="ct-fields" data-sensor="rgb"><p class="muted">等待读取相机状态（需启动硬件）</p></div>
+            </article>
+            <article class="card ct-sensor-card" data-sensor="depth">
+              <div class="card-heading">
+                <div><h2>深度相机</h2><small>影响深度定位质量</small></div>
+                <label class="switch"><input type="checkbox" data-key="auto_exposure"><span></span>自动曝光</label>
+              </div>
+              <div class="ct-fields" data-sensor="depth"><p class="muted">等待读取相机状态</p></div>
+            </article>
+            <article class="card ct-help-card">
+              <div class="card-heading"><div><h2>使用说明</h2></div></div>
+              <ul class="ct-help-list">
+                <li>滑杆或数字框松手即写入相机，实时生效，数据流不中断、不重连。</li>
+                <li>手动调曝光/增益会自动关闭该相机自动曝光；重新勾选即恢复自动。</li>
+                <li>「写入相机配置」把当前值存入 camera 配置文件，下次重启硬件后按此值启动。</li>
+                <li>YOLO 画面需要感知节点已启动；离开本页自动暂停识别节省算力。</li>
+                <li>OrbbecViewer 等上位机与本项目相机是 USB 独占，调参期间请勿同时打开。</li>
+              </ul>
+            </article>
+          </div>
+        </div>
       </section>
     </main>
   </div>

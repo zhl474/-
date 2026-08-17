@@ -4,9 +4,22 @@ template_sizes:
     high:
       block_px: 36
       connector_px: 5
+      # 按类别逐段微调（可选）。x_runs/y_runs 是沿长边/短边方向的
+      # [实体, 间隙, 实体, ...] 像素线段，段数与类别网格严格对应：
+      # L/T/z 为 5+3 段，square 为 3+3 段，line 为 7+1 段。
+      # 总长多出的尾差并入最后一段实体，如长边 36+5+36+5+36+1 写成 [36, 5, 36, 5, 37]。
+      # 未列出的类别（或只写一个方向）继续用上方 block_px/connector_px 理想展开；
+      # 面板重跑 line 标定改基准后，已写 overrides 的类别不会跟着变，需手动清理。
+      # 修改后需重启 perception 节点生效；面板上只能改数值，新增类别要手改本文件。
+      overrides: {}
+      # overrides:
+      #   L_blue:
+      #     x_runs: [36, 5, 36, 5, 37]
+      #     y_runs: [36, 5, 36]
     low:
-      block_px: 94
+      block_px: 92
       connector_px: 12
+      overrides: {}
 
 color_segmentation:
   seed_search_half_size: 40

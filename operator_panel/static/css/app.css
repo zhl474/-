@@ -497,3 +497,40 @@ body.has-emergency .app-shell { padding-top: calc(72px + var(--emergency-h)); }
   .ros-flow-lane { gap: 5px; padding: 8px; }
   .ros-stage { padding: 8px; }
 }
+
+/* --- 运行控制台：运动调参卡片 --- */
+.tune-body { display: flex; flex-direction: column; gap: 14px; }
+.tune-group > strong { display: block; margin-bottom: 7px; color: var(--muted); font-size: 11px; letter-spacing: .08em; }
+.tune-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); gap: 8px; }
+.tune-field { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-soft); }
+.tune-field.risk-danger { border-color: #e7a1a4; background: var(--red-soft); }
+.tune-field.modified { border-color: var(--amber); background: var(--amber-soft); }
+.tune-label { min-width: 0; display: flex; align-items: baseline; gap: 6px; }
+.tune-label b { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tune-label small { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.tune-stepper { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; }
+.tune-step { width: 26px; height: 26px; padding: 0; border: 1px solid var(--line-strong); border-radius: 7px; background: white; font-size: 14px; font-weight: 800; line-height: 1; cursor: pointer; }
+.tune-step:hover:not(:disabled) { border-color: var(--green); color: var(--green-dark); }
+.tune-step:disabled { opacity: .4; cursor: not-allowed; }
+.tune-stepper input { width: 72px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 7px; text-align: center; font: 12px/1.2 var(--mono); }
+.tune-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 14px; }
+.tune-footer .muted { font-size: 11px; }
+
+/* --- 07 相机调参 --- */
+.camera-tune-actions { display: flex; align-items: center; gap: 8px; }
+.camera-tune-grid { display: grid; grid-template-columns: minmax(520px, 1.25fr) minmax(360px, .75fr); gap: 18px; }
+.camera-tune-images, .camera-tune-controls { display: grid; align-content: start; gap: 16px; }
+.ct-fields { display: grid; gap: 10px; margin-top: 12px; }
+.ct-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-soft); }
+.ct-label { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ct-label b { font-size: 12px; }
+.ct-label small { color: var(--muted); font-size: 10px; }
+.ct-control { flex: 0 0 58%; display: flex; align-items: center; gap: 8px; }
+.ct-control input[type="range"] { flex: 1; min-width: 0; accent-color: var(--green); cursor: pointer; }
+.ct-control input[type="number"] { width: 86px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 7px; text-align: center; font: 12px/1.2 var(--mono); }
+.ct-yolo-summary { margin: 10px 2px 0; font-size: 12px; }
+.ct-help-list { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: 11px; display: grid; gap: 4px; }
+.ct-help-list li::marker { color: var(--green); }
+@media (max-width: 1180px) {
+  .camera-tune-grid { grid-template-columns: 1fr; }
+}

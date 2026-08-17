@@ -14,12 +14,16 @@ from sensor_msgs.msg import Image
 from akai import DEG, MM, tf3d
 from akai_fr import AkaiFr
 from akai_gemini335 import AkaiGemini335
-from pyorbbecsdk import Config
+from pyorbbecsdk import Config, OBPropertyID
 from camera.srv import (
+    GetExposureState,
+    GetExposureStateResponse,
     GetStableWorldPoints,
     GetStableWorldPointsResponse,
     GetSurfaceHeight,
     GetSurfaceHeightResponse,
+    SetExposureParam,
+    SetExposureParamResponse,
 )
 
 
@@ -28,6 +32,35 @@ DEFAULT_CAMERA_CONFIG = os.path.join(PACKAGE_DIR, "config", "新相机参数.yam
 DEFAULT_HAND_EYE_MATRIX = os.path.join(PACKAGE_DIR, "config", "T_wrist2camera.npy")
 EXPECTED_RGB_IMAGE_SIZE = (1280, 720)  # (宽, 高)
 HIGH_ORDER_DISTORTION_TOLERANCE = 1e-12
+
+# 运行时可调的曝光/增益属性：sensor -> key -> (属性ID, 是否布尔)。
+# 流保持运行直接写设备属性，不重启 pipeline。
+EXPOSURE_PROPERTY_IDS = {
+    "rgb": {
+        "auto_exposure": (OBPropertyID.OB_PROP_COLOR_AUTO_EXPOSURE_BOOL, True),
+        "exposure": (OBPropertyID.OB_PROP_COLOR_EXPOSURE_INT, False),
+        "gain": (OBPropertyID.OB_PROP_COLOR_GAIN_INT, False),
+    },
+    "depth": {
+        "auto_exposure": (OBPropertyID.OB_PROP_DEPTH_AUTO_EXPOSURE_BOOL, True),
+        "exposure": (OBPropertyID.OB_PROP_DEPTH_EXPOSURE_INT, False),
+        "gain": (OBPropertyID.OB_PROP_DEPTH_GAIN_INT, False),
+    },
+}
+
+
+def validate_exposure_request(sensor, key):
+    """校验 sensor/key 是否在白名单内，返回 (ok, 错误消息)。"""
+    properties = EXPOSURE_PROPERTY_IDS.get(sensor)
+    if properties is None:
+        return False, f"未知传感器: {sensor!r}（可选 rgb/depth）"
+    if key not in properties:
+        return False, f"未知参数: {key!r}（可选 auto_exposure/exposure/gain）"
+    return True, ""
+
+
+def clamp_exposure_value(value, minimum, maximum):
+    return int(min(max(int(value), minimum), maximum))
 
 
 def load_factory_rgb_calibration(camera_param, expected_image_size=EXPECTED_RGB_IMAGE_SIZE):
@@ -145,6 +178,19 @@ class CameraNode:
             "/camera/stable_world_points",
             GetStableWorldPoints,
             self.get_stable_world_points,
+        )
+        # 运行时曝光/增益调整服务（流不断、不重连）
+        self.exposure_device = None
+        self.property_lock = threading.Lock()
+        self.get_exposure_state_service = rospy.Service(
+            "/camera/get_exposure_state",
+            GetExposureState,
+            self.get_exposure_state,
+        )
+        self.set_exposure_param_service = rospy.Service(
+            "/camera/set_exposure_param",
+            SetExposureParam,
+            self.set_exposure_param,
         )
         rospy.on_shutdown(self.close)
         rospy.loginfo(
@@ -460,6 +506,110 @@ class CameraNode:
             )
         except Exception as exc:
             return self._stable_failure(f"批量稳定世界坐标查询失败: {exc}")
+
+    def _get_exposure_device(self):
+        """懒取 ob.Device，优先 cap.device 属性，失败再走 pipeline.get_device()。
+
+        注意不要用 get_device_type() 之类方法探活：pyorbbecsdk 2.0.13
+        没有该方法；属性读写本身已包在 try 里，取到非空句柄即可用。
+        """
+        if self.exposure_device is not None:
+            return self.exposure_device
+        for source, getter in (
+            ("cap.device", lambda: self.cap.device),
+            ("cap.pipeline.get_device()", lambda: self.cap.pipeline.get_device()),
+        ):
+            try:
+                device = getter()
+            except Exception as exc:
+                rospy.logwarn("获取相机设备句柄失败(%s)，尝试下一途径: %s", source, exc)
+                continue
+            if device is None:
+                rospy.logwarn("获取相机设备句柄失败(%s)：返回空", source)
+                continue
+            self.exposure_device = device
+            rospy.loginfo("曝光控制使用设备句柄: %s", source)
+            return device
+        return None
+
+    def get_exposure_state(self, _request):
+        """读回彩色/深度曝光与增益的当前值及可调范围。"""
+        with self.property_lock:
+            try:
+                device = self._get_exposure_device()
+                if device is None:
+                    return GetExposureStateResponse(
+                        ok=False,
+                        message="无法获取相机设备句柄（cap.device 与 pipeline.get_device 均失败）",
+                    )
+                fields = {"ok": True, "message": "查询成功"}
+                for sensor, properties in EXPOSURE_PROPERTY_IDS.items():
+                    for key, (prop_id, is_bool) in properties.items():
+                        name = f"{sensor}_{key}"
+                        if is_bool:
+                            fields[name] = bool(device.get_bool_property(prop_id))
+                        else:
+                            rng = device.get_int_property_range(prop_id)
+                            fields[name] = int(device.get_int_property(prop_id))
+                            fields[f"{name}_min"] = int(rng.min)
+                            fields[f"{name}_max"] = int(rng.max)
+                return GetExposureStateResponse(**fields)
+            except Exception as exc:
+                return GetExposureStateResponse(ok=False, message=f"查询曝光状态失败: {exc}")
+
+    def set_exposure_param(self, request):
+        """运行时写单个曝光/增益参数，流保持运行。"""
+        ok, error = validate_exposure_request(request.sensor, request.key)
+        if not ok:
+            return SetExposureParamResponse(ok=False, applied=request.value, message=error)
+        prop_id, is_bool = EXPOSURE_PROPERTY_IDS[request.sensor][request.key]
+        with self.property_lock:
+            try:
+                device = self._get_exposure_device()
+                if device is None:
+                    return SetExposureParamResponse(
+                        ok=False,
+                        applied=request.value,
+                        message="无法获取相机设备句柄（cap.device 与 pipeline.get_device 均失败）",
+                    )
+                notes = []
+                # 手动曝光/增益会被自动曝光覆盖，写入前先自动关掉该传感器的 AE。
+                ae_id = EXPOSURE_PROPERTY_IDS[request.sensor]["auto_exposure"][0]
+                if not is_bool and device.get_bool_property(ae_id):
+                    device.set_bool_property(ae_id, False)
+                    notes.append("已自动关闭自动曝光")
+                if is_bool:
+                    applied = 1 if request.value else 0
+                    device.set_bool_property(prop_id, bool(applied))
+                else:
+                    rng = device.get_int_property_range(prop_id)
+                    applied = clamp_exposure_value(request.value, int(rng.min), int(rng.max))
+                    if int(device.get_int_property(prop_id)) == applied:
+                        notes.append(f"值未变化({applied})，跳过写入")
+                    else:
+                        device.set_int_property(prop_id, applied)
+                        applied = int(device.get_int_property(prop_id))
+                message = "设置成功" + ("；" + "，".join(notes) if notes else "")
+                rospy.loginfo(
+                    "运行时相机参数设置: %s.%s=%s -> %s (%s)",
+                    request.sensor,
+                    request.key,
+                    request.value,
+                    applied,
+                    message,
+                )
+                return SetExposureParamResponse(ok=True, applied=applied, message=message)
+            except Exception as exc:
+                rospy.logerr(
+                    "运行时相机参数设置失败: %s.%s=%s: %s",
+                    request.sensor,
+                    request.key,
+                    request.value,
+                    exc,
+                )
+                return SetExposureParamResponse(
+                    ok=False, applied=request.value, message=f"设置失败: {exc}"
+                )
 
     def publish_images(self):
         rate = rospy.Rate(60)

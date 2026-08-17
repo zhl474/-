@@ -130,6 +130,10 @@ def _load_camera(monkeypatch):
     camera.srv.GetSurfaceHeightResponse = _Response
     camera.srv.GetStableWorldPoints = object
     camera.srv.GetStableWorldPointsResponse = _Response
+    camera.srv.GetExposureState = object
+    camera.srv.GetExposureStateResponse = _Response
+    camera.srv.SetExposureParam = object
+    camera.srv.SetExposureParamResponse = _Response
     monkeypatch.setitem(sys.modules, "camera", camera)
     monkeypatch.setitem(sys.modules, "camera.srv", camera.srv)
 

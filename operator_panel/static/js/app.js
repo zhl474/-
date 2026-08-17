@@ -1,5 +1,7 @@
 import { api, ApiError, cacheBustedImage, eventStream } from './api.js';
 import { ConfigEditor, flattenSearch } from './config-editor.js';
+import { TuneCard } from './tune-card.js';
+import { CameraTuneCard } from './camera-tune.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -71,6 +73,34 @@ const configEditor = new ConfigEditor($('#config-editor'), (changes) => {
   const badge = $('#dirty-count');
   badge.textContent = changes.length ? `${changes.length} 项未保存` : '无修改';
   badge.classList.toggle('dirty', changes.length > 0);
+});
+
+// 与后端 _config_operation_allowed 保持一致的保存门禁提示。
+function tuneLockReason() {
+  const state = app.state || {};
+  const task = state.task || {};
+  const stopOperation = state.operation?.stop;
+  const active = state.operation?.active || (stopOperation?.status === 'running' ? stopOperation : null);
+  if (state.system?.exiting) return '控制台正在退出';
+  if (active) return `正在${active.kind}，请等待结束`;
+  if (state.hardware?.stop_latched) return '停止锁已锁定，先解除停止锁';
+  if (['准备识别', '执行中'].includes(task.state)) return '识别或任务执行期间不能保存参数';
+  return '';
+}
+
+const tuneCard = new TuneCard({
+  api,
+  toast,
+  confirmAction,
+  formatError,
+  lockReason: tuneLockReason,
+});
+
+const cameraTuneCard = new CameraTuneCard({
+  api,
+  toast,
+  confirmAction,
+  formatError,
 });
 
 function toast(title, message = '', level = 'success', duration = 4500) {
@@ -901,6 +931,7 @@ function renderState(state) {
   $$('#runtime-mode button').forEach((button) => { button.disabled = busy || stopped || !health.control_services_ready || (process.runtime?.running && button.dataset.mode === runtimeMode); });
   $('#runtime-stop').disabled = busy || !process.runtime?.owned || ['准备识别', '执行中'].includes(task.state);
   const running = task.state === '执行中' || task.state === '已暂停';
+  tuneCard.updateLock();
   $('#task-prepare').disabled = busy || stopped || !health.control_services_ready || !health.perception_services_ready || running;
   // 停止始终按任务状态开关；暂停要绕过 busy（执行任务占着队列）；继续要等手动操作结束（busy）。
   $('#task-stop').disabled = !running;
@@ -1021,7 +1052,16 @@ function startEvents() {
   source.addEventListener('log', (event) => appendLog(JSON.parse(event.data)));
   source.addEventListener('image', (event) => {
     const data = JSON.parse(event.data);
-    if (data.image_id === 'camera') updateImage($('#camera-image'), 'camera', data.updated_at);
+    if (data.image_id === 'camera') {
+      updateImage($('#camera-image'), 'camera', data.updated_at);
+      updateImage($('#ct-camera-image'), 'camera', data.updated_at);
+      const time = $('#ct-camera-time');
+      if (time) time.textContent = data.updated_at;
+    }
+    if (data.image_id === 'yolo') {
+      updateImage($('#ct-yolo-image'), 'yolo', data.updated_at);
+      cameraTuneCard.onYoloFrame(data);
+    }
   });
   source.onerror = () => {
     const chip = $('[data-status="ros"]');
@@ -1055,20 +1095,23 @@ function bindImageZoom() {
     willReadFrequently: true,
   });
 
-  $$('#camera-image, #debug-image').forEach((image) => {
+  const zoomTitles = {
+    'camera-image': '相机预览',
+    'debug-image': '识别调试图',
+    'ct-camera-image': '相机调参 · 原始画面',
+    'ct-yolo-image': '相机调参 · YOLO 识别画面',
+  };
+  $$('#camera-image, #debug-image, #ct-camera-image, #ct-yolo-image').forEach((image) => {
     image.title = '双击放大';
     image.tabIndex = 0;
     image.addEventListener('dblclick', () => openImageZoom(
       image,
       image.id === 'debug-image'
         ? `识别调试图 · ${$('.debug-tabs button.active')?.textContent || ''}`
-        : '相机预览',
+        : zoomTitles[image.id] || '图片预览',
     ));
     image.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') openImageZoom(
-        image,
-        image.id === 'debug-image' ? '识别调试图' : '相机预览',
-      );
+      if (event.key === 'Enter') openImageZoom(image, zoomTitles[image.id] || '图片预览');
     });
   });
 
@@ -1385,6 +1428,11 @@ function bindNavigation() {
     if (app.selectedView === 'readonly') loadReadOnly();
     if (app.selectedView === 'manual') loadExecutionConfig();
     if (app.selectedView === 'ros') loadRosSystem(true);
+    // 相机调参视图：进入即开 YOLO 预览并读取曝光状态，离开自动停预览省算力。
+    if (app.selectedView === 'camera-tune') cameraTuneCard.enter();
+    else cameraTuneCard.leave();
+    // 回到运行控制台时同步一次调参卡片；有未保存修改时不覆盖。
+    if (app.selectedView === 'console' && !tuneCard.dirty.size) tuneCard.refresh();
   }));
 }
 
@@ -1748,6 +1796,8 @@ function renderConfigActions() {
     else if (scopeExternal('perception')) { enabled = false; reason = '感知节点由外部进程启动，控制台不能重启它'; }
   }
   applyButton.disabled = !enabled;
+  // 轮间生效的配置由节点在下一轮识别自动重读，无需重启，隐藏“保存并重启”。
+  applyButton.hidden = scope === 'round';
   applyButton.title = reason;
 }
 
@@ -1771,7 +1821,8 @@ async function selectConfig(fileId, force = false) {
     app.configDocuments.set(fileId, document);
     app.currentConfigId = fileId;
     configEditor.load(document);
-    $('#config-file-id').textContent = `${document.file_id} · 重启范围 ${document.restart_scope === 'hardware' ? '硬件' : '感知'}`;
+    const scopeNames = { hardware: '硬件', perception: '感知', round: '轮间生效（下一轮识别自动读取）' };
+    $('#config-file-id').textContent = `${document.file_id} · 生效方式 ${scopeNames[document.restart_scope] || document.restart_scope}`;
     $('#config-title').textContent = document.label;
     $('#config-description').textContent = document.description;
     renderConfigFileStates();
@@ -1803,10 +1854,14 @@ async function saveCurrentConfig(apply) {
         data: configEditor.data,
         revision: configEditor.document.revision,
         confirm_dangerous: confirmDangerous,
-        apply,
+        apply: apply && scope !== 'round',
       },
     });
-    toast(apply ? '保存并重启已提交' : '仅保存已提交', `操作编号 ${result.operation_id.slice(0, 8)}`);
+    if (scope === 'round') {
+      toast('已保存，下一轮识别生效', `操作编号 ${result.operation_id.slice(0, 8)}`);
+    } else {
+      toast(apply ? '保存并重启已提交' : '仅保存已提交', `操作编号 ${result.operation_id.slice(0, 8)}`);
+    }
   } catch (error) {
     if (error.code === 'revision_conflict') {
       toast('文件版本冲突', '配置已被 VS Code 或其它程序修改，请重新读取后再编辑。', 'error', 7000);
@@ -1821,6 +1876,7 @@ async function refreshConfigAfterWrite() {
   await loadConfigFiles();
   await loadAllConfigDocuments(true);
   app.executionConfig = null;
+  tuneCard.refresh();
   if (selected) await selectConfig(selected, true);
   await loadPresets();
 }
@@ -2401,6 +2457,7 @@ async function initialize() {
     refreshState(),
     loadExecutionConfig(),
     loadUsbOccupancy(true),
+    tuneCard.refresh(),
   ]);
   startEvents();
 }

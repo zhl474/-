@@ -5,10 +5,10 @@ rgb_camera:
   auto_exposure: True
   # 手动设置曝光值
   #   注意事项: 当auto_exposure=False时有效
-  # exposure: 70
+  exposure: 70
   # 增益
   #   注意事项: 当auto_exposure=False时有效
-  # gain: 16
+  gain: 16
   # 相机亮度
   #   注意事项: 当auto_exposure=True时有效
   brightness: 35

@@ -8,9 +8,9 @@ from image_process_lib.block_detection import (
     draw_mask_on_full_image,
     get_mask,
 )
-from image_process_lib.block_category import normalize_category_name
+from image_process_lib.block_category import BLOCK_CATEGORY_NAMES, normalize_category_name
 from image_process_lib.template_config import load_color_segmentation_config, load_template_geometry
-from image_process_lib.template_match.kernels_create import get_template_rect_size
+from image_process_lib.template_match.kernels_create import resolve_category_runs
 from image_process_lib.template_match.template_match import get_rect
 
 # 高位快速模板匹配配置，由 image_node 从 perception.yaml 注入；None 时完全沿用旧逻辑。
@@ -81,6 +81,7 @@ def match_block_mask(
         search_radius=search_radius,
         debug_output=match_debug_output,
         screening_config=screening_config,
+        template_runs=resolve_category_runs(category, template_geometry),
     )
 
     box = np.intp(cv2.boxPoints(rect))
@@ -162,7 +163,7 @@ def rematch_blocks_from_masks(
     return rematched_blocks, debug_image
 
 
-def detect_blocks_yolo(img_bgr, model, expected_category=""):
+def detect_blocks_yolo(img_bgr, model, expected_category="", conf=0.45):
     """只跑 YOLO 检测，返回方块类别的原始检测框列表。
 
     供人工修正检测框使用：每个元素为
@@ -174,7 +175,7 @@ def detect_blocks_yolo(img_bgr, model, expected_category=""):
     expected_category = normalize_category_name(expected_category.strip()) if expected_category else ""
 
     detections = []
-    result = model(img_bgr, iou=0.5, conf=0.45)
+    result = model(img_bgr, iou=0.5, conf=conf)
     for det in result[0].boxes.data.tolist():
         x1, y1, x2, y2, score, cid = det
         category = normalize_category_name(model.names[int(cid)])
@@ -188,6 +189,53 @@ def detect_blocks_yolo(img_bgr, model, expected_category=""):
             "box": (float(x1), float(y1), float(x2), float(y2)),
         })
     return detections
+
+
+def draw_yolo_detections(img_bgr, detections):
+    """在原图上画 YOLO 检测框和类别/分数标注，供预览显示。"""
+    annotated = img_bgr.copy()
+    for det in detections:
+        x1, y1, x2, y2 = (int(round(v)) for v in det["box"])
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        label = f"{det['category']} {det['score']:.2f}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        cv2.rectangle(
+            annotated,
+            (x1, max(0, y1 - th - 8)),
+            (x1 + tw + 4, y1),
+            (0, 255, 0),
+            -1,
+        )
+        cv2.putText(
+            annotated,
+            label,
+            (x1 + 2, max(th + 2, y1 - 4)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 0),
+            2,
+        )
+    return annotated
+
+
+def build_yolo_preview_summary(detections):
+    """按类别统计检测数，生成一行中文摘要。"""
+    counts = {}
+    for det in detections:
+        counts[det["category"]] = counts.get(det["category"], 0) + 1
+    if not counts:
+        return "未识别到方块"
+    ordered = [
+        f"{category}x{counts[category]}"
+        for category in BLOCK_CATEGORY_NAMES
+        if category in counts
+    ]
+    ordered.extend(
+        f"{category}x{count}"
+        for category, count in sorted(counts.items())
+        if category not in BLOCK_CATEGORY_NAMES
+    )
+    return f"识别到 {len(detections)} 个: " + ", ".join(ordered)
 
 
 def process_block_detections(

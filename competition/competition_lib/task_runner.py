@@ -193,6 +193,21 @@ class TaskRunner:
         mode_name = "标定采集模式" if self.config.calibration_mode else "正式运行模式"
         servo_mode_name = "开启（闭环）" if self.visual_servo_enabled else "关闭（开环）"
         print(f"\033[96m当前模式：{mode_name}；视觉伺服：{servo_mode_name}\033[0m")
+        # 本轮实际生效的运动参数快照：控制台改参后下一轮即在此可见新值。
+        print(
+            "\033[96m本轮运动参数："
+            f"arm_speed={self.config.arm_speed} "
+            f"pick_speed={self.config.pick_speed} "
+            f"servo_speed={self.config.servo_speed} "
+            f"pick_approach_speed={self.config.pick_approach_speed} | "
+            f"pick_surface_offset={self.config.pick_surface_offset_mm:.1f} "
+            f"place_descent_offset={self.config.place_descent_offset_mm:.1f} "
+            f"minimum_tcp_z={self.config.minimum_tcp_z_mm:.1f} | "
+            f"阈值 block/tray={self.config.block_error_threshold_px:g}/"
+            f"{self.config.tray_error_threshold_px:g}px "
+            f"settle={self.config.settle_sec:g}s "
+            f"max_iter={self.config.max_iter}\033[0m"
+        )
 
     def _set_state(self, state):
         self.state = state
@@ -553,7 +568,11 @@ class TaskRunner:
             if math.isfinite(dx) and math.isfinite(dy):
                 static_errors.append((dx, dy))
         requested = self.config.post_success_sample_frames if success else 0
-        required = int(math.ceil(0.8 * requested)) if requested else 0
+        required = (
+            int(math.ceil(self.config.sample_complete_ratio * requested))
+            if requested
+            else 0
+        )
         statistics = {
             "伺服总轮数": len({row.get("伺服轮次") for row in control_events}),
             "执行修正次数": sum(row.get("事件") == "执行修正" for row in events),
@@ -1100,7 +1119,10 @@ class TaskRunner:
             "执行配置": asdict(self.config),
             "视觉伺服配置": self.visual_config,
             "静止采样完整阈值": int(
-                math.ceil(0.8 * self.config.post_success_sample_frames)
+                math.ceil(
+                    self.config.sample_complete_ratio
+                    * self.config.post_success_sample_frames
+                )
             ),
             "调试归档文件": {
                 "方块低位视频": str(archive_dir / "方块视觉伺服调试.avi"),
@@ -1175,9 +1197,9 @@ class TaskRunner:
                 self._check_abort()
             if not self.config.calibration_mode:
                 # 最后一块喷气后先保持泄压，避免 OFF 立刻把残余负压封回吸盘，
-                # 导致最后一块被负压吸住、下落过慢。时长与操作面板手动喷气的
-                # timed_blow_seconds（1.0s）保持一致。
-                self._sleep_abortible(1.0)
+                # 导致最后一块被负压吸住、下落过慢。默认与操作面板手动喷气的
+                # timed_blow_seconds（1.0s）保持一致，可在 execution.yaml 调整。
+                self._sleep_abortible(self.config.final_blow_hold_sec)
                 self._timed_call(
                     "全部任务完成后关闭吸盘",
                     self.clients.set_suction,

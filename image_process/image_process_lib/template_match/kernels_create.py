@@ -106,6 +106,104 @@ def _category_cells(category):
     return TETRIS_BLOCKS[category]
 
 
+def category_grid_counts(category):
+    """返回类别基础朝向逻辑网格的（列数, 行数），线段段数校验以此为准。"""
+    cells = _category_cells(category)
+    return max(x for x, _ in cells) + 1, max(y for _, y in cells) + 1
+
+
+def expand_ideal_runs(n_solid, block_px, connector_px):
+    """按理想规则展开一个方向的线段：n 个实体段由间隙隔开，共 2n-1 段。"""
+    block_px, connector_px = _validate_geometry(block_px, connector_px)
+    n_solid = int(n_solid)
+    if n_solid <= 0:
+        raise ValueError("实体段数量必须为正数")
+    runs = []
+    for index in range(n_solid):
+        runs.append(block_px)
+        if index < n_solid - 1:
+            runs.append(connector_px)
+    return runs
+
+
+def validate_runs(category, axis, runs):
+    """校验一个方向的线段列表并转成整数元组：每段为正数、段数与类别网格严格对应。"""
+    if axis not in ("x", "y"):
+        raise ValueError("axis 必须是 'x' 或 'y'")
+    if not isinstance(runs, (list, tuple)) or len(runs) == 0:
+        raise ValueError(f"{category} 的 {axis}_runs 必须是非空列表")
+    grid_w, grid_h = category_grid_counts(category)
+    n_solid = grid_w if axis == "x" else grid_h
+    expected = 2 * n_solid - 1
+    if len(runs) != expected:
+        raise ValueError(
+            f"{category} 的 {axis}_runs 需要 {expected} 段（{n_solid} 个实体段与间隙交替），"
+            f"实际 {len(runs)} 段: {list(runs)}；尾差请并入最后一段实体"
+        )
+    values = []
+    for value in runs:
+        if isinstance(value, bool):
+            raise ValueError(f"{category} 的 {axis}_runs 每段必须是数字: {value!r}")
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{category} 的 {axis}_runs 每段必须是数字: {value!r}") from exc
+        if not np.isfinite(number) or number <= 0:
+            raise ValueError(f"{category} 的 {axis}_runs 每段必须为正数: {value!r}")
+        values.append(int(round(number)))
+    return tuple(values)
+
+
+def normalize_template_runs(category, template_runs, block_px, connector_px):
+    """把 template_runs（含 x_runs/y_runs 的字典）规范成 (x_runs, y_runs) 整数元组。
+
+    None 或字典里缺某方向时，该方向按 block_px/connector_px 理想展开。
+    """
+    block_px, connector_px = _validate_geometry(block_px, connector_px)
+    grid_w, grid_h = category_grid_counts(category)
+    if template_runs is None:
+        return (
+            tuple(expand_ideal_runs(grid_w, block_px, connector_px)),
+            tuple(expand_ideal_runs(grid_h, block_px, connector_px)),
+        )
+    if not isinstance(template_runs, dict):
+        raise ValueError("template_runs 必须是含 x_runs/y_runs 的字典或 None")
+    x_runs = template_runs.get("x_runs")
+    y_runs = template_runs.get("y_runs")
+    if x_runs is None:
+        x_runs = expand_ideal_runs(grid_w, block_px, connector_px)
+    if y_runs is None:
+        y_runs = expand_ideal_runs(grid_h, block_px, connector_px)
+    return (
+        validate_runs(category, "x", x_runs),
+        validate_runs(category, "y", y_runs),
+    )
+
+
+def resolve_category_runs(category, template_geometry):
+    """从模板几何配置字典解析该类别的 {"x_runs": ..., "y_runs": ...} 线段。
+
+    优先取 template_geometry["runs"][category]（按类别 overrides 的解析结果，
+    兼容只写一个方向的写法），没有时按 block_px/connector_px 理想展开。
+    返回值可直接作为各模板入口的 template_runs 入参。
+    """
+    if not isinstance(template_geometry, dict):
+        raise ValueError("template_geometry 必须是字典")
+    template_runs = None
+    runs_map = template_geometry.get("runs")
+    if isinstance(runs_map, dict):
+        override = runs_map.get(category)
+        if isinstance(override, dict):
+            template_runs = override
+    x_runs, y_runs = normalize_template_runs(
+        category,
+        template_runs,
+        template_geometry.get("block_px"),
+        template_geometry.get("connector_px"),
+    )
+    return {"x_runs": x_runs, "y_runs": y_runs}
+
+
 def get_template_rect_size(category, block_px, connector_px):
     """按类别和几何参数计算基础模板的外接矩形尺寸。"""
     block_px, connector_px = _validate_geometry(block_px, connector_px)
@@ -117,27 +215,44 @@ def get_template_rect_size(category, block_px, connector_px):
     return width, height
 
 
-def create_base_shape(category, block_px, connector_px):
-    """生成未旋转的基础模板，像素值为 0/1。"""
-    block_px, connector_px = _validate_geometry(block_px, connector_px)
+def _solid_ranges(runs):
+    """把 [实体, 间隙, ...] 线段列表转成每个实体段的 [起点, 终点) 区间。"""
+    ranges = []
+    position = 0
+    for index, length in enumerate(runs):
+        if index % 2 == 0:
+            ranges.append((position, position + length))
+        position += length
+    return ranges
+
+
+def create_base_shape_from_runs(category, x_runs, y_runs):
+    """按逐段线段生成未旋转的基础模板，像素值为 0/1。
+
+    x_runs/y_runs 为该方向上实体/间隙交替的像素段（首尾必须是实体段），
+    第 i 列的宽度是 x_runs 的第 2i 段，第 j 行的高度是 y_runs 的第 2j 段。
+    """
+    x_runs = validate_runs(category, "x", x_runs)
+    y_runs = validate_runs(category, "y", y_runs)
     cells = set(_category_cells(category))
-    width, height = get_template_rect_size(category, block_px, connector_px)
-    canvas = np.zeros((height, width), dtype=np.float32)
+    canvas = np.zeros((sum(y_runs), sum(x_runs)), dtype=np.float32)
 
-    step = block_px + connector_px
-
-    for x, y in cells:
-        x0 = x * step
-        y0 = y * step
-        canvas[y0:y0 + block_px, x0:x0 + block_px] = 1.0
+    col_ranges = _solid_ranges(x_runs)
+    row_ranges = _solid_ranges(y_runs)
 
     for x, y in cells:
-        x0 = x * step
-        y0 = y * step
+        x0, x1 = col_ranges[x]
+        y0, y1 = row_ranges[y]
+        canvas[y0:y1, x0:x1] = 1.0
+
+    # 邻块连接：横连接跨邻块所在行的行高，竖连接跨邻块所在列的列宽。
+    for x, y in cells:
+        x0, x1 = col_ranges[x]
+        y0, y1 = row_ranges[y]
         if (x + 1, y) in cells:
-            canvas[y0:y0 + block_px, x0 + block_px:x0 + block_px + connector_px] = 1.0
+            canvas[y0:y1, x1:col_ranges[x + 1][0]] = 1.0
         if (x, y + 1) in cells:
-            canvas[y0 + block_px:y0 + block_px + connector_px, x0:x0 + block_px] = 1.0
+            canvas[y1:row_ranges[y + 1][0], x0:x1] = 1.0
 
     # 四个子块围住同一个连接交点时，填充中心连接区域，避免 square 中心留空。
     max_x = max(x for x, _ in cells)
@@ -145,11 +260,23 @@ def create_base_shape(category, block_px, connector_px):
     for x in range(max_x):
         for y in range(max_y):
             if {(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)}.issubset(cells):
-                x0 = x * step + block_px
-                y0 = y * step + block_px
-                canvas[y0:y0 + connector_px, x0:x0 + connector_px] = 1.0
+                canvas[
+                    row_ranges[y][1]:row_ranges[y + 1][0],
+                    col_ranges[x][1]:col_ranges[x + 1][0],
+                ] = 1.0
 
     return canvas
+
+
+def template_rect_size_from_runs(x_runs, y_runs):
+    """按线段求和返回基础模板的外接矩形尺寸。"""
+    return int(sum(x_runs)), int(sum(y_runs))
+
+
+def create_base_shape(category, block_px, connector_px, template_runs=None):
+    """生成未旋转的基础模板，像素值为 0/1；template_runs 缺省时走理想规则。"""
+    x_runs, y_runs = normalize_template_runs(category, template_runs, block_px, connector_px)
+    return create_base_shape_from_runs(category, x_runs, y_runs)
 
 
 def show_kernel(kernels, index, show=1):
@@ -259,9 +386,10 @@ def create_rotation_kernels(
     angle_center=None,
     angle_window=None,
     angle_values=None,
+    template_runs=None,
 ):
-    """按子块和连接处像素生成指定类别的旋转模板。"""
-    base_shape = create_base_shape(category, block_px, connector_px)
+    """按子块和连接处像素生成指定类别的旋转模板；template_runs 缺省时走理想规则。"""
+    base_shape = create_base_shape(category, block_px, connector_px, template_runs=template_runs)
     angles = build_angle_values(
         category,
         angle_step=angle_step,
@@ -416,6 +544,7 @@ def create_pick_aligned_kernels(
     angles,
     device=None,
     safety_margin_px=2,
+    template_runs=None,
 ):
     """按抓取点对齐生成低位候选角度公共卷积核，保留各角度独立锚点。
 
@@ -429,8 +558,9 @@ def create_pick_aligned_kernels(
     safety_margin_px = int(safety_margin_px)
     if safety_margin_px < 0:
         raise ValueError("safety_margin_px 必须为非负整数")
-    metadata = build_angle_foreground_metadata(category, block_px, connector_px)
-    rect_size = get_template_rect_size(category, block_px, connector_px)
+    x_runs, y_runs = normalize_template_runs(category, template_runs, block_px, connector_px)
+    metadata = build_angle_foreground_metadata(category, block_px, connector_px, template_runs=template_runs)
+    rect_size = template_rect_size_from_runs(x_runs, y_runs)
     is_l = category in ("L_yellow", "L_blue")
     crops = []
     rect_center_anchors = []
@@ -508,19 +638,27 @@ _SCREENED_KERNEL_CACHE = {}
 _SCREENED_KERNEL_CACHE_CAP = 8
 
 
-def build_angle_foreground_metadata(category, block_px, connector_px, angle_step=1.0):
+def build_angle_foreground_metadata(
+    category,
+    block_px,
+    connector_px,
+    angle_step=1.0,
+    template_runs=None,
+):
     """按类别生成全角度二值模板的前景紧边框元数据并缓存（纯 CPU，不生成 GPU 核）。
 
     每个角度记录白色前景宽高、前景在安全方形画布中的紧边框、
     旋转中心相对紧边框左上角的锚点，以及紧边框二值模板。
+    template_runs 缺省时按 block_px/connector_px 理想展开。
     """
     block_px, connector_px = _validate_geometry(block_px, connector_px)
-    cache_key = (str(category), block_px, connector_px, float(angle_step))
+    x_runs, y_runs = normalize_template_runs(category, template_runs, block_px, connector_px)
+    cache_key = (str(category), x_runs, y_runs, float(angle_step))
     cached = _ANGLE_FOREGROUND_METADATA_CACHE.get(cache_key)
     if cached is not None:
         return cached
     angles = build_angle_values(category, angle_step=angle_step)
-    base_shape = create_base_shape(category, block_px, connector_px)
+    base_shape = create_base_shape_from_runs(category, x_runs, y_runs)
     height, width = base_shape.shape
     length = int(math.ceil(math.sqrt(width ** 2 + height ** 2)))
     if length % 2 == 0:
@@ -610,6 +748,7 @@ def create_screened_kernels(
     angles,
     device=None,
     safety_margin_px=2,
+    template_runs=None,
 ):
     """为候选角度生成公共紧边框卷积核 batch，并保留各角度独立的旋转中心锚点。
 
@@ -622,11 +761,12 @@ def create_screened_kernels(
     safety_margin_px = int(safety_margin_px)
     if safety_margin_px < 0:
         raise ValueError("kernel_safety_margin_px 必须为非负整数")
+    x_runs, y_runs = normalize_template_runs(category, template_runs, block_px, connector_px)
     cache_key = (
         str(device),
         str(category),
-        block_px,
-        connector_px,
+        x_runs,
+        y_runs,
         tuple(round(float(angle), 6) for angle in angles),
         safety_margin_px,
     )
@@ -634,7 +774,9 @@ def create_screened_kernels(
     if cached is not None:
         _SCREENED_KERNEL_CACHE[cache_key] = _SCREENED_KERNEL_CACHE.pop(cache_key)
         return cached
-    metadata = build_angle_foreground_metadata(category, block_px, connector_px)
+    metadata = build_angle_foreground_metadata(
+        category, block_px, connector_px, template_runs=template_runs
+    )
     crops = []
     anchors = []
     max_w = 0

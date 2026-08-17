@@ -11,6 +11,8 @@ find_package(catkin REQUIRED COMPONENTS
 add_service_files(FILES
   GetSurfaceHeight.srv
   GetStableWorldPoints.srv
+  GetExposureState.srv
+  SetExposureParam.srv
 )
 generate_messages()
 

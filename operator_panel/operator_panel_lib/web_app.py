@@ -332,6 +332,40 @@ def create_app(
     def get_pose():
         return jsonify(coordinator.get_pose())
 
+    @app.get("/api/camera/exposure")
+    def get_camera_exposure():
+        try:
+            return jsonify(ros_gateway.get_exposure_state())
+        except Exception as exc:
+            return jsonify({
+                "error": f"读取相机曝光状态失败：{exc}",
+                "code": "camera_unavailable",
+            }), 503
+
+    @app.post("/api/camera/exposure")
+    def set_camera_exposure():
+        payload = body()
+        sensor = str(payload.get("sensor", ""))
+        key = str(payload.get("key", ""))
+        value = payload.get("value")
+        if sensor not in ("rgb", "depth"):
+            raise ValueError("sensor 只能是 rgb 或 depth")
+        if key not in ("auto_exposure", "exposure", "gain"):
+            raise ValueError("key 只能是 auto_exposure、exposure 或 gain")
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("value 必须是整数（auto_exposure 用 0/1）")
+        try:
+            return jsonify(ros_gateway.set_exposure_param(sensor, key, value))
+        except Exception as exc:
+            return jsonify({
+                "error": f"设置相机参数失败：{exc}",
+                "code": "camera_unavailable",
+            }), 503
+
+    @app.post("/api/camera/yolo-preview")
+    def set_yolo_preview():
+        return jsonify(ros_gateway.set_yolo_preview_enabled(bool(body().get("enabled", False))))
+
     @app.get("/api/config")
     def list_configs():
         return jsonify({"files": config_manager.list_configs()})
@@ -450,6 +484,14 @@ def create_app(
             jpeg, updated_at = ros_gateway.image_bytes()
             if jpeg is None:
                 return jsonify({"error": "尚未收到相机预览", "code": "image_unavailable"}), 404
+            response = Response(jpeg, mimetype="image/jpeg")
+            response.headers["X-Image-Updated-At"] = updated_at
+            response.set_etag(hashlib.sha256(jpeg).hexdigest())
+            return response
+        if image_id == "yolo":
+            jpeg, _summary, updated_at = ros_gateway.yolo_preview_snapshot()
+            if jpeg is None:
+                return jsonify({"error": "YOLO 预览尚未生成", "code": "image_unavailable"}), 404
             response = Response(jpeg, mimetype="image/jpeg")
             response.headers["X-Image-Updated-At"] = updated_at
             response.set_etag(hashlib.sha256(jpeg).hexdigest())

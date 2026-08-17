@@ -34,10 +34,16 @@ from image_process_lib.template_config import (
     load_template_geometry,
 )
 from image_process_lib.template_match.kernels_create import (
+    TETRIS_BLOCKS,
+    build_angle_foreground_metadata,
     build_angle_values,
     create_base_shape,
+    create_base_shape_from_runs,
     create_rotation_kernels,
+    expand_ideal_runs,
     get_template_rect_size,
+    resolve_category_runs,
+    template_rect_size_from_runs,
 )
 from image_process_lib.template_match.template_match import get_rect
 
@@ -91,6 +97,55 @@ def _legacy_z_green():
 )
 def test_create_base_shape_matches_legacy_hardcoded_templates(category, legacy_shape):
     np.testing.assert_array_equal(create_base_shape(category, 37, 5), legacy_shape)
+
+
+@pytest.mark.parametrize("category", list(TETRIS_BLOCKS))
+def test_ideal_runs_match_legacy_geometry_pixel_by_pixel(category):
+    """空 overrides 的等价性回归：理想展开 runs 与旧 (block, connector) 路径逐像素一致。"""
+    grid_w = max(x for x, _ in TETRIS_BLOCKS[category]) + 1
+    grid_h = max(y for _, y in TETRIS_BLOCKS[category]) + 1
+    x_runs = tuple(expand_ideal_runs(grid_w, 37, 5))
+    y_runs = tuple(expand_ideal_runs(grid_h, 37, 5))
+    np.testing.assert_array_equal(
+        create_base_shape_from_runs(category, x_runs, y_runs),
+        create_base_shape(category, 37, 5),
+    )
+    assert template_rect_size_from_runs(x_runs, y_runs) == get_template_rect_size(category, 37, 5)
+
+
+def test_category_runs_change_shape_extent_per_category():
+    """逐段微调生效：只改 L_blue 长边末段，L_yellow 不受影响。"""
+    geometry = {
+        "block_px": 36,
+        "connector_px": 5,
+        "runs": {
+            "L_blue": {"x_runs": (36, 5, 36, 5, 37), "y_runs": (36, 5, 36)},
+        },
+    }
+    blue = resolve_category_runs("L_blue", geometry)
+    yellow = resolve_category_runs("L_yellow", geometry)
+    assert template_rect_size_from_runs(blue["x_runs"], blue["y_runs"]) == (119, 77)
+    assert template_rect_size_from_runs(yellow["x_runs"], yellow["y_runs"]) == (118, 77)
+    # 缺 runs 键的旧式 dict 回落理想展开。
+    assert resolve_category_runs("L_blue", {"block_px": 36, "connector_px": 5}) == {
+        "x_runs": (36, 5, 36, 5, 36),
+        "y_runs": (36, 5, 36),
+    }
+
+
+def test_runs_cache_keeps_different_geometry_apart():
+    """同类别不同 runs 不串缓存：metadata 与紧边框核都按线段做键。"""
+    metadata_ideal = build_angle_foreground_metadata("square", 10, 2, angle_step=90.0)
+    metadata_wide = build_angle_foreground_metadata(
+        "square",
+        10,
+        2,
+        angle_step=90.0,
+        template_runs={"x_runs": (11, 2, 11)},
+    )
+    assert metadata_ideal[0.0]["fg_w"] == 22
+    assert metadata_wide[0.0]["fg_w"] == 24
+    assert metadata_ideal is not metadata_wide
 
 
 @pytest.mark.parametrize(
@@ -612,6 +667,9 @@ template_sizes:
     high:
       block_px: 37
       connector_px: 5
+      overrides:
+        L_blue:
+          x_runs: [36, 5, 36, 5, 38]
     low:
       block_px: 31.4
       connector_px: 4.6
@@ -619,14 +677,49 @@ template_sizes:
         encoding="utf-8",
     )
 
-    assert load_template_geometry(config_path=str(config_path)) == {
-        "block_px": 37,
-        "connector_px": 5,
+    geometry = load_template_geometry(config_path=str(config_path))
+    assert geometry["block_px"] == 37
+    assert geometry["connector_px"] == 5
+    # 被覆盖的类别用写死的线段（未覆盖方向回落理想值），未列出类别整类走理想展开。
+    assert geometry["runs"]["L_blue"] == {
+        "x_runs": (36, 5, 36, 5, 38),
+        "y_runs": (37, 5, 37),
     }
-    assert load_template_geometry(profile="low", config_path=str(config_path)) == {
-        "block_px": 31,
-        "connector_px": 5,
+    assert geometry["runs"]["L_yellow"] == {
+        "x_runs": (37, 5, 37, 5, 37),
+        "y_runs": (37, 5, 37),
     }
+    assert geometry["runs"]["line"] == {
+        "x_runs": (37, 5, 37, 5, 37, 5, 37),
+        "y_runs": (37,),
+    }
+
+    low = load_template_geometry(profile="low", config_path=str(config_path))
+    assert low["block_px"] == 31
+    assert low["connector_px"] == 5
+    assert low["runs"]["square"] == {"x_runs": (31, 5, 31), "y_runs": (31, 5, 31)}
+
+
+def test_load_template_geometry_without_overrides_expands_ideal_runs(tmp_path):
+    config_path = tmp_path / "template_config.yaml"
+    config_path.write_text(
+        """
+template_sizes:
+  active_profile: high
+  profiles:
+    high:
+      block_px: 36
+      connector_px: 5
+""",
+        encoding="utf-8",
+    )
+
+    geometry = load_template_geometry(config_path=str(config_path))
+    # 没有 overrides 时返回值仍可整包对比：runs 就是理想展开，兼容旧消费方。
+    assert geometry["runs"]["square"] == {"x_runs": (36, 5, 36), "y_runs": (36, 5, 36)}
+    assert resolve_category_runs("square", {"block_px": 36, "connector_px": 5}) == (
+        geometry["runs"]["square"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -648,6 +741,50 @@ template_sizes:
     high:
       block_px: 37
       connector_px: 0
+""",
+        """
+template_sizes:
+  active_profile: high
+  profiles:
+    high:
+      block_px: 37
+      connector_px: 5
+      overrides:
+        L_bluee:
+          x_runs: [36, 5, 36, 5, 38]
+""",
+        """
+template_sizes:
+  active_profile: high
+  profiles:
+    high:
+      block_px: 37
+      connector_px: 5
+      overrides:
+        L_blue:
+          x_runs: [36, 5, 36]
+""",
+        """
+template_sizes:
+  active_profile: high
+  profiles:
+    high:
+      block_px: 37
+      connector_px: 5
+      overrides:
+        line:
+          y_runs: [0]
+""",
+        """
+template_sizes:
+  active_profile: high
+  profiles:
+    high:
+      block_px: 37
+      connector_px: 5
+      overrides:
+        square:
+          未知字段: [1, 2, 3]
 """,
     ],
 )

@@ -10,10 +10,11 @@ from .kernels_create import (
     compute_screened_input_padding,
     create_rotation_kernels,
     create_screened_kernels,
-    get_template_rect_size,
+    normalize_template_runs,
     select_screen_angles,
     show_all_kernels_grid,
     show_kernel,
+    template_rect_size_from_runs,
 )
 
 
@@ -156,11 +157,13 @@ def _match_rect_screened(
     screening_config,
     debug_output,
     timing_output,
+    template_runs=None,
 ):
     """高位尺寸筛角 + 紧边框模板 + 无 padding 卷积的快速匹配。
 
     输入 Mask 前景宽高先筛出候选角度，候选不足或尺寸非法时抛出
     ScreenedMatchFallbackError 由调用方回退旧路径；GPU 运行错误不在此捕获。
+    template_runs 缺省时按 block_px/connector_px 理想展开。
     """
     if image is None or getattr(image, "ndim", 0) != 2 or image.size == 0:
         raise ScreenedMatchFallbackError("输入 Mask 为空或不是二维图")
@@ -179,7 +182,9 @@ def _match_rect_screened(
     minimum_translation_margin_px = int(screening_config.get("minimum_translation_margin_px", 4))
 
     screen_started_at = time.perf_counter() if timing_output is not None else None
-    metadata = build_angle_foreground_metadata(category, block_px, connector_px)
+    metadata = build_angle_foreground_metadata(
+        category, block_px, connector_px, template_runs=template_runs
+    )
     candidates, tolerance_used = select_screen_angles(
         metadata,
         mask_w,
@@ -203,6 +208,7 @@ def _match_rect_screened(
         candidates,
         device=device,
         safety_margin_px=kernel_safety_margin_px,
+        template_runs=template_runs,
     )
     _finish_timing_stage(timing_output, "候选模板生成", template_started_at, device)
     kernels = prepared["kernels"]
@@ -252,7 +258,9 @@ def _match_rect_screened(
     center_y = out_y + anchor_y - pad_info["pad_top"]
     start_x = out_x - pad_info["pad_left"]
     start_y = out_y - pad_info["pad_top"]
-    rect_size = get_template_rect_size(category, block_px, connector_px)
+    rect_size = template_rect_size_from_runs(
+        *normalize_template_runs(category, template_runs, block_px, connector_px)
+    )
     rect = ((float(center_x), float(center_y)), rect_size, -1.0 * positions["angle"])
     _finish_timing_stage(timing_output, "匹配收尾", postprocess_started_at, device)
 
@@ -388,6 +396,7 @@ def get_rect(
     timing_output=None,
     prepared_templates=None,
     screening_config=None,
+    template_runs=None,
 ):
     screening_enabled = (
         screening_config is not None
@@ -409,6 +418,7 @@ def get_rect(
                 screening_config,
                 debug_output,
                 timing_output,
+                template_runs=template_runs,
             )
         except ScreenedMatchFallbackError as fallback:
             if debug_output is not None:
@@ -429,6 +439,7 @@ def get_rect(
             angle_center=angle_center,
             angle_window=angle_window,
             angle_values=angle_values,
+            template_runs=template_runs,
         )
         _finish_timing_stage(timing_output, "模板生成", template_started_at, device)
     else:
@@ -469,7 +480,9 @@ def get_rect(
     center = (positions['x'] + offset_x, positions['y'] + offset_y)  # 注意：OpenCV 用 (x, y)
 
     # 矩形尺寸由子块和连接处像素计算，不再从旧外接矩形标定结果读取。
-    rect_size = get_template_rect_size(category, block_px, connector_px)
+    rect_size = template_rect_size_from_runs(
+        *normalize_template_runs(category, template_runs, block_px, connector_px)
+    )
 
     # 构造 rotated rect
     rect = (center, rect_size, -1*positions['angle'])#这个opencv顺时针转是正的,模版逆时针是正的

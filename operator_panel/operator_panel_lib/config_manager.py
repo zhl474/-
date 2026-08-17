@@ -101,6 +101,12 @@ def _nested(data, path):
 
 
 FIELD_OVERRIDES = {
+    "camera.rgb_camera.auto_exposure": {"label": "彩色自动曝光"},
+    "camera.rgb_camera.exposure": {"label": "彩色曝光", "risk": "warning"},
+    "camera.rgb_camera.gain": {"label": "彩色增益", "risk": "warning"},
+    "camera.depth_camera.auto_exposure": {"label": "深度自动曝光"},
+    "camera.depth_camera.exposure": {"label": "深度曝光(μs)", "risk": "warning"},
+    "camera.depth_camera.gain": {"label": "深度增益", "risk": "warning"},
     "execution.shooting_pose": {
         "label": "高位拍摄位姿", "unit": "mm / °", "risk": "danger",
         "description": "顺序固定为 X、Y、Z、R、P、YAW，保存前必须确认现场安全。",
@@ -137,6 +143,12 @@ FIELD_OVERRIDES = {
     },
     "execution.motion.place_lift_blend_radius_mm": {
         "label": "摆放后抬升圆滑半径", "risk": "danger", "unit": "mm",
+    },
+    "execution.motion.final_blow_hold_sec": {
+        "label": "最后喷气保持时长", "risk": "warning", "unit": "s", "min": 0,
+    },
+    "execution.servo.sample_complete_ratio": {
+        "label": "静止采样完整比例", "risk": "warning", "min": 0, "max": 1,
     },
     "execution.tool_motor.initial_angle_deg": {
         "label": "舵机初始角度", "unit": "°", "risk": "warning", "min": 0, "max": 360,
@@ -282,6 +294,43 @@ FIELD_OVERRIDES = {
     },
     "perception.high_template_match.legacy_fallback_enabled": {
         "label": "尺寸失败回退慢匹配",
+    },
+    "perception.block_recognition": {
+        "label": "高位识别链选择",
+    },
+    "perception.block_recognition.mode": {
+        "label": "识别模式",
+        "options": ["v1", "v2", "shadow"],
+    },
+    "perception.block_recognition.fallback_to_v1": {
+        "label": "V2 失败自动回退 V1",
+    },
+    "perception.block_recognition.v2": {
+        "label": "V2 边缘模板匹配",
+    },
+    "perception.block_recognition.v2.angle_step_deg": {
+        "label": "角度采样步进", "unit": "°",
+    },
+    "perception.block_recognition.v2.canny_low": {
+        "label": "Canny 低阈值",
+    },
+    "perception.block_recognition.v2.canny_high": {
+        "label": "Canny 高阈值",
+    },
+    "perception.block_recognition.v2.gaussian_ksize": {
+        "label": "高斯核尺寸",
+    },
+    "perception.block_recognition.v2.distance_cap_px": {
+        "label": "距离场截断", "unit": "px",
+    },
+    "perception.block_recognition.v2.crop_margin_px": {
+        "label": "检测框外扩", "unit": "px",
+    },
+    "perception.block_recognition.v2.kernel_margin_px": {
+        "label": "核画布边距", "unit": "px",
+    },
+    "perception.block_recognition.v2.search_margin_px": {
+        "label": "平移搜索余量", "unit": "px",
     },
     "perception.calibration_depth": {
         "label": "深度标定",
@@ -743,6 +792,12 @@ class ConfigManager:
         for key in ("max_iter", "success_stable_frames", "max_missed_frames"):
             _strict_integer(servo[key], f"servo.{key}", positive=True)
         _strict_integer(servo["post_success_sample_frames"], "servo.post_success_sample_frames", nonnegative=True)
+        if "sample_complete_ratio" in servo:
+            ratio = _finite_number(servo["sample_complete_ratio"], "servo.sample_complete_ratio", positive=True)
+            if ratio > 1:
+                raise ConfigError("servo.sample_complete_ratio 必须在 (0, 1] 之间")
+        if "final_blow_hold_sec" in motion:
+            _finite_number(motion["final_blow_hold_sec"], "motion.final_blow_hold_sec", nonnegative=True)
         motor = _require_mapping(_nested(data, "tool_motor"), "tool_motor")
         initial = _finite_number(motor["initial_angle_deg"], "tool_motor.initial_angle_deg")
         lower = _finite_number(motor["lower_margin_deg"], "tool_motor.lower_margin_deg")
@@ -864,6 +919,40 @@ class ConfigManager:
                 "high_template_match.relaxed_size_tolerance_px 必须大于等于 size_tolerance_px"
             )
 
+        recognition = _require_mapping(
+            _nested(data, "block_recognition"), "block_recognition"
+        )
+        if recognition["mode"] not in ("v1", "v2", "shadow"):
+            raise ConfigError("block_recognition.mode 只能是 v1 / v2 / shadow")
+        if not isinstance(recognition["fallback_to_v1"], bool):
+            raise ConfigError("block_recognition.fallback_to_v1 必须是布尔值")
+        edge_v2 = _require_mapping(
+            recognition.get("v2", {}), "block_recognition.v2"
+        )
+        _finite_number(
+            edge_v2["angle_step_deg"],
+            "block_recognition.v2.angle_step_deg",
+            positive=True,
+        )
+        _finite_number(
+            edge_v2["distance_cap_px"],
+            "block_recognition.v2.distance_cap_px",
+            positive=True,
+        )
+        for key in ("canny_low", "canny_high"):
+            _finite_number(edge_v2[key], f"block_recognition.v2.{key}", nonnegative=True)
+        if edge_v2["canny_high"] <= edge_v2["canny_low"]:
+            raise ConfigError("block_recognition.v2.canny_high 必须大于 canny_low")
+        gaussian_ksize = _strict_integer(
+            edge_v2["gaussian_ksize"],
+            "block_recognition.v2.gaussian_ksize",
+            positive=True,
+        )
+        if gaussian_ksize % 2 == 0:
+            raise ConfigError("block_recognition.v2.gaussian_ksize 必须是奇数")
+        for key in ("crop_margin_px", "kernel_margin_px", "search_margin_px"):
+            _strict_integer(edge_v2[key], f"block_recognition.v2.{key}", nonnegative=True)
+
         block_servo = _require_mapping(_nested(data, "block_servo"), "block_servo")
         for key in (
             "search_radius_px", "fallback_search_radius_px", "boundary_guard_px",
@@ -951,6 +1040,21 @@ class ConfigManager:
         for profile, values in sizes["profiles"].items():
             _strict_integer(values["block_px"], f"template_sizes.profiles.{profile}.block_px", positive=True)
             _strict_integer(values["connector_px"], f"template_sizes.profiles.{profile}.connector_px", positive=True)
+            overrides = values.get("overrides")
+            if overrides is None:
+                continue
+            _require_mapping(overrides, f"template_sizes.profiles.{profile}.overrides")
+            for category, override in overrides.items():
+                context = f"template_sizes.profiles.{profile}.overrides.{category}"
+                _require_mapping(override, context)
+                for key in ("x_runs", "y_runs"):
+                    runs = override.get(key)
+                    if runs is None:
+                        continue
+                    if not isinstance(runs, list) or not runs or len(runs) % 2 == 0:
+                        raise ConfigError(f"{context}.{key} 必须是奇数长度的非空整数列表")
+                    for index, value in enumerate(runs):
+                        _strict_integer(value, f"{context}.{key}[{index}]", positive=True)
         categories = _nested(data, "color_segmentation.categories")
         color = _nested(data, "color_segmentation")
         for key in ("seed_search_half_size", "seed_patch_size", "seed_stride"):

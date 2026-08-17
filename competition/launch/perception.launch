@@ -27,6 +27,7 @@
     <param name="save_top_surface_mask_vis" value="true"/>
     <param name="top_surface_mask_vis_path" value="$(arg debug_output_dir)/方块上表面掩码.jpg"/>
     <param name="high_template_match_debug_path" value="$(arg debug_output_dir)/高位方块模板匹配结果.jpg"/>
+    <param name="high_template_match_v2_shadow_debug_path" value="$(arg debug_output_dir)/高位方块V2shadow对比.jpg"/>
     <param name="visual_board_grid_debug_path" value="$(arg debug_output_dir)/托盘格点粗定位.jpg"/>
   </node>
 </launch>

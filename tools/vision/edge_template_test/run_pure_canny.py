@@ -27,6 +27,7 @@ import torch.nn.functional as F
 from image_process_lib.template_match.kernels_create import (
     ROTATION_TOTAL_ANGLE,
     build_angle_foreground_metadata,
+    resolve_category_runs,
 )
 from image_process_lib.template_config import load_template_geometry
 import oriented_chamfer_v1 as v1
@@ -117,7 +118,11 @@ def main():
 
     t0 = time.perf_counter()
     for cat in set(ROTATION_TOTAL_ANGLE):
-        meta[cat] = build_angle_foreground_metadata(cat, bpp, cpp, ANGLE_STEP)
+        # 按类别 overrides 的解析结果：template_config.yaml 里写了该类线段则生效。
+        meta[cat] = build_angle_foreground_metadata(
+            cat, bpp, cpp, ANGLE_STEP,
+            template_runs=resolve_category_runs(cat, geo),
+        )
     meta_ms = (time.perf_counter() - t0) * 1000.0
 
     yolo = YOLO(v1.DETECTION_MODEL_PATH)

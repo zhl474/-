@@ -221,6 +221,34 @@ class HighPixelToTcpLocalizer:
         """当前固定 TCP Z 常数；None 表示使用标定 yaml 的 z_plane。"""
         return None if self._fixed_tcp_z_mm is None else dict(self._fixed_tcp_z_mm)
 
+    def update_dynamic_bounds(
+        self,
+        minimum_tcp_z_mm: Optional[float] = None,
+        safety_xy_offset: Optional[Sequence[float]] = None,
+        shooting_pose: Optional[Sequence[float]] = None,
+    ) -> None:
+        """轮间热更新来自 execution.yaml / visual_servo.yaml 的动态边界。
+
+        标定 yaml 与 perception.yaml 的固定 Z 常数不在此刷新，仍随节点重启生效。
+        """
+        if minimum_tcp_z_mm is not None:
+            if (
+                isinstance(minimum_tcp_z_mm, bool)
+                or not np.isfinite(minimum_tcp_z_mm)
+                or minimum_tcp_z_mm <= 0.0
+            ):
+                raise ValueError("minimum_tcp_z_mm 必须是大于 0 的有限数值")
+            self._tcp_min_xyz[2] = float(minimum_tcp_z_mm)
+        if safety_xy_offset is not None:
+            self._safety_xy_offset = _finite_vector(
+                safety_xy_offset,
+                2,
+                "safety_xy_offset",
+            )
+        if shooting_pose is not None:
+            shooting = _finite_vector(shooting_pose, 6, "高位拍摄位姿")
+            self._shooting_rpy = shooting[3:6].copy()
+
     def calibration_summary(self, subject: str) -> dict:
         """只读暴露标定元信息，供定位全景导出留档。"""
         calibration = self._subject_calibration(subject, (0.0, 0.0))

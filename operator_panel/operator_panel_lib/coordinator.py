@@ -1800,7 +1800,10 @@ class OperationCoordinator:
         return scopes
 
     def _apply_restart(self, scopes):
-        scopes = set(scopes)
+        # round 作用域的配置由节点在下一轮服务调用时自动重读，不参与重启。
+        scopes = {scope for scope in scopes if scope != "round"}
+        if not scopes:
+            return
         process = self.supervisor.snapshot()
         hardware_info = process.get("hardware", {})
         hardware_running = hardware_info.get("running", False)
@@ -1868,7 +1871,7 @@ class OperationCoordinator:
                     self._state["config"]["pending_restart"] = sorted(pending)
                     self._state["config"]["files"] = self.config_manager.list_configs()
                     self._invalidate_recognition_locked("配置修改后识别结果已失效")
-            if payload.get("apply"):
+            if payload.get("apply") and scope != "round":
                 try:
                     self._apply_restart({scope})
                 except Exception as exc:
@@ -1904,7 +1907,7 @@ class OperationCoordinator:
                 self._state["config"]["pending_restart"] = sorted(pending)
                 self._state["config"]["files"] = self.config_manager.list_configs()
                 self._invalidate_recognition_locked("恢复配置后识别结果已失效")
-            if payload.get("apply"):
+            if payload.get("apply") and scope != "round":
                 try:
                     self._apply_restart({scope})
                 except Exception as exc:

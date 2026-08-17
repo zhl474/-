@@ -33,6 +33,7 @@ add_service_files(FILES
   DetectBoardOffset.srv
   GetOperatorPrompt.srv
   RespondOperatorPrompt.srv
+  YoloPreview.srv
 )
 generate_messages()
 

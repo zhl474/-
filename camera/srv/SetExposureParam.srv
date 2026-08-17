@@ -1,0 +1,10 @@
+# 运行时设置相机曝光/增益参数（流不断、不重连）
+# sensor: "rgb" 或 "depth"
+# key: "auto_exposure" | "exposure" | "gain"（auto_exposure 用 0/1 表示关/开）
+string sensor
+string key
+int32 value
+---
+bool ok
+int32 applied
+string message

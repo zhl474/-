@@ -31,6 +31,7 @@ class ExecutionConfig:
     minimum_tcp_z_mm: float
     pick_rotate_safe_lift_mm: float
     pick_safe_z_timeout_sec: float
+    final_blow_hold_sec: float
     timing_debug: bool
     block_error_threshold_px: float
     tray_error_threshold_px: float
@@ -41,6 +42,7 @@ class ExecutionConfig:
     post_success_sample_frames: int
     max_missed_frames: int
     settle_sec: float
+    sample_complete_ratio: float
     initial_motor_angle_deg: float
     motor_velocity_deg_per_sec: float
     motor_lower_margin_deg: float
@@ -179,6 +181,10 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
             motion["pick_safe_z_timeout_sec"],
             "motion.pick_safe_z_timeout_sec",
         ),
+        final_blow_hold_sec=_nonnegative_finite_float(
+            motion.get("final_blow_hold_sec", 1.0),
+            "motion.final_blow_hold_sec",
+        ),
         timing_debug=bool(servo.get("timing_debug", False)),
         block_error_threshold_px=block_error_threshold_px,
         tray_error_threshold_px=tray_error_threshold_px,
@@ -192,6 +198,10 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         ),
         max_missed_frames=int(servo["max_missed_frames"]),
         settle_sec=float(servo["settle_sec"]),
+        sample_complete_ratio=_positive_finite_float(
+            servo.get("sample_complete_ratio", 0.8),
+            "servo.sample_complete_ratio",
+        ),
         initial_motor_angle_deg=float(motor["initial_angle_deg"]),
         motor_velocity_deg_per_sec=float(motor["velocity_deg_per_sec"]),
         motor_lower_margin_deg=float(motor["lower_margin_deg"]),
@@ -206,6 +216,8 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         config.minimum_tcp_z_mm,
         config.pick_rotate_safe_lift_mm,
         config.pick_safe_z_timeout_sec,
+        config.final_blow_hold_sec,
+        config.sample_complete_ratio,
         config.block_error_threshold_px, config.tray_error_threshold_px,
         config.min_step_mm, config.max_step_mm, config.max_iter,
         config.success_stable_frames, config.post_success_sample_frames,
@@ -222,6 +234,8 @@ def load_execution_config(config_path: str = DEFAULT_EXECUTION_CONFIG_PATH) -> E
         raise ValueError("执行配置包含无效数值")
     if not 0 <= config.min_step_mm <= config.max_step_mm:
         raise ValueError("视觉伺服步长范围无效")
+    if not 0.0 < config.sample_complete_ratio <= 1.0:
+        raise ValueError("servo.sample_complete_ratio 必须在 (0, 1] 之间")
     if config.pick_retreat_blend_radius_mm > 1000.0:
         raise ValueError("motion.pick_retreat_blend_radius_mm 必须小于等于 1000 mm")
     if config.place_descent_blend_radius_mm > 1000.0:

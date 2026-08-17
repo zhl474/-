@@ -44,6 +44,28 @@ def test六份YAML完整读取且建立初始稳定预设(manager):
     assert template["schema"]["template_sizes.active_profile"]["options"] == ["high", "low"]
 
 
+def test模板尺寸按类别overrides结构校验(manager):
+    document = manager.get_config("template")
+
+    good = deepcopy(document["data"])
+    good["template_sizes"]["profiles"]["high"]["overrides"] = {
+        "L_blue": {"x_runs": [36, 5, 36, 5, 37], "y_runs": [36, 5, 36]},
+        "line": {"y_runs": [37]},
+    }
+    assert manager.validate_document("template", good)
+
+    for bad in (
+        {"L_blue": {"x_runs": [36, 5, 36, 5]}},
+        {"L_blue": {"x_runs": [36, 5, 36, 5, 0]}},
+        {"L_blue": {"x_runs": [36, 5, 36, 5, 36.5]}},
+        {"L_blue": "bad"},
+    ):
+        broken = deepcopy(document["data"])
+        broken["template_sizes"]["profiles"]["high"]["overrides"] = bad
+        with pytest.raises(ConfigError):
+            manager.validate_document("template", broken)
+
+
 def test最低安全高度只保留在执行配置(manager):
     execution = manager.get_config("execution")
     assert execution["data"]["motion"]["minimum_tcp_z_mm"] == 162.0

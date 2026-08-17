@@ -12,14 +12,17 @@ WRITABLE_CONFIG_FILES = {
     "execution": {
         "label": "比赛执行参数",
         "path": SRC_DIR / "competition" / "config" / "execution.yaml",
-        # execution.yaml 同时由感知节点、任务执行器和 controller 使用，修改后重启整套硬件/感知链路。
-        "restart_scope": "hardware",
+        # 任务执行器每轮识别重建、感知节点在每次 prepare_task 前、controller 在每次
+        # move_arm 前都会重读本文件，保存后下一轮识别即生效，无需重启节点。
+        # 终端 competition_node 内的执行器专有参数除外（该节点启动时读取一次）。
+        "restart_scope": "round",
         "description": "拍摄位姿、运动速度、抓放高度、视觉伺服和舵机边界",
     },
     "visual_servo": {
         "label": "视觉伺服映射",
         "path": SRC_DIR / "competition" / "config" / "visual_servo.yaml",
-        "restart_scope": "perception",
+        # 任务执行器每轮识别重建、感知节点在每次 prepare_task 前都会重读本文件。
+        "restart_scope": "round",
         "description": "像素到机械臂映射矩阵和相机到吸盘偏移",
     },
     "perception": {

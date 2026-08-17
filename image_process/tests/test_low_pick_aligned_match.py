@@ -182,6 +182,44 @@ def test_low_pick_recovery_all_categories(category):
     assert min(angle_diff, 360.0 - angle_diff) <= 1.0
 
 
+def test_low_pick_recovery_with_category_runs_overrides():
+    """低位链路按类别 overrides：渲染与匹配都用微调线段时，抓取点照常恢复。"""
+    category = "L_blue"
+    runs = {
+        "x_runs": (BLOCK_PX, CONNECTOR_PX, BLOCK_PX, CONNECTOR_PX, BLOCK_PX + 2),
+        "y_runs": (BLOCK_PX, CONNECTOR_PX, BLOCK_PX),
+    }
+    base = create_base_shape(category, BLOCK_PX, CONNECTOR_PX, template_runs=runs)
+    height, width = base.shape
+    length = int(math.ceil(math.sqrt(width ** 2 + height ** 2)))
+    if length % 2 == 0:
+        length += 1
+    theta = DRAW_THETA[category]
+    binary = (rotate_image(embed_in_center(base, length), theta) > 0.5).astype(np.uint8)
+    c = length // 2
+    rect = ((c, c), (sum(runs["x_runs"]), sum(runs["y_runs"])), -float(theta))
+    pick_canvas = coreect_LL_location(np.intp(cv2.boxPoints(rect)), binary, rect)
+
+    center_x, center_y = 160.0, 120.0
+    x1 = int(round(center_x - pick_canvas[0]))
+    y1 = int(round(center_y - pick_canvas[1]))
+    rgb = load_color_segmentation_config(category)["rgb"]
+    bgr = (rgb[2], rgb[1], rgb[0])
+    image = np.full((240, 320, 3), 255, dtype=np.uint8)
+    image[y1:y1 + length, x1:x1 + length][binary > 0] = bgr
+
+    kwargs = dict(LOW_KWARGS)
+    kwargs["template_geometry"] = {
+        "block_px": BLOCK_PX,
+        "connector_px": CONNECTOR_PX,
+        "runs": {category: runs},
+    }
+    result = detect_block_with_high_prior_roi(image, category=category, **kwargs)
+    assert result["found"] is True
+    assert abs(result["px"] - center_x) <= 1.0
+    assert abs(result["py"] - center_y) <= 1.0
+
+
 @pytest.mark.parametrize("category", ["L_yellow", "L_blue"])
 def test_l_shape_pick_at_center_stays_inside_roi(category):
     image, expected_pick = _make_low_image(category, DRAW_THETA[category], (0, 0))

@@ -36,7 +36,7 @@ from image_process_lib.depth_rough_localization import DepthRoughLocalizer  # no
 
 # ----------------------------- 直接运行配置 -----------------------------
 # 输入文件：留空 = 自动取输出目录里最新的 高位定位全景_*.json
-INPUT_PATH = ""
+INPUT_PATH = "/home/zhl/桌面/高位定位全景_标定模式_2026-08-17_18-09-17.json"
 # 输出目录（与 image_node 的 ~localization_panorama_dir 保持一致）
 PANORAMA_DIR = "/home/zhl/桌面"
 # 配对文件（可选）：正式+标定各一份时填另一份路径做逐点对比；留空跳过

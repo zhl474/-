@@ -2,6 +2,13 @@ import os
 
 import yaml
 
+from image_process_lib.template_match.kernels_create import (
+    TETRIS_BLOCKS,
+    category_grid_counts,
+    expand_ideal_runs,
+    validate_runs,
+)
+
 
 PACKAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC_DIR = os.path.abspath(os.path.join(PACKAGE_DIR, ".."))
@@ -70,8 +77,58 @@ def _read_required_positive_number(item, key, context):
     return number
 
 
+def _load_profile_runs(profile_name, item, block_px, connector_px):
+    """解析 profile 的按类别 overrides，与理想展开合并成全类别 runs 映射。
+
+    overrides 里没写的类别或方向回落 block_px/connector_px 理想值；
+    类别名、字段名、段数、正数性在这里硬校验，拼错直接报错。
+    """
+    overrides = item.get("overrides")
+    if overrides is None:
+        overrides = {}
+    if not isinstance(overrides, dict):
+        raise ValueError(f"模板几何配置 {profile_name} 的 overrides 必须是字典")
+    unknown = sorted(str(name) for name in overrides if name not in TETRIS_BLOCKS)
+    if unknown:
+        raise ValueError(
+            f"模板几何配置 {profile_name} 的 overrides 含未知类别: {unknown}，"
+            f"合法类别: {sorted(TETRIS_BLOCKS)}"
+        )
+    runs = {}
+    for category in TETRIS_BLOCKS:
+        grid_w, grid_h = category_grid_counts(category)
+        ideal_x = tuple(expand_ideal_runs(grid_w, block_px, connector_px))
+        ideal_y = tuple(expand_ideal_runs(grid_h, block_px, connector_px))
+        override = overrides.get(category)
+        if override is None:
+            runs[category] = {"x_runs": ideal_x, "y_runs": ideal_y}
+            continue
+        if not isinstance(override, dict):
+            raise ValueError(
+                f"模板几何配置 {profile_name} 的 overrides.{category} 必须是字典"
+            )
+        unexpected = sorted(str(key) for key in override if key not in ("x_runs", "y_runs"))
+        if unexpected:
+            raise ValueError(
+                f"模板几何配置 {profile_name} 的 overrides.{category} 含未知字段: {unexpected}"
+            )
+        x_runs = override.get("x_runs")
+        y_runs = override.get("y_runs")
+        runs[category] = {
+            "x_runs": validate_runs(category, "x", ideal_x if x_runs is None else x_runs),
+            "y_runs": validate_runs(category, "y", ideal_y if y_runs is None else y_runs),
+        }
+    return runs
+
+
 def load_template_geometry(profile=None, config_path=TEMPLATE_CONFIG_PATH):
-    """读取模板几何参数，返回 {"block_px": 子块像素, "connector_px": 连接处像素}。"""
+    """读取模板几何参数。
+
+    返回 {"block_px": 子块像素, "connector_px": 连接处像素,
+    "runs": {类别: {"x_runs": (...), "y_runs": (...)}}}，runs 已把按类别
+    overrides 与理想展开合并成全部 7 类；消费方可用
+    kernels_create.resolve_category_runs 按类别取线段。
+    """
     data = load_template_config(config_path)
     template_sizes = data["template_sizes"]
     if not isinstance(template_sizes, dict):
@@ -91,9 +148,12 @@ def load_template_geometry(profile=None, config_path=TEMPLATE_CONFIG_PATH):
     if not isinstance(item, dict):
         raise ValueError(f"模板几何配置 {profile_name} 必须是字典")
 
+    block_px = _read_positive_pixel(item, "block_px", profile_name)
+    connector_px = _read_positive_pixel(item, "connector_px", profile_name)
     return {
-        "block_px": _read_positive_pixel(item, "block_px", profile_name),
-        "connector_px": _read_positive_pixel(item, "connector_px", profile_name),
+        "block_px": block_px,
+        "connector_px": connector_px,
+        "runs": _load_profile_runs(profile_name, item, block_px, connector_px),
     }
 
 

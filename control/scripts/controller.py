@@ -359,8 +359,32 @@ class ControlNode:
 
         raise RuntimeError("ROS 正在关闭，停止等待机械臂停稳")
 
+    def _refresh_minimum_tcp_z_mm(self):
+        """每次运动前重读唯一执行配置中的 TCP 最低安全高度。
+
+        控制台修改 execution.yaml 后无需重启硬件节点，下一次运动即按新安全限校验；
+        读取失败时保留上一个有效值，安全限不能因配置文件异常而放空。
+        """
+        try:
+            value = _load_minimum_tcp_z_mm()
+        except Exception as exc:
+            rospy.logerr(
+                "重读 TCP 最低安全高度失败，沿用上一有效值 %.3f mm: %s",
+                self.minimum_tcp_z_mm,
+                exc,
+            )
+            return
+        if value != self.minimum_tcp_z_mm:
+            rospy.logwarn(
+                "TCP 最低安全高度已热更新：%.3f mm -> %.3f mm",
+                self.minimum_tcp_z_mm,
+                value,
+            )
+            self.minimum_tcp_z_mm = value
+
     def move_arm(self, request):
         self._ensure_runtime_state()
+        self._refresh_minimum_tcp_z_mm()
         with self.state_lock:
             if self.stop_latched:
                 return MoveArmResponse(

@@ -35,8 +35,43 @@ class FakeConfigManager:
 
 
 class FakeRos:
+    def __init__(self):
+        self.exposure_calls = []
+        self.yolo_preview_calls = []
+        self.exposure_error = None
+
     def image_bytes(self):
         return b"\xff\xd8\xff\xd9", "now"
+
+    def yolo_preview_snapshot(self):
+        return b"\xff\xd8\xff\xd9-yolo", "识别到 2 个: squarex2", "now"
+
+    def get_exposure_state(self):
+        if self.exposure_error:
+            raise self.exposure_error
+        return {
+            "rgb": {
+                "auto_exposure": True, "exposure": 156,
+                "exposure_min": 1, "exposure_max": 1665,
+                "gain": 16, "gain_min": 0, "gain_max": 255,
+            },
+            "depth": {
+                "auto_exposure": True, "exposure": 3000,
+                "exposure_min": 1, "exposure_max": 100000,
+                "gain": 1000, "gain_min": 16, "gain_max": 255,
+            },
+            "message": "查询成功",
+        }
+
+    def set_exposure_param(self, sensor, key, value):
+        self.exposure_calls.append((sensor, key, value))
+        if self.exposure_error:
+            raise self.exposure_error
+        return {"success": True, "applied": value, "message": "设置成功"}
+
+    def set_yolo_preview_enabled(self, enabled):
+        self.yolo_preview_calls.append(bool(enabled))
+        return {"enabled": bool(enabled)}
 
     def ros_system_snapshot(self):
         return {
@@ -119,6 +154,22 @@ def web(tmp_path):
     return app.test_client(), coordinator, bus, tmp_path
 
 
+@pytest.fixture
+def web_ros(tmp_path):
+    """同 web，但把 FakeRos 实例也交出来，供相机调参接口断言使用。"""
+    config = {
+        "server": {"host": "127.0.0.1", "port": 8765},
+        "output": {"debug_output_dir": str(tmp_path)},
+    }
+    ros = FakeRos()
+    app = create_app(
+        FakeCoordinator(), EventBus(), FakeConfigManager(), ros, config,
+        page_token="测试令牌", launch_log_dir=tmp_path / "运行日志",
+    )
+    app.config["TESTING"] = True
+    return app.test_client(), ros
+
+
 def url(path):
     return {"base_url": "http://127.0.0.1:8765"}
 
@@ -157,8 +208,10 @@ def test首页使用简洁标题并展示ROS身份(web):
     client, _coordinator, _bus, _tmp = web
     html = client.get("/", **url("/")).get_data(as_text=True)
 
-    for title in ("运行控制台", "手动控制", "参数中心", "只读配置与标定", "ROS 系统", "运行日志"):
+    for title in ("运行控制台", "手动控制", "参数中心", "只读配置与标定", "ROS 系统", "运行日志", "相机调参"):
         assert f'<h1 class="page-title">{title}</h1>' in html
+    assert 'data-view="camera-tune"' in html
+    assert 'id="ct-yolo-image"' in html
     assert "ROS 单臂俄罗斯方块控制台" in html
     assert "/camera/image_rect" in html
     assert "sensor_msgs/Image" in html
@@ -416,3 +469,80 @@ def test定位Z链路端点返回实时计算结构(web):
     assert all({"stage", "formula", "substitution", "value"} <= set(row) for row in payload["rows"])
     assert all({"name", "detail", "ok"} <= set(check) for check in payload["checks"])
     assert payload["notes"]
+
+
+def test相机曝光状态接口返回当前值和范围(web_ros):
+    client, ros = web_ros
+    response = client.get("/api/camera/exposure", **url("/api/camera/exposure"))
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["rgb"]["exposure"] == 156
+    assert payload["rgb"]["exposure_max"] == 1665
+    assert payload["depth"]["gain"] == 1000
+
+
+def test相机曝光状态接口在相机不可用时返回503(web_ros):
+    client, ros = web_ros
+    ros.exposure_error = RuntimeError("service [/camera/get_exposure_state] unavailable")
+    response = client.get("/api/camera/exposure", **url("/api/camera/exposure"))
+
+    assert response.status_code == 503
+    assert response.get_json()["code"] == "camera_unavailable"
+
+
+def test相机曝光设置接口校验参数并透传(web_ros):
+    client, ros = web_ros
+    ok = client.post(
+        "/api/camera/exposure", json={"sensor": "rgb", "key": "exposure", "value": 300},
+        headers=write_headers(), **url("/api/camera/exposure"),
+    )
+    assert ok.status_code == 200
+    assert ok.get_json()["applied"] == 300
+    assert ros.exposure_calls == [("rgb", "exposure", 300)]
+
+    for payload in (
+        {"sensor": "color", "key": "exposure", "value": 1},
+        {"sensor": "rgb", "key": "brightness", "value": 1},
+        {"sensor": "rgb", "key": "exposure", "value": True},
+        {"sensor": "rgb", "key": "exposure"},
+    ):
+        rejected = client.post(
+            "/api/camera/exposure", json=payload,
+            headers=write_headers(), **url("/api/camera/exposure"),
+        )
+        assert rejected.status_code == 400
+    assert ros.exposure_calls == [("rgb", "exposure", 300)]
+
+
+def test相机曝光设置接口在相机不可用时返回503(web_ros):
+    client, ros = web_ros
+    ros.exposure_error = RuntimeError("相机节点未启动")
+    response = client.post(
+        "/api/camera/exposure", json={"sensor": "depth", "key": "gain", "value": 32},
+        headers=write_headers(), **url("/api/camera/exposure"),
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["code"] == "camera_unavailable"
+
+
+def testYOLO预览开关接口透传启停(web_ros):
+    client, ros = web_ros
+    response = client.post(
+        "/api/camera/yolo-preview", json={"enabled": True},
+        headers=write_headers(), **url("/api/camera/yolo-preview"),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"enabled": True}
+    assert ros.yolo_preview_calls == [True]
+
+
+def testYOLO识别图接口返回缓存JPEG(web_ros):
+    client, _ros = web_ros
+    response = client.get("/api/images/yolo", **url("/api/images/yolo"))
+
+    assert response.status_code == 200
+    assert response.mimetype == "image/jpeg"
+    assert response.data == b"\xff\xd8\xff\xd9-yolo"

@@ -1,0 +1,18 @@
+# 查询彩色/深度相机当前曝光状态与可调范围（流保持运行）
+---
+bool ok
+string message
+bool rgb_auto_exposure
+int32 rgb_exposure
+int32 rgb_exposure_min
+int32 rgb_exposure_max
+int32 rgb_gain
+int32 rgb_gain_min
+int32 rgb_gain_max
+bool depth_auto_exposure
+int32 depth_exposure
+int32 depth_exposure_min
+int32 depth_exposure_max
+int32 depth_gain
+int32 depth_gain_min
+int32 depth_gain_max

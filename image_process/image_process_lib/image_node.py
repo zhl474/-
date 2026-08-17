@@ -24,6 +24,7 @@ from ultralytics import YOLO
 import image_process_lib.block_detection as block_detection_module
 import image_process_lib.block_scene_detector as block_scene_detector_module
 import image_process_lib.board_scene_detector as board_scene_detector_module
+from image_process_lib.template_match.kernels_create import ROTATION_TOTAL_ANGLE
 from image_process_lib.template_config import load_template_geometry
 from image_process_lib.board_scene_detector import (
     BOARD_COL_COUNT,
@@ -35,8 +36,10 @@ from image_process_lib.board_scene_detector import (
 from image_process_lib.board_servo_detector import detect_nearest_board_dot_in_roi
 from image_process_lib.block_category import BLOCK_CATEGORY_NAMES, normalize_category_name
 from image_process_lib.block_scene_detector import (
+    build_yolo_preview_summary,
     detect_blocks_in_image,
     detect_blocks_yolo,
+    draw_yolo_detections,
     process_block_detections,
     rematch_blocks_from_masks,
 )
@@ -44,6 +47,7 @@ from image_process_lib.block_servo_detector import detect_block_with_high_prior_
 from image_process_lib.advanced_planner import AdvancedPlanner
 from image_process_lib.debug_output import DebugVideoRecorder, save_image_to_path
 from image_process_lib.depth_rough_localization import DepthRoughLocalizer, fit_z_plane
+from image_process_lib.edge_template_detector import EdgeTemplateConfig, EdgeTemplateMatcher
 from image_process_lib.high_pixel_to_tcp_localizer import HighPixelToTcpLocalizer
 from image_process_lib.localization_panorama import (
     build_calibration_panorama_document,
@@ -113,6 +117,8 @@ from image_process.srv import (
     PrepareTaskResponse,
     RespondOperatorPrompt,
     RespondOperatorPromptResponse,
+    YoloPreview,
+    YoloPreviewResponse,
 )
 from camera.srv import GetStableWorldPoints
 
@@ -208,8 +214,6 @@ class ImageProcessor:
         perception_config_path = rospy.get_param("~perception_config", PERCEPTION_CONFIG_PATH)
         with open(perception_config_path, "r", encoding="utf-8") as config_file:
             perception_config = yaml.safe_load(config_file) or {}
-        with open(EXECUTION_CONFIG_PATH, "r", encoding="utf-8") as config_file:
-            execution_config = yaml.safe_load(config_file) or {}
         # 标定/正式模式由 launch 文件的 ~calibration_mode 参数决定，
         # 不再读取 execution.yaml 的 calibration_mode 开关。
         calibration_mode_value = rospy.get_param("~calibration_mode", False)
@@ -529,85 +533,30 @@ class ImageProcessor:
             "legacy_fallback_enabled": high_match_legacy_fallback_enabled,
         }
 
-        servo_config = execution_config.get("servo", {})
-        if not isinstance(servo_config, dict):
-            raise ValueError("servo 必须是字典")
-        visual_servo_enabled = servo_config.get("enabled", True)
-        if not isinstance(visual_servo_enabled, bool):
-            raise ValueError("servo.enabled 必须是 YAML 布尔值 true 或 false")
-        # 标定模式与任务节点保持一致，即使配置关闭也按闭环方式校验观察 TCP。
-        self.visual_servo_enabled = self.calibration_mode or visual_servo_enabled
+        block_recognition_config = perception_config.get("block_recognition", {})
+        if not isinstance(block_recognition_config, dict):
+            raise ValueError("block_recognition 必须是字典")
+        default_recognition_mode = str(
+            block_recognition_config.get("mode", "v1")
+        ).strip().lower()
+        if default_recognition_mode not in ("v1", "v2", "shadow"):
+            raise ValueError("block_recognition.mode 只能是 v1 / v2 / shadow")
+        self.block_recognition_default_mode = default_recognition_mode
+        self.block_recognition_fallback_to_v1 = bool(
+            block_recognition_config.get("fallback_to_v1", True)
+        )
+        self.edge_template_config = EdgeTemplateConfig.from_mapping(
+            block_recognition_config.get("v2", {})
+        )
+        # V2 匹配器懒加载：v1 模式下永不构建，保证默认行为与旧版完全一致。
+        self._edge_template_matcher = None
+        # shadow 对比图单独落盘，避免覆盖 V1 的高位模板匹配调试图。
+        self.high_template_match_v2_shadow_debug_path = rospy.get_param(
+            "~high_template_match_v2_shadow_debug_path",
+            os.path.join(DEFAULT_DEBUG_DIR, "高位方块V2shadow对比.jpg")
+        )
 
-        with open(VISUAL_SERVO_CONFIG_PATH, "r", encoding="utf-8") as config_file:
-            visual_servo_config = yaml.safe_load(config_file) or {}
-        if not isinstance(visual_servo_config, dict):
-            raise ValueError("visual_servo.yaml 必须是字典")
-        try:
-            camera_to_sucker_offset = np.asarray(
-                visual_servo_config.get("camera_to_sucker_offset_mm"),
-                dtype=float,
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError("camera_to_sucker_offset_mm 必须包含 2 个有限数值") from exc
-        if camera_to_sucker_offset.shape != (2,) or not np.all(
-            np.isfinite(camera_to_sucker_offset)
-        ):
-            raise ValueError("camera_to_sucker_offset_mm 必须包含 2 个有限数值")
-        self.high_tcp_safety_xy_offset = (
-            (0.0, 0.0)
-            if self.visual_servo_enabled
-            else tuple(float(value) for value in camera_to_sucker_offset)
-        )
-        self.camera_to_sucker_offset_mm = tuple(
-            float(value) for value in camera_to_sucker_offset
-        )
-        self.visual_servo_timing_debug = bool(
-            rospy.get_param(
-                "~visual_servo_timing_debug",
-                servo_config.get("timing_debug", False),
-            )
-        )
-        self.shooting_angle = [float(value) for value in execution_config["shooting_pose"]]
-        if len(self.shooting_angle) != 6 or not np.all(np.isfinite(self.shooting_angle)):
-            raise ValueError("shooting_pose 必须包含 6 个有限数值")
-        motion_config = execution_config.get("motion", {})
-        if not isinstance(motion_config, dict) or "minimum_tcp_z_mm" not in motion_config:
-            raise ValueError(
-                "execution.yaml 缺少唯一安全高度字段 motion.minimum_tcp_z_mm"
-            )
-        raw_minimum_tcp_z_mm = motion_config["minimum_tcp_z_mm"]
-        if isinstance(raw_minimum_tcp_z_mm, bool):
-            raise ValueError("minimum_tcp_z_mm 必须是大于 0 的有限数值")
-        try:
-            self.minimum_tcp_z_mm = float(raw_minimum_tcp_z_mm)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("minimum_tcp_z_mm 必须是大于 0 的有限数值") from exc
-        self.pick_surface_offset_mm = float(motion_config.get("pick_surface_offset_mm", 0.0))
-        self.pick_approach_clearance_mm = float(
-            motion_config.get("pick_approach_clearance_mm", 0.0)
-        )
-        self.arm_speed = float(motion_config.get("arm_speed", 0.0))
-        self.pick_approach_speed = float(
-            motion_config.get("pick_approach_speed", 0.0)
-        )
-        if not np.isfinite(self.minimum_tcp_z_mm) or self.minimum_tcp_z_mm <= 0.0:
-            raise ValueError("minimum_tcp_z_mm 必须是大于 0 的有限数值")
-        if not np.isfinite(self.pick_surface_offset_mm):
-            raise ValueError("pick_surface_offset_mm 必须是有限数值")
-        if (
-            not np.isfinite(self.pick_approach_clearance_mm)
-            or self.pick_approach_clearance_mm <= 0.0
-        ):
-            raise ValueError("pick_approach_clearance_mm 必须是大于 0 的有限数值")
-
-        motor_config = execution_config.get("tool_motor", {})
-        try:
-            self.initial_motor_angle_deg = float(motor_config["initial_angle_deg"])
-            self.motor_velocity_deg_per_sec = float(motor_config["velocity_deg_per_sec"])
-            self.motor_lower_margin_deg = float(motor_config["lower_margin_deg"])
-            self.motor_upper_margin_deg = float(motor_config["upper_margin_deg"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("tool_motor 配置缺失或格式无效") from exc
+        self._reload_dynamic_config()
 
         optimizer_config = perception_config.get("task_sequence_optimizer", {})
         if not isinstance(optimizer_config, dict):
@@ -1029,6 +978,11 @@ class ImageProcessor:
             RespondOperatorPrompt,
             self.respond_operator_prompt_service,
         )
+        self.yolo_preview_service_handle = rospy.Service(
+            "/perception/yolo_preview",
+            YoloPreview,
+            self.yolo_preview,
+        )
         rospy.on_shutdown(self.close_runtime_resources)
         rospy.loginfo("图像处理节点订阅去畸变彩图: %s", self.image_topic)
         rospy.loginfo("图像处理服务已启动")
@@ -1259,6 +1213,46 @@ class ImageProcessor:
                     return None
                 self.image_condition.wait(remaining_sec)
             return self.latest_image.copy()
+
+    def yolo_preview(self, request):
+        """相机调参视图的识别预览：取当前画面跑一次方块 YOLO，返回画框标注 JPEG。
+
+        与正式识别共用 prepare_task_lock，避免并发 GPU 推理；锁被识别/
+        任务占用时立即让路返回（预览是辅助功能，绝不阻塞正式流程）。
+        预览优先取比请求新的帧，取不到时退回缓存帧（预览用途允许旧帧）。
+        """
+        conf = float(request.conf) if request.conf and request.conf > 0.0 else 0.45
+        if not self.prepare_task_lock.acquire(timeout=0.2):
+            return YoloPreviewResponse(ok=False, message="正在识别或任务执行中，预览让路")
+        try:
+            image = self.get_image_snapshot_newer_than(rospy.Time.now())
+            if image is None:
+                image = self.latest_image
+            if image is None:
+                return YoloPreviewResponse(
+                    ok=False,
+                    message="没有可用图像（相机流未启动？）",
+                )
+            try:
+                detections = detect_blocks_yolo(image, self.model, conf=conf)
+                annotated = draw_yolo_detections(image, detections)
+                encoded, jpeg = cv2.imencode(
+                    ".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 80]
+                )
+                if not encoded:
+                    raise RuntimeError("JPEG 编码失败")
+                return YoloPreviewResponse(
+                    ok=True,
+                    message="识别成功",
+                    jpeg=jpeg.tobytes(),
+                    summary=build_yolo_preview_summary(detections),
+                    block_count=len(detections),
+                )
+            except Exception as exc:
+                rospy.logerr("YOLO 预览失败: %s", exc)
+                return YoloPreviewResponse(ok=False, message=f"YOLO 预览失败: {exc}")
+        finally:
+            self.prepare_task_lock.release()
 
     @staticmethod
     def make_high_localization_diagnostic(
@@ -1566,6 +1560,138 @@ class ImageProcessor:
         if not blocks:
             raise RuntimeError("高位没有识别到方块")
         return blocks, debug_image, geometry
+
+    def _block_recognition_mode(self):
+        """读取当前识别模式；rosparam 运行时覆盖 yaml 默认值，无需重启。
+
+        半初始化对象（测试直接 __new__ 构造）缺属性时按 v1 处理。
+        """
+        default_mode = getattr(self, "block_recognition_default_mode", "v1")
+        value = str(
+            rospy.get_param(
+                "~block_recognition_mode",
+                default_mode,
+            )
+        ).strip().lower()
+        if value not in ("v1", "v2", "shadow"):
+            rospy.logwarn("未知 block_recognition_mode=%s，本请求按 v1 处理", value)
+            return "v1"
+        return value
+
+    def _get_edge_template_matcher(self):
+        """首次使用时构建 V2 边缘模板匹配器（含全角度核，纯懒加载）。"""
+        if self._edge_template_matcher is None:
+            self._edge_template_matcher = EdgeTemplateMatcher(
+                load_template_geometry("high"),
+                self.edge_template_config,
+            )
+        return self._edge_template_matcher
+
+    def _detect_blocks_v2_automatic(self, image, allow_manual_correction=True, shadow_mode=False):
+        """V2 平行识别：YOLO 出框（可人工修正）后做 Canny 边缘模板匹配精定位。
+
+        px/py/theta 与 V1 同口径：非 L 类为旋转中心，L 类为方案A抓点，
+        theta 为正式流程等价角度，可直接复用部署的像素转 TCP 标定。
+        """
+        detections = detect_blocks_yolo(image, self.model)
+        if allow_manual_correction and getattr(
+            self, "yolo_manual_correction_enabled", False
+        ):
+            detections = self._run_yolo_manual_correction(image, detections)
+        blocks, debug_image = self._get_edge_template_matcher().detect_blocks(
+            image,
+            detections,
+        )
+        if not blocks:
+            raise RuntimeError("V2 高位没有识别到方块")
+        debug_path = (
+            self.high_template_match_v2_shadow_debug_path
+            if shadow_mode
+            else self.high_template_match_debug_path
+        )
+        self.save_experiment_debug_image(debug_path, debug_image)
+        return blocks
+
+    def _run_v2_shadow_compare(self, image, v1_blocks):
+        """shadow 模式：同一张图跑 V2 与 V1 逐块对比，只记录日志不影响结果。"""
+        try:
+            v2_blocks = self._detect_blocks_v2_automatic(
+                image,
+                allow_manual_correction=False,
+                shadow_mode=True,
+            )
+        except Exception as exc:
+            rospy.logwarn("V2 shadow 对比失败，已忽略：%s", exc)
+            return
+        rospy.loginfo(
+            "V2 shadow 对比开始：V1 %d 块，V2 %d 块",
+            len(v1_blocks),
+            len(v2_blocks),
+        )
+        remaining = list(v2_blocks)
+        position_diffs = []
+        angle_diffs = []
+        for v1_block in v1_blocks:
+            category = v1_block["category"]
+            candidates = [block for block in remaining if block["category"] == category]
+            if not candidates:
+                rospy.logwarn(
+                    "V2 shadow：V1 的 %s 块 (%.0f,%.0f) 在 V2 中没有同类别对应",
+                    category,
+                    v1_block["px"],
+                    v1_block["py"],
+                )
+                continue
+            nearest = min(
+                candidates,
+                key=lambda block: (
+                    (block["px"] - v1_block["px"]) ** 2
+                    + (block["py"] - v1_block["py"]) ** 2
+                ),
+            )
+            remaining.remove(nearest)
+            position_diff = math.hypot(
+                nearest["px"] - v1_block["px"],
+                nearest["py"] - v1_block["py"],
+            )
+            period = float(ROTATION_TOTAL_ANGLE.get(category, 360.0))
+            raw_angle_diff = abs(nearest["theta"] - float(v1_block["theta"])) % period
+            angle_diff = min(raw_angle_diff, period - raw_angle_diff)
+            position_diffs.append(position_diff)
+            angle_diffs.append(angle_diff)
+            rospy.loginfo(
+                "V2 shadow %s：V1(%.1f,%.1f,%.1f°) V2(%.1f,%.1f,%.1f°)"
+                " 位置差%.2fpx 角度差%.1f°",
+                category,
+                v1_block["px"],
+                v1_block["py"],
+                v1_block["theta"],
+                nearest["px"],
+                nearest["py"],
+                nearest["theta"],
+                position_diff,
+                angle_diff,
+            )
+        for orphan in remaining:
+            rospy.logwarn(
+                "V2 shadow 多出 V1 没有的 %s 块 (%.0f,%.0f)",
+                orphan["category"],
+                orphan["px"],
+                orphan["py"],
+            )
+        if position_diffs:
+            position_diffs.sort()
+            angle_diffs.sort()
+            count = len(position_diffs)
+            rospy.loginfo(
+                "V2 shadow 汇总：%d 对 | 位置差 中位%.2fpx 最大%.2fpx"
+                " | 角度差 中位%.1f° 最大%.1f°",
+                count,
+                position_diffs[count // 2],
+                position_diffs[-1],
+                angle_diffs[len(angle_diffs) // 2],
+                angle_diffs[-1],
+            )
 
     def _edit_and_rematch_blocks(self, image, blocks, geometry, debug_image):
         """按配置人工编辑 Mask，并返回使用编辑结果重匹配后的完整方块。"""
@@ -2674,6 +2800,123 @@ class ImageProcessor:
         )
         return block_targets, tray_targets
 
+    def _reload_dynamic_config(self):
+        """重读 execution.yaml 与 visual_servo.yaml 中参与运动链路的字段。
+
+        这些字段与任务执行器共享：控制台保存后无需重启感知节点，
+        下一轮 prepare_task 调用此方法即按新值执行。
+        全部校验通过后才写回 self，配置非法时不会留下半新半旧的状态。
+        """
+        with open(EXECUTION_CONFIG_PATH, "r", encoding="utf-8") as config_file:
+            execution_config = yaml.safe_load(config_file) or {}
+        if not isinstance(execution_config, dict):
+            raise ValueError("execution.yaml 顶层必须是字典")
+
+        servo_config = execution_config.get("servo", {})
+        if not isinstance(servo_config, dict):
+            raise ValueError("servo 必须是字典")
+        visual_servo_enabled = servo_config.get("enabled", True)
+        if not isinstance(visual_servo_enabled, bool):
+            raise ValueError("servo.enabled 必须是 YAML 布尔值 true 或 false")
+
+        with open(VISUAL_SERVO_CONFIG_PATH, "r", encoding="utf-8") as config_file:
+            visual_servo_config = yaml.safe_load(config_file) or {}
+        if not isinstance(visual_servo_config, dict):
+            raise ValueError("visual_servo.yaml 必须是字典")
+        try:
+            camera_to_sucker_offset = np.asarray(
+                visual_servo_config.get("camera_to_sucker_offset_mm"),
+                dtype=float,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("camera_to_sucker_offset_mm 必须包含 2 个有限数值") from exc
+        if camera_to_sucker_offset.shape != (2,) or not np.all(
+            np.isfinite(camera_to_sucker_offset)
+        ):
+            raise ValueError("camera_to_sucker_offset_mm 必须包含 2 个有限数值")
+
+        try:
+            shooting_angle = [float(value) for value in execution_config["shooting_pose"]]
+        except KeyError as exc:
+            raise ValueError("execution.yaml 缺少 shooting_pose") from exc
+        if len(shooting_angle) != 6 or not np.all(np.isfinite(shooting_angle)):
+            raise ValueError("shooting_pose 必须包含 6 个有限数值")
+        motion_config = execution_config.get("motion", {})
+        if not isinstance(motion_config, dict) or "minimum_tcp_z_mm" not in motion_config:
+            raise ValueError(
+                "execution.yaml 缺少唯一安全高度字段 motion.minimum_tcp_z_mm"
+            )
+        raw_minimum_tcp_z_mm = motion_config["minimum_tcp_z_mm"]
+        if isinstance(raw_minimum_tcp_z_mm, bool):
+            raise ValueError("minimum_tcp_z_mm 必须是大于 0 的有限数值")
+        try:
+            minimum_tcp_z_mm = float(raw_minimum_tcp_z_mm)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("minimum_tcp_z_mm 必须是大于 0 的有限数值") from exc
+        pick_surface_offset_mm = float(motion_config.get("pick_surface_offset_mm", 0.0))
+        pick_approach_clearance_mm = float(
+            motion_config.get("pick_approach_clearance_mm", 0.0)
+        )
+        arm_speed = float(motion_config.get("arm_speed", 0.0))
+        pick_approach_speed = float(
+            motion_config.get("pick_approach_speed", 0.0)
+        )
+        if not np.isfinite(minimum_tcp_z_mm) or minimum_tcp_z_mm <= 0.0:
+            raise ValueError("minimum_tcp_z_mm 必须是大于 0 的有限数值")
+        if not np.isfinite(pick_surface_offset_mm):
+            raise ValueError("pick_surface_offset_mm 必须是有限数值")
+        if (
+            not np.isfinite(pick_approach_clearance_mm)
+            or pick_approach_clearance_mm <= 0.0
+        ):
+            raise ValueError("pick_approach_clearance_mm 必须是大于 0 的有限数值")
+
+        motor_config = execution_config.get("tool_motor", {})
+        try:
+            initial_motor_angle_deg = float(motor_config["initial_angle_deg"])
+            motor_velocity_deg_per_sec = float(motor_config["velocity_deg_per_sec"])
+            motor_lower_margin_deg = float(motor_config["lower_margin_deg"])
+            motor_upper_margin_deg = float(motor_config["upper_margin_deg"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("tool_motor 配置缺失或格式无效") from exc
+
+        # 全部校验通过后一次性写回。
+        # 标定模式与任务节点保持一致，即使配置关闭也按闭环方式校验观察 TCP。
+        self.visual_servo_enabled = self.calibration_mode or visual_servo_enabled
+        self.high_tcp_safety_xy_offset = (
+            (0.0, 0.0)
+            if self.visual_servo_enabled
+            else tuple(float(value) for value in camera_to_sucker_offset)
+        )
+        self.camera_to_sucker_offset_mm = tuple(
+            float(value) for value in camera_to_sucker_offset
+        )
+        self.visual_servo_timing_debug = bool(
+            rospy.get_param(
+                "~visual_servo_timing_debug",
+                servo_config.get("timing_debug", False),
+            )
+        )
+        self.shooting_angle = shooting_angle
+        self.minimum_tcp_z_mm = minimum_tcp_z_mm
+        self.pick_surface_offset_mm = pick_surface_offset_mm
+        self.pick_approach_clearance_mm = pick_approach_clearance_mm
+        self.arm_speed = arm_speed
+        self.pick_approach_speed = pick_approach_speed
+        self.initial_motor_angle_deg = initial_motor_angle_deg
+        self.motor_velocity_deg_per_sec = motor_velocity_deg_per_sec
+        self.motor_lower_margin_deg = motor_lower_margin_deg
+        self.motor_upper_margin_deg = motor_upper_margin_deg
+
+        # 正式模式的 localizer 构造时固化了这些边界，轮间同步刷新；
+        # 标定模式的 DepthRoughLocalizer 依赖深度相机标定，仍随节点重启生效。
+        if getattr(self, "high_tcp_localizer", None) is not None:
+            self.high_tcp_localizer.update_dynamic_bounds(
+                minimum_tcp_z_mm=minimum_tcp_z_mm,
+                safety_xy_offset=self.high_tcp_safety_xy_offset,
+                shooting_pose=shooting_angle,
+            )
+
     def prepare_task(self, request):
         """串行执行高位准备，禁止并发弹出两个人工编辑窗口。"""
         prepare_lock = getattr(self, "prepare_task_lock", None)
@@ -2695,6 +2938,18 @@ class ImageProcessor:
 
     def _prepare_task_locked(self, request):
         """用同一高位图像快照完成托盘、方块识别与任务规划。"""
+        try:
+            self._reload_dynamic_config()
+        except (ValueError, KeyError, OSError, yaml.YAMLError) as exc:
+            rospy.logerr("重读 execution.yaml/visual_servo.yaml 失败: %s", exc)
+            return PrepareTaskResponse(
+                success=False,
+                task_count=0,
+                block_count=0,
+                tray_count=0,
+                message=f"运动配置重读失败，已中止本轮识别: {exc}",
+                layout_json="",
+            )
         self.task_targets = []
         self.last_board_layout = []
         self.board_grid_points = None
@@ -2735,8 +2990,26 @@ class ImageProcessor:
                     message = f"标定准备完成：方块 {block_count} 个，未识别到托盘，只采集方块"
             else:
                 self._detect_board_for_task(image)
-                raw_blocks, raw_debug_image, geometry = self._detect_blocks_automatic(image)
-                preliminary_blocks, cube_counts = self._summarize_detected_blocks(raw_blocks)
+                recognition_mode = self._block_recognition_mode()
+                v2_preliminary_blocks = None
+                if recognition_mode == "v2":
+                    try:
+                        v2_blocks = self._detect_blocks_v2_automatic(image)
+                        v2_preliminary_blocks, v2_cube_counts = (
+                            self._summarize_detected_blocks(v2_blocks)
+                        )
+                    except Exception as v2_exc:
+                        if not self.block_recognition_fallback_to_v1:
+                            raise
+                        rospy.logerr("V2 识别失败，本请求自动回退 V1：%s", v2_exc)
+                if v2_preliminary_blocks is not None:
+                    preliminary_blocks, cube_counts = (
+                        v2_preliminary_blocks,
+                        v2_cube_counts,
+                    )
+                else:
+                    raw_blocks, raw_debug_image, geometry = self._detect_blocks_automatic(image)
+                    preliminary_blocks, cube_counts = self._summarize_detected_blocks(raw_blocks)
                 if request.advanced:
                     layout, layout_message = self._load_layout_for_request(
                         request, cube_counts, preliminary_blocks
@@ -2763,19 +3036,25 @@ class ImageProcessor:
                     "初步",
                 )
 
-                final_blocks, final_debug_image = self._edit_and_rematch_blocks(
-                    image,
-                    raw_blocks,
-                    geometry,
-                    raw_debug_image,
-                )
-                self._save_high_block_debug_images(final_blocks, final_debug_image)
-                final_blocks, _final_counts = self._summarize_detected_blocks(final_blocks)
+                if v2_preliminary_blocks is not None:
+                    # V2 无 Mask，跳过 Mask 编辑与重匹配，最终结果即初步结果。
+                    final_blocks = preliminary_blocks
+                else:
+                    final_blocks, final_debug_image = self._edit_and_rematch_blocks(
+                        image,
+                        raw_blocks,
+                        geometry,
+                        raw_debug_image,
+                    )
+                    self._save_high_block_debug_images(final_blocks, final_debug_image)
+                    final_blocks, _final_counts = self._summarize_detected_blocks(final_blocks)
                 self._validate_high_task_safety(
                     final_blocks,
                     initial_safety_layout,
                     "最终",
                 )
+                if recognition_mode == "shadow":
+                    self._run_v2_shadow_compare(image, final_blocks)
 
                 observed_blocks = self._build_observed_blocks_for_task(
                     final_blocks,

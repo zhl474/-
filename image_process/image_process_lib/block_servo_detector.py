@@ -16,6 +16,8 @@ from image_process_lib.template_config import load_color_segmentation_config, lo
 from image_process_lib.template_match.kernels_create import (
     build_angle_values,
     create_pick_aligned_kernels,
+    normalize_template_runs,
+    resolve_category_runs,
 )
 from image_process_lib.template_match.template_match import get_rect, match_pick_aligned
 
@@ -93,13 +95,22 @@ def _make_debug_image(img_bgr):
     return np.copy(img_bgr)
 
 
-def _get_low_pick_templates(block_px, connector_px, category, angles, device, kernel_safety_margin_px):
+def _get_low_pick_templates(
+    block_px,
+    connector_px,
+    category,
+    angles,
+    device,
+    kernel_safety_margin_px,
+    template_runs=None,
+):
     """按设备、类别、几何、实际角度元组惰性生成并缓存抓取点对齐公共核。"""
+    x_runs, y_runs = normalize_template_runs(category, template_runs, block_px, connector_px)
     cache_key = (
         str(device),
         str(category),
-        int(block_px),
-        int(connector_px),
+        x_runs,
+        y_runs,
         tuple(round(float(angle), 6) for angle in angles),
         int(kernel_safety_margin_px),
     )
@@ -114,6 +125,7 @@ def _get_low_pick_templates(block_px, connector_px, category, angles, device, ke
         angles,
         device=device,
         safety_margin_px=kernel_safety_margin_px,
+        template_runs=template_runs,
     )
     _LOW_PICK_TEMPLATE_CACHE[cache_key] = prepared
     while len(_LOW_PICK_TEMPLATE_CACHE) > _LOW_PICK_TEMPLATE_CACHE_CAP:
@@ -469,6 +481,7 @@ def _attempt_legacy_slow(
     debug_image,
     debug_enabled,
     timing_info,
+    template_runs=None,
 ):
     """慢速兜底：在轴对齐 ROI 上用旧全方形核 + same-padding 匹配，不做任何旋转。"""
     roi_w = kernel_w + 2 * radius_px
@@ -520,6 +533,7 @@ def _attempt_legacy_slow(
         angle_window=angle_window,
         debug_output=match_debug_output,
         timing_output=timing_info,
+        template_runs=template_runs,
     )
     box = np.intp(cv2.boxPoints(rect))
     local_px, local_py = float(rect[0][0]), float(rect[0][1])
@@ -596,6 +610,8 @@ def detect_block_with_high_prior_roi(
         template_geometry = load_template_geometry(template_profile)
     block_px = template_geometry["block_px"]
     connector_px = template_geometry["connector_px"]
+    # 按类别 overrides 的解析结果；缺 runs 键时回落理想展开。
+    category_template_runs = resolve_category_runs(category, template_geometry)
     image_h, image_w = img_bgr.shape[:2]
     center_x, center_y = image_w / 2.0, image_h / 2.0
     high_theta_deg = float(high_theta_deg)
@@ -617,6 +633,7 @@ def detect_block_with_high_prior_roi(
     template_started_at = time.perf_counter() if timing_info is not None else None
     prepared, cache_status = _get_low_pick_templates(
         block_px, connector_px, category, angles, device, kernel_safety_margin_px,
+        template_runs=category_template_runs,
     )
     if timing_info is not None:
         timing_info["模板缓存"] = cache_status
@@ -760,6 +777,7 @@ def detect_block_with_high_prior_roi(
             debug_image,
             debug_enabled,
             timing_info,
+            template_runs=category_template_runs,
         )
         if legacy_info is None:
             fast_fail_reason = legacy_fail_reason or "慢速兜底失败"

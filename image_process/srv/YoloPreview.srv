@@ -1,0 +1,9 @@
+# YOLO 识别预览：取当前画面跑一次方块检测并返回画框标注图
+# conf <= 0 时使用默认置信度 0.45
+float32 conf
+---
+bool ok
+string message
+uint8[] jpeg
+string summary
+int32 block_count

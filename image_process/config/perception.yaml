@@ -68,6 +68,33 @@ high_template_match:
   # 尺寸筛选失败时是否使用当前全角度、same-padding 慢匹配。
   legacy_fallback_enabled: true
 
+# 高位方块识别链选择。V1 = YOLO 出框 + YOLO-Seg 分割 + 模板匹配（原链路，零改动）；
+# V2 = YOLO 出框 + Canny 距离场全角度边缘模板匹配（tools/vision/edge_template_test 已验证）。
+# px/py/theta 输出口径与 V1 一致（L 类同为方案A抓点），可复用已部署的像素转 TCP 标定。
+# mode 可被运行时私有参数覆盖：rosparam set /image_process_node/block_recognition_mode v1
+# 切换即时生效，无需重启节点；标定模式固定走 V1，不受此开关影响。
+block_recognition:
+  # v1     只跑旧识别（默认，行为与旧版完全一致）
+  # v2     跑 V2 边缘模板识别
+  # shadow 正式执行 V1 结果不变，同一张图同时跑 V2，日志逐块输出新旧偏差
+  mode: v2
+  # v2 识别异常或零方块时，同一请求内自动回退完整 V1 链（比赛保命开关）。
+  fallback_to_v1: true
+  v2:
+    # 全角度采样步进，单位度；越小越准越慢（验证时用 2.0）。
+    angle_step_deg: 2.0
+    canny_low: 50
+    canny_high: 150
+    gaussian_ksize: 3
+    # 距离场截断：距边缘超过该值的像素价值为 0。
+    distance_cap_px: 20.0
+    # YOLO 框四边外扩后裁剪 ROI。
+    crop_margin_px: 8
+    # 核画布四周黑边。
+    kernel_margin_px: 2
+    # ROI 补边平移搜索余量。
+    search_margin_px: 20
+
 # 仅在 execution.yaml 的 calibration_mode=true 时使用。
 # 每个目标像素在每帧先取 3×3 邻域有效深度的中位数，再对多帧结果计算中位数和 MAD。
 # 任一方块深度门禁或方块平面门禁失败时，本轮标定准备直接失败，不读取旧标定兜底。
