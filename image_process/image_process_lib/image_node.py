@@ -50,6 +50,12 @@ from image_process_lib.debug_output import DebugVideoRecorder, save_image_to_pat
 from image_process_lib.depth_rough_localization import DepthRoughLocalizer, fit_z_plane
 from image_process_lib.edge_template_detector import EdgeTemplateConfig, EdgeTemplateMatcher
 from image_process_lib.high_pixel_to_tcp_localizer import HighPixelToTcpLocalizer
+from image_process_lib.high_tcp_localization_router import (
+    HIGH_TCP_DIRECT,
+    HIGH_TCP_LOCALIZATION_MODES,
+    HIGH_TCP_SHADOW,
+    HighTcpLocalizationRouter,
+)
 from image_process_lib.sucker_offset import (
     STRATEGY_SINGLE_CALIBRATION,
     STRATEGY_THREE_CALIBRATION,
@@ -383,6 +389,34 @@ class ImageProcessor:
                 "calibration.block_pixel_to_tcp_left 与 "
                 "calibration.block_pixel_to_tcp_right 必须成对配置"
             )
+        # direct（九点标定）分支的标定文件：tools/vision/nine_point_calibration.py 生成。
+        direct_calibration_paths = {
+            "calibration.block_pixel_to_tcp_direct": optional_src_path(
+                rospy.get_param(
+                    "~block_pixel_to_tcp_direct_path",
+                    calibration_config.get("block_pixel_to_tcp_direct"),
+                )
+            ),
+            "calibration.block_pixel_to_tcp_direct_left": optional_src_path(
+                rospy.get_param(
+                    "~block_pixel_to_tcp_direct_left_path",
+                    calibration_config.get("block_pixel_to_tcp_direct_left"),
+                )
+            ),
+            "calibration.block_pixel_to_tcp_direct_right": optional_src_path(
+                rospy.get_param(
+                    "~block_pixel_to_tcp_direct_right_path",
+                    calibration_config.get("block_pixel_to_tcp_direct_right"),
+                )
+            ),
+            "calibration.tray_pixel_to_tcp_direct": optional_src_path(
+                rospy.get_param(
+                    "~tray_pixel_to_tcp_direct_path",
+                    calibration_config.get("tray_pixel_to_tcp_direct"),
+                )
+            ),
+        }
+        self.direct_calibration_paths = direct_calibration_paths
         self.block_calibration_path = block_calibration_path
         self.tray_calibration_path = tray_calibration_path
         self.block_calibration_left_path = block_calibration_left_path
@@ -863,6 +897,16 @@ class ImageProcessor:
         if not isinstance(localization_config, dict):
             raise ValueError("high_tcp_localization 必须是字典")
 
+        # 定位链路分流默认模式：servo（现行伺服标定）/ direct（九点标定）/ shadow。
+        # 可被运行时私有参数覆盖，见 _high_tcp_localization_mode。
+        self.high_tcp_localization_default_mode = str(
+            localization_config.get("mode", "servo")
+        ).strip().lower()
+        if self.high_tcp_localization_default_mode not in HIGH_TCP_LOCALIZATION_MODES:
+            raise ValueError(
+                "high_tcp_localization.mode 只能是 servo / direct / shadow"
+            )
+
         def finite_range(name, default):
             values = np.asarray(localization_config.get(name, default), dtype=float)
             if values.shape != (2,) or not np.all(np.isfinite(values)) or values[0] >= values[1]:
@@ -1059,6 +1103,76 @@ class ImageProcessor:
                         )
                     else:
                         rospy.loginfo("固定 Z 与标定平面对照：%s", comparison)
+
+            # direct（九点标定）分流分支：默认 direct/shadow 时四份文件必须齐全（fail fast）；
+            # 默认 servo 时文件齐全才构建，保证 rosparam 可免重启切到 direct/shadow。
+            direct_missing = [
+                name
+                for name, path in self.direct_calibration_paths.items()
+                if path is None or not os.path.isfile(path)
+            ]
+
+            def build_direct_localizer():
+                return HighPixelToTcpLocalizer(
+                    block_calibration_path=self.direct_calibration_paths[
+                        "calibration.block_pixel_to_tcp_direct"
+                    ],
+                    tray_calibration_path=self.direct_calibration_paths[
+                        "calibration.tray_pixel_to_tcp_direct"
+                    ],
+                    shooting_pose=self.shooting_angle,
+                    tcp_min_xyz=(
+                        safe_x_range_mm[0],
+                        safe_y_range_mm[0],
+                        self.minimum_tcp_z_mm,
+                    ),
+                    tcp_max_xyz=(safe_x_range_mm[1], safe_y_range_mm[1], None),
+                    safety_xy_offset=self.high_tcp_safety_xy_offset,
+                    fixed_tcp_z_mm=fixed_tcp_z_mm,
+                    block_calibration_left_path=self.direct_calibration_paths[
+                        "calibration.block_pixel_to_tcp_direct_left"
+                    ],
+                    block_calibration_right_path=self.direct_calibration_paths[
+                        "calibration.block_pixel_to_tcp_direct_right"
+                    ],
+                    split_models=True,
+                )
+
+            direct_localizer = None
+            if not direct_missing:
+                direct_localizer = build_direct_localizer()
+            if self.high_tcp_localization_default_mode in (
+                HIGH_TCP_DIRECT,
+                HIGH_TCP_SHADOW,
+            ):
+                if direct_localizer is None:
+                    raise ValueError(
+                        "high_tcp_localization.mode="
+                        f"{self.high_tcp_localization_default_mode} 需要 direct 分支标定文件，"
+                        "缺失: "
+                        + ", ".join(direct_missing)
+                        + "；请先运行 tools/vision/nine_point_calibration.py 生成"
+                    )
+                rospy.logwarn(
+                    "正式模式：高位定位默认走 direct 九点标定分支（方块左右分侧模型）"
+                )
+            elif direct_localizer is not None:
+                rospy.loginfo(
+                    "正式模式：direct 九点标定分支已就绪，"
+                    "rosparam set /image_process_node/high_tcp_localization_mode direct 可切换"
+                )
+            else:
+                rospy.loginfo(
+                    "正式模式：direct 九点标定文件不全（%s），仅 servo 链路可用",
+                    ", ".join(direct_missing),
+                )
+            # 现行 localizer 不再直接暴露给调用点：全部经 Router 按模式分流。
+            self.high_tcp_localizer = HighTcpLocalizationRouter(
+                servo_localizer=self.high_tcp_localizer,
+                direct_localizer=direct_localizer,
+                mode_provider=self._high_tcp_localization_mode,
+                warn=rospy.logwarn,
+            )
         self.image_sub = rospy.Subscriber(self.image_topic, Image, self.image_callback)
         self.prepare_task_service = rospy.Service("/perception/prepare_task", PrepareTask, self.prepare_task)
         self.get_task_target_service = rospy.Service(
@@ -1760,6 +1874,29 @@ class ImageProcessor:
         if value not in ("v1", "v2", "shadow"):
             rospy.logwarn("未知 block_recognition_mode=%s，本请求按 v1 处理", value)
             return "v1"
+        return value
+
+    def _high_tcp_localization_mode(self):
+        """读取当前高位定位链路模式；rosparam 运行时覆盖 yaml 默认值，无需重启。
+
+        半初始化对象（测试直接 __new__ 构造）缺属性时按 servo 处理。
+        """
+        default_mode = getattr(
+            self,
+            "high_tcp_localization_default_mode",
+            "servo",
+        )
+        value = str(
+            rospy.get_param(
+                "~high_tcp_localization_mode",
+                default_mode,
+            )
+        ).strip().lower()
+        if value not in HIGH_TCP_LOCALIZATION_MODES:
+            rospy.logwarn(
+                "未知 high_tcp_localization_mode=%s，本请求按 servo 处理", value
+            )
+            return "servo"
         return value
 
     def _get_edge_template_matcher(self):

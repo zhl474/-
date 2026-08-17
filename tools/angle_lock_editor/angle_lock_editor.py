@@ -220,10 +220,15 @@ class V2角度锁定编辑器:
     def _画方块(self, canvas, category, template_angle, center, pick, locked, selected, index, theta_text):
         item = self.matcher._metadata_for(category)[template_angle]
         contours, _ = cv2.findContours(item["binary"], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # 轮廓点必须乘显示比例：origin 已换算到显示坐标，形状不缩放会比方块小一圈。
+        scaled_contours = [
+            np.round(polygon.astype(np.float32) * self.scale).astype(np.int32)
+            for polygon in contours
+        ]
         origin = self._显示坐标(center[0] - item["anchor"][0], center[1] - item["anchor"][1])
         contour_color = (0, 200, 255) if locked else (0, 255, 0)
         thickness = 2 if selected else 1
-        cv2.drawContours(canvas, contours, -1, contour_color, thickness, offset=origin)
+        cv2.drawContours(canvas, scaled_contours, -1, contour_color, thickness, offset=origin)
 
         center_disp = self._显示坐标(*center)
         pick_disp = self._显示坐标(*pick)

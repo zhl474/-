@@ -18,7 +18,7 @@ camera_to_sucker_offset_mm: [-85.264, -13.905]
 #                       left/right 两套偏移，高位拟合模型分别用 perception.yaml 的
 #                       calibration.block_pixel_to_tcp_left/right 两套标定文件。
 # 切换策略后需要重启 competition 与 image_process 两个节点生效。
-sucker_offset_strategy: SINGLE_CALIBRATION
+sucker_offset_strategy: THREE_CALIBRATION
 # 左侧方块偏移（THREE_CALIBRATION 策略下 u < 640 使用），单位 mm。
 # 初始与中间一致（等价旧行为），实测左侧方块后替换。
 camera_to_sucker_offset_left_mm: [-85.264, -13.905]

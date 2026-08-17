@@ -1000,6 +1000,12 @@ class TaskRunner:
         else:
             place_pose = open_loop_place_pose
 
+        if not self.config.calibration_mode:
+            if place_rotation is None:
+                raise RuntimeError("摆放前缺少本次舵机旋转记录，已禁止喷气")
+            # 机械臂搬运可以覆盖舵机转动时间，但喷气前必须确认预计旋转已经完成。
+            self._wait_for_motor_rotation(place_rotation, "抓取后摆放旋转")
+
         if (
             not self.config.calibration_mode
             and self.config.place_descent_offset_mm > 0.0
@@ -1031,12 +1037,6 @@ class TaskRunner:
                 self.config.arm_speed,
                 wait_until_stable=True,
             )
-
-        if not self.config.calibration_mode:
-            if place_rotation is None:
-                raise RuntimeError("摆放前缺少本次舵机旋转记录，已禁止喷气")
-            # 机械臂搬运可以覆盖舵机转动时间，但喷气前必须确认预计旋转已经完成。
-            self._wait_for_motor_rotation(place_rotation, "抓取后摆放旋转")
 
         self._set_state(TaskState.PLACING)
         if not self.config.calibration_mode:

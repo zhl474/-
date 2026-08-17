@@ -8,13 +8,13 @@ models:
 
 # 固定盘面最短摆放方案 V1。shadow 计算并记录新方案，但仍执行旧匈牙利方案。
 task_sequence_optimizer:
-  mode: execute           # legacy / shadow / execute
+  mode: legacy            # legacy / shadow / execute
   beam_width: 5000
   report_top_candidates: 20
 
 # 普通 260 分任务的 V5 动态盘面选择。shadow 完整计算并记录，但仍执行固定 YAML。
 dynamic_board_selection:
-  mode: execute                 # disabled / shadow / execute
+  mode: disabled                # disabled / shadow / execute
   library_path: image_process/config/v5_board_library_v1.npz
   coarse_top_k: 1000
   final_candidate_k: 100
@@ -54,6 +54,13 @@ calibration:
   # 当前占位与单文件一致（SINGLE 策略不使用；THREE 下未替换前两侧同模型，等价旧行为）。
   block_pixel_to_tcp_left: image_process/config/block_pixel_to_tcp_calibration.yaml
   block_pixel_to_tcp_right: image_process/config/block_pixel_to_tcp_calibration.yaml
+  # direct（九点标定）分流分支的标定文件：由 tools/vision/nine_point_calibration.py
+  # 填入像素-TCP 点对后生成（方块左右分侧 + 中心回退 + 托盘单模型共四份）。
+  # 文件齐全时 direct/shadow 分支可用；mode 设为 direct/shadow 前必须先完成生成。
+  block_pixel_to_tcp_direct: image_process/config/block_pixel_to_tcp_calibration_direct.yaml
+  block_pixel_to_tcp_direct_left: image_process/config/block_pixel_to_tcp_calibration_direct_left.yaml
+  block_pixel_to_tcp_direct_right: image_process/config/block_pixel_to_tcp_calibration_direct_right.yaml
+  tray_pixel_to_tcp_direct: image_process/config/tray_pixel_to_tcp_calibration_direct.yaml
 
 # 高位模板匹配：先按 Mask 白色前景宽高筛选候选角度，再用紧边框模板做无 padding 卷积。
 # 尺寸筛选不可靠时回退到全角度、same-padding 慢匹配；本轮不修改低位匹配。
@@ -138,6 +145,16 @@ calibration_depth:
   tray_tcp_below_block_observation_mm: -9.0
 
 high_tcp_localization:
+  # 高位像素→TCP 定位链路分流：
+  #   servo  现行伺服数据拟合标定（默认，行为与历史完全一致）
+  #   direct 九点标定版（上方 calibration.*_direct 四份文件，方块按 u<640/u>=640
+  #          分左右模型，托盘单模型；文件由 tools/vision/nine_point_calibration.py 生成）
+  #   shadow 正式执行 servo 结果不变，同一像素并算 direct，日志输出两分支偏差
+  # mode 可被运行时私有参数覆盖：rosparam set /image_process_node/high_tcp_localization_mode direct
+  # 切换即时生效，无需重启节点（direct 分支需启动时四份标定文件已齐全）；
+  # 面板改此默认值需重启 perception 节点生效；标定模式不走此开关。
+  mode: servo
+
   # 2026-08-17 场地变动后 XY 安全限位已停用：代码不再按这两个范围拦截任何位姿，
   # 仅保留 Z 下限（execution.yaml motion.minimum_tcp_z_mm）。键本身仅供
   # 网页 z_plane 对照展示和配置校验使用，改数值不会恢复拦截。

@@ -297,6 +297,26 @@ FIELD_OVERRIDES = {
     "perception.calibration.hand_eye_matrix": {
         "label": "手眼矩阵文件", "risk": "danger",
     },
+    "perception.calibration.block_pixel_to_tcp_direct": {
+        "label": "九点标定文件（方块中心回退）", "risk": "danger",
+        "description": "direct 分支像素无效时回退使用的方块模型；"
+        "由 tools/vision/nine_point_calibration.py 生成。",
+    },
+    "perception.calibration.block_pixel_to_tcp_direct_left": {
+        "label": "九点标定文件（方块左）", "risk": "danger",
+        "description": "direct 分支左侧方块（u < 640）模型；"
+        "由 tools/vision/nine_point_calibration.py 生成。",
+    },
+    "perception.calibration.block_pixel_to_tcp_direct_right": {
+        "label": "九点标定文件（方块右）", "risk": "danger",
+        "description": "direct 分支右侧方块（u >= 640）模型；"
+        "由 tools/vision/nine_point_calibration.py 生成。",
+    },
+    "perception.calibration.tray_pixel_to_tcp_direct": {
+        "label": "九点标定文件（托盘）", "risk": "danger",
+        "description": "direct 分支托盘单模型；"
+        "由 tools/vision/nine_point_calibration.py 生成。",
+    },
     "perception.high_template_match": {
         "label": "高位模板匹配",
     },
@@ -390,6 +410,12 @@ FIELD_OVERRIDES = {
     },
     "perception.high_tcp_localization": {
         "label": "高位 TCP 定位",
+    },
+    "perception.high_tcp_localization.mode": {
+        "label": "高位定位链路",
+        "options": ["servo", "direct", "shadow"],
+        "description": "servo=现行伺服标定；direct=九点标定（需先生成 direct 标定文件）；"
+        "shadow=执行 servo 同时并算 direct 出偏差日志。改默认值需重启 perception 节点。",
     },
     "perception.high_tcp_localization.safe_x_range_mm": {
         "label": "高位定位 X 安全范围", "unit": "mm", "risk": "danger",
@@ -878,6 +904,7 @@ class ConfigManager:
         enum_rules = (
             ("task_sequence_optimizer.mode", {"legacy", "shadow", "execute"}),
             ("dynamic_board_selection.mode", {"disabled", "shadow", "execute"}),
+            ("high_tcp_localization.mode", {"servo", "direct", "shadow"}),
         )
         for path, options in enum_rules:
             if _nested(data, path) not in options:
@@ -928,6 +955,18 @@ class ConfigManager:
         for key in ("block_pixel_to_tcp_left", "block_pixel_to_tcp_right"):
             if calibration.get(key) is not None:
                 self._require_existing_source_file(calibration[key], f"calibration.{key}")
+        # direct 九点标定文件允许缺失（未标定时只走 servo），但配置了就必须是非空路径。
+        for key in (
+            "block_pixel_to_tcp_direct",
+            "block_pixel_to_tcp_direct_left",
+            "block_pixel_to_tcp_direct_right",
+            "tray_pixel_to_tcp_direct",
+        ):
+            direct_path_value = calibration.get(key)
+            if direct_path_value is not None and (
+                not isinstance(direct_path_value, str) or not direct_path_value.strip()
+            ):
+                raise ConfigError(f"calibration.{key} 必须是非空路径或整项删除")
         for path in (
             "high_tcp_localization.safe_x_range_mm",
             "high_tcp_localization.safe_y_range_mm",
