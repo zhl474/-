@@ -78,7 +78,8 @@ CENTER_REFINE_MAX_WINDOW_PX = 15  # 中央角点搜索半窗口上限（px）
 CENTER_REFINE_MAX_SHIFT_CELL_RATIO = 0.12  # 精中心相对粗中心最大允许修正（码格）
 CENTER_REFINE_MIN_CONTRAST = 5.0  # 中央白格最暗值与黑格最亮值的最小灰度差
 HIGH_SAMPLE_FRAMES = 7  # 高位有效采样帧数（逐轴取中位数得到高位中心）
-LOW_TCP_Z_MM = 220.0  # 低位闭环时的固定 TCP Z（mm），不得低于 minimum_tcp_z_mm
+LOW_TCP_Z_MM = 166.26  # 低位闭环固定 TCP Z = 方块观察 173.46 - 板面低于方块顶面的 7.2mm，不得低于 minimum_tcp_z_mm
+ADAPTIVE_THRESH_MAX = 150  # 自适应阈值窗口上限；低位约 10cm 距离时码格约 82px，默认 63 会"找到外框但解码失败"
 STATIC_SAMPLE_FRAMES = 20  # 对准成功后静止采样帧数（不再移动机械臂）
 STATIC_MIN_VALID_RATIO = 0.8  # 静止采样有效帧占比下限，低于此值不生成零误差等效 TCP
 DEPTH_FRAME_COUNT = 15  # 稳定深度请求后需新采集的深度帧数
@@ -697,7 +698,9 @@ def main():
     try:
         services = RosServices()
         reader = FreshImageReader()
-        detector = create_aruco_detector(ARUCO_DICT_NAME)
+        detector = create_aruco_detector(
+            ARUCO_DICT_NAME, adaptive_thresh_max=ADAPTIVE_THRESH_MAX
+        )
         localizer = DepthRoughLocalizer(
             shooting_pose,
             np.load(SRC_ROOT / "camera" / "config" / "T_wrist2camera.npy"),
@@ -858,7 +861,9 @@ def run_one_sample(
             all_sizes = []
             first_rejected = 0
             for dict_name, found in detect_all_markers(
-                first_low_image, PROBE_DICT_NAMES
+                first_low_image,
+                PROBE_DICT_NAMES,
+                adaptive_thresh_max=ADAPTIVE_THRESH_MAX,
             ).items():
                 if found["ids"]:
                     all_ids.extend(found["ids"])

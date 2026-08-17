@@ -1693,7 +1693,7 @@ async function loadExecutionConfig(force = false) {
       const lowZ = $('#aruco-low-z');
       lowZ.min = minimumZ;
       if (Number(lowZ.value) < minimumZ) {
-        lowZ.value = Math.max(220, minimumZ);
+        lowZ.value = Math.max(166.26, minimumZ);
       }
     }
     return app.executionConfig;

@@ -147,6 +147,7 @@ def detect_all_markers(
     dict_names: Sequence[str],
     corner_refine: bool = True,
     min_perimeter_rate: Optional[float] = None,
+    adaptive_thresh_max: int = 63,
 ) -> dict:
     """多字典全量检测：返回每个字典检出的标记 ID、角点像素尺寸与角点。
 
@@ -158,7 +159,10 @@ def detect_all_markers(
     results = {}
     for dict_name in dict_names:
         detector = create_aruco_detector(
-            dict_name, corner_refine=corner_refine, min_perimeter_rate=min_perimeter_rate
+            dict_name,
+            corner_refine=corner_refine,
+            min_perimeter_rate=min_perimeter_rate,
+            adaptive_thresh_max=adaptive_thresh_max,
         )
         corners, ids, rejected = detector.detectMarkers(gray)
         ids_list = [] if ids is None else [int(value) for value in ids.ravel()]

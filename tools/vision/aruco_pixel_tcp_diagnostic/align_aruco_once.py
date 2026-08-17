@@ -62,7 +62,8 @@ from aruco_diagnostic_core import (  # noqa: E402
 # ==================== 运行参数（直接修改后运行）====================
 ARUCO_DICT_NAME = "DICT_6X6_50"  # ArUco 字典名称
 ARUCO_MARKER_ID = 0  # 目标标记 ID
-LOW_TCP_Z_MM = 220.0  # 低位视觉伺服使用的固定 TCP Z（mm）
+LOW_TCP_Z_MM = 166.26  # 低位固定 TCP Z = 方块观察 173.46 - 板面低于方块顶面的 7.2mm，配平相机到目标面的距离
+ADAPTIVE_THRESH_MAX = 150  # 自适应阈值窗口上限；低位约 10cm 距离时码格约 82px，默认 63 会"找到外框但解码失败"
 HIGH_SAMPLE_FRAMES = 7  # 高位有效识别帧数，中心逐轴取中位数
 HIGH_DETECT_MAX_RETRIES = 30  # 高位连续失败上限
 IMAGE_TIMEOUT_SEC = 1.0  # 获取一张新图像的超时时间（秒）
@@ -291,7 +292,9 @@ def run_alignment(low_tcp_z_mm=None, assume_yes=False):
 
     services = RosServices()
     reader = FreshImageReader()
-    detector = create_aruco_detector(ARUCO_DICT_NAME)
+    detector = create_aruco_detector(
+        ARUCO_DICT_NAME, adaptive_thresh_max=ADAPTIVE_THRESH_MAX
+    )
     localizer = DepthRoughLocalizer(shooting_pose, np.load(HAND_EYE_PATH))
 
     move_checked(

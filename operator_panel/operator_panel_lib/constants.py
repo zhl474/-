@@ -83,7 +83,8 @@ ARUCO_ALIGN_SCRIPT_PATH = (
     / "aruco_pixel_tcp_diagnostic"
     / "align_aruco_once.py"
 )
-ARUCO_ALIGN_DEFAULT_LOW_TCP_Z_MM = 220.0
+# 与 align_aruco_once.py 的 LOW_TCP_Z_MM 保持一致：方块观察 173.46 - 板面低于方块顶面的 7.2mm
+ARUCO_ALIGN_DEFAULT_LOW_TCP_Z_MM = 166.26
 
 DEBUG_IMAGE_FILES = {
     "block_mask": "方块上表面掩码.jpg",
