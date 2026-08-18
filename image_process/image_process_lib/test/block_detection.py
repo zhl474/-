@@ -53,7 +53,7 @@ def _inward_direction(edge, center):
     return n1
 
 
-def _scan_first_run(mx, my, inward, sample, max_steps):
+def _scan_first_run(mx, my, inward, sample, max_steps, edge_skip=5):
     solid_start = None
     last_solid = 0
     for t in range(max_steps):
@@ -61,9 +61,10 @@ def _scan_first_run(mx, my, inward, sample, max_steps):
         y = int(round(my + inward[1] * t))
         value = sample(x, y)
         if value is not None and value >= 1:
-            if solid_start is None:
+            if solid_start is None and t >= edge_skip:
                 solid_start = t
-            last_solid = t
+            if solid_start is not None:
+                last_solid = t
         elif solid_start is not None:
             break
     if solid_start is None:
@@ -86,26 +87,13 @@ def _l_grab_point(box, sample, rect_size, center):
     if inward is None:
         return None
 
-    # 反向扫描找mask实际边界，确保从边界处开始正向扫描
-    max_search = int(round(long_side + short_side)) + 2
-    scan_x, scan_y = mx, my
-    for t in range(max_search):
-        x = int(round(mx - inward[0] * t))
-        y = int(round(my - inward[1] * t))
-        val = sample(x, y)
-        if val is None or val < 1:
-            if t > 0:
-                scan_x = mx - inward[0] * (t - 1)
-                scan_y = my - inward[1] * (t - 1)
-            break
-
-    run = _scan_first_run(scan_x, scan_y, inward, sample, max_search)
+    run = _scan_first_run(mx, my, inward, sample, int(round(long_side + short_side)) + 2, edge_skip=5)
     if run is None:
         return None
     solid_start, cell = run
 
-    gx = int(round(scan_x + inward[0] * (solid_start + cell / 2.0)))
-    gy = int(round(scan_y + inward[1] * (solid_start + cell / 2.0)))
+    gx = int(round(mx + inward[0] * (solid_start + cell / 2.0)))
+    gy = int(round(my + inward[1] * (solid_start + cell / 2.0)))
     value = sample(gx, gy)
     if value is not None and value >= 1:
         return (gx, gy)

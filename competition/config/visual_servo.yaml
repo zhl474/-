@@ -8,7 +8,7 @@ pixel_to_robot_matrix:
 - [0.2, 0.0]
 # 相机中心对准目标后，吸盘中心需要移动的 [X, Y] 偏移，单位 mm。
 # 该值 = 工作区中心点实测基线（步骤B 吸盘对准位姿 - 步骤A 相机对准位姿）。
-camera_to_sucker_offset_mm: [-83.095, 13.225]
+camera_to_sucker_offset_mm: [-84.081, -13.234]
 
 # 吸盘偏移标定策略：
 #   SINGLE_CALIBRATION  单参数策略（默认，等价旧行为）：方块、托盘全部使用上方中间偏移，
