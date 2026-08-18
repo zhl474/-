@@ -11,15 +11,81 @@ template_sizes:
       # 未列出的类别（或只写一个方向）继续用上方 block_px/connector_px 理想展开；
       # 面板重跑 line 标定改基准后，已写 overrides 的类别不会跟着变，需手动清理。
       # 修改后需重启 perception 节点生效；面板上只能改数值，新增类别要手改本文件。
-      overrides: {}
+      # overrides: {}   # 启用逐段微调时注释掉本行，避免 overrides 键重复
+      # 长宽各 +1px：尾差并入每个方向最后一段实体。
+      # 改动需重启 perception 节点生效；恢复默认就删掉 overrides 段并取消上面 {} 的注释。
+      overrides:
+        L_blue:
+          x_runs: [36, 5, 36, 5, 38]
+          y_runs: [36, 5, 36]
+        L_yellow:
+          x_runs: [36, 5, 36, 5, 38]
+          y_runs: [36, 5, 36]
+        z_blue:
+          x_runs: [36, 5, 36, 5, 38]
+          y_runs: [36, 5, 36]
+        z_green:
+          x_runs: [36, 5, 36, 5, 38]
+          y_runs: [36, 5, 36]
+        T:
+          x_runs: [36, 5, 36, 5, 38]
+          y_runs: [36, 5, 36]
+        square:
+          x_runs: [37, 5, 37]
+          y_runs: [37, 5, 37]
+        line:
+          x_runs: [36, 5, 36, 5, 36, 5, 38]
+          y_runs: [36]
+      # 默认（不微调）参考格式，按 36/5 理想值预填，要微调哪类取消注释即可：
       # overrides:
       #   L_blue:
-      #     x_runs: [36, 5, 36, 5, 37]
+      #     x_runs: [36, 5, 36, 5, 36]
       #     y_runs: [36, 5, 36]
+      #   L_yellow:
+      #     x_runs: [36, 5, 36, 5, 36]
+      #     y_runs: [36, 5, 36]
+      #   z_blue:
+      #     x_runs: [36, 5, 36, 5, 36]
+      #     y_runs: [36, 5, 36]
+      #   z_green:
+      #     x_runs: [36, 5, 36, 5, 36]
+      #     y_runs: [36, 5, 36]
+      #   T:
+      #     x_runs: [36, 5, 36, 5, 36]
+      #     y_runs: [36, 5, 36]
+      #   square:
+      #     x_runs: [36, 5, 36]
+      #     y_runs: [36, 5, 36]
+      #   line:
+      #     x_runs: [36, 5, 36, 5, 36, 5, 36]
+      #     y_runs: [36]
     low:
       block_px: 92
       connector_px: 12
       overrides: {}
+      # 低位逐段微调，用法同上；已按 92/12 理想值预填：
+      # overrides:
+      #   L_blue:
+      #     x_runs: [92, 12, 92, 12, 92]
+      #     y_runs: [92, 12, 92]
+      #   L_yellow:
+      #     x_runs: [92, 12, 92, 12, 92]
+      #     y_runs: [92, 12, 92]
+      #   z_blue:
+      #     x_runs: [92, 12, 92, 12, 92]
+      #     y_runs: [92, 12, 92]
+      #   z_green:
+      #     x_runs: [92, 12, 92, 12, 92]
+      #     y_runs: [92, 12, 92]
+      #   T:
+      #     x_runs: [92, 12, 92, 12, 92]
+      #     y_runs: [92, 12, 92]
+      #   square:
+      #     x_runs: [92, 12, 92]
+      #     y_runs: [92, 12, 92]
+      #   line:
+      #     x_runs: [92, 12, 92, 12, 92, 12, 92]
+      #     y_runs: [92]
 
 color_segmentation:
   seed_search_half_size: 40

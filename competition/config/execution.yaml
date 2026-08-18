@@ -22,7 +22,7 @@ motion:
 
   # 抓取和摆放下探时的 MoveL 速度参数。
   # 下探比普通移动慢，用于降低碰撞和压坏方块的风险。
-  pick_speed: 75
+  pick_speed: 80
 
   # 视觉伺服每轮 XY 修正时的 MoveL 速度参数。
   # 太大可能过冲或画面未稳定，太小会增加每轮闭环耗时。
@@ -30,7 +30,7 @@ motion:
 
   # 高度策略得到方块上表面的基坐标系绝对 Z 后，
   # 吸盘实际抓取高度相对该表面的偏移，单位 mm。
-  pick_surface_offset_mm: 151.0
+  pick_surface_offset_mm: 148.0
 
   # 最终抓取位上方的动态预抓取间隙，单位 mm。
   # 预抓取位会在这里等待机械臂停稳，随后仅下探该距离吸取方块。
@@ -41,11 +41,11 @@ motion:
 
   # 抓取后竖直抬升点的 MoveL 圆滑半径，单位 mm。
   # 大于 0 时机械臂不会在抬升点停下，而会圆滑拐向托盘区域；0 表示关闭圆滑。
-  pick_retreat_blend_radius_mm: 0.0
+  pick_retreat_blend_radius_mm: 2.0
 
   # 摆放释放前的下探深度，单位 mm。
   # 到达最终摆放位后继续竖直下探该距离再喷气；0 表示关闭下探、直接在释放高度喷气。
-  place_descent_offset_mm: 8.0
+  place_descent_offset_mm: 9.0
 
   # 到达最终摆放位时的 MoveL 圆滑半径，单位 mm。
   # 大于 0 时机械臂不在摆放位停下，而圆滑拐向下探点；0 表示关闭圆滑、精确停在摆放位。
@@ -56,7 +56,7 @@ motion:
   # 抬升距离固定等于 place_descent_offset_mm（下戳多少就抬回多少）。
   # 大于 0 时机械臂不在抬升点停下，而圆滑拐向下一块方块的抓取；0 表示关闭圆滑。
   # 必须小于 place_descent_offset_mm，否则圆滑会吞掉整段抬升。
-  place_lift_blend_radius_mm: 0.0
+  place_lift_blend_radius_mm: 2.0
 
   # 所有正式 TCP 运动命令允许的最低绝对 Z。
   # 这是最低安全高度的唯一配置来源；controller、感知节点和网页直连硬件都读取本字段。
