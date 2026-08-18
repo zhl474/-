@@ -1000,11 +1000,8 @@ class TaskRunner:
         else:
             place_pose = open_loop_place_pose
 
-        if not self.config.calibration_mode:
-            if place_rotation is None:
-                raise RuntimeError("摆放前缺少本次舵机旋转记录，已禁止喷气")
-            # 机械臂搬运可以覆盖舵机转动时间，但喷气前必须确认预计旋转已经完成。
-            self._wait_for_motor_rotation(place_rotation, "抓取后摆放旋转")
+        if not self.config.calibration_mode and place_rotation is None:
+            raise RuntimeError("摆放前缺少本次舵机旋转记录，已禁止喷气")
 
         if (
             not self.config.calibration_mode
@@ -1022,6 +1019,10 @@ class TaskRunner:
                 wait_until_stable=False,
                 blend_radius_mm=(blend_radius_mm if blend_radius_mm > 0.0 else None),
             )
+            # 搬运运动已提交（wait_until_stable=False，机械臂在走），舵机边转边走；
+            # 下探前只补足预计旋转尚未被搬运覆盖的剩余时间。
+            if not self.config.calibration_mode:
+                self._wait_for_motor_rotation(place_rotation, "抓取后摆放旋转")
             self._timed_call(
                 "摆放下探运动",
                 self.clients.move_arm,
@@ -1037,6 +1038,9 @@ class TaskRunner:
                 self.config.arm_speed,
                 wait_until_stable=True,
             )
+            # 阻塞式运动返回时已到位，这里只补足舵机剩余旋转时间再喷气。
+            if not self.config.calibration_mode:
+                self._wait_for_motor_rotation(place_rotation, "抓取后摆放旋转")
 
         self._set_state(TaskState.PLACING)
         if not self.config.calibration_mode:

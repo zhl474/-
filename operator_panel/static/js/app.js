@@ -936,13 +936,14 @@ function renderState(state) {
   const running = task.state === '执行中' || task.state === '已暂停';
   tuneCard.updateLock();
   $('#task-prepare').disabled = busy || stopped || !health.control_services_ready || !health.perception_services_ready || running;
-  // 停止始终按任务状态开关；暂停要绕过 busy（执行任务占着队列）；继续要等手动操作结束（busy）。
-  $('#task-stop').disabled = !running;
+  // 停止与继续不能被任务自身的操作记录（busy）锁死：暂停期间 operation.active 一直存在，
+  // 否则"继续"永久禁用；状态串与操作记录不一致时"停止"也会被禁。后端 resume/stop 自带防护。
+  $('#task-stop').disabled = !(running || active);
   if (task.state === '执行中') {
     $('#task-start').disabled = false;
     $('#task-start').textContent = '暂停';
   } else if (task.state === '已暂停') {
-    $('#task-start').disabled = busy;
+    $('#task-start').disabled = stopOperation?.status === 'running';
     $('#task-start').textContent = '继续';
   } else {
     $('#task-start').disabled = busy || stopped || task.state !== '可以执行' || !task.confirmed;

@@ -1337,6 +1337,7 @@ def test_摆放旋转统一在喷气前检查(monkeypatch):
         execution_config=_execution_config(
             timing_debug=False,
             visual_servo_enabled=False,
+            pick_retreat_blend_radius_mm=5.0,
         ),
         visual_config=load_visual_servo_config(),
     )
@@ -1363,9 +1364,10 @@ def test_摆放旋转统一在喷气前检查(monkeypatch):
     )
     assert events.index("机械臂运动3") < events.index("舵机旋转270")
     assert events.index("舵机旋转270") < events.index("机械臂运动4")
-    assert events.index("机械臂运动4") < events.index("机械臂运动5")
-    assert events.index("机械臂运动5") < events.index("检查抓取后摆放旋转")
-    assert events.index("检查抓取后摆放旋转") < events.index(
+    # 搬运运动先提交，舵机边转边走；下探前才补足剩余旋转时间。
+    assert events.index("机械臂运动4") < events.index("检查抓取后摆放旋转")
+    assert events.index("检查抓取后摆放旋转") < events.index("机械臂运动5")
+    assert events.index("机械臂运动5") < events.index(
         f"吸盘状态{module.RobotClients.BLOW}"
     )
     assert events.index(f"吸盘状态{module.RobotClients.BLOW}") < events.index(

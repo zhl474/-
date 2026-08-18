@@ -7,48 +7,109 @@ from ultralytics import YOLO
 import sys
 import tensorrt
 
-def _l_grab_point_v2(mask, angle, center, b, c, b_local=(0.0, 0.0)):
-    """软投票法：用L型拓扑先验让像素认领B格子，取加权质心。"""
-    height, width = mask.shape
-    ys, xs = np.where(mask > 0)
-    if len(xs) < 10:
-        return None
+def _l_long_edges(box, long_side):
+    for (a, b), (c, d) in zip(
+        ((0, 1), (0, 2), (0, 3)),
+        ((2, 3), (1, 3), (1, 2)),
+    ):
+        edge_len = math.hypot(box[a][0] - box[b][0], box[a][1] - box[b][1])
+        if 0.9 * long_side <= edge_len <= 1.1 * long_side:
+            return (box[a], box[b]), (box[c], box[d])
+    return (box[0], box[1]), (box[2], box[3])
 
+
+def _edge_midpoint(edge):
+    return (
+        (edge[0][0] + edge[1][0]) / 2.0,
+        (edge[0][1] + edge[1][1]) / 2.0,
+    )
+
+
+def _edge_solid_ratio(edge, sample, samples=20):
+    p1, p2 = edge
+    solid = 0
+    for i in range(samples + 1):
+        t = i / float(samples)
+        x = int(round(p1[0] + (p2[0] - p1[0]) * t))
+        y = int(round(p1[1] + (p2[1] - p1[1]) * t))
+        value = sample(x, y)
+        if value is not None and value >= 1:
+            solid += 1
+    return solid / float(samples + 1)
+
+
+def _inward_direction(edge, center):
+    edge_len = math.hypot(edge[1][0] - edge[0][0], edge[1][1] - edge[0][1])
+    if edge_len <= 0:
+        return None
+    ux = (edge[1][0] - edge[0][0]) / edge_len
+    uy = (edge[1][1] - edge[0][1]) / edge_len
+    n1 = (-uy, ux)
+    n2 = (uy, -ux)
+    mx, my = _edge_midpoint(edge)
     cx, cy = center
-    sigma = b / 2.0
-    sigma2 = sigma * sigma
+    if n2[0] * (cx - mx) + n2[1] * (cy - my) > n1[0] * (cx - mx) + n1[1] * (cy - my):
+        return n2
+    return n1
 
-    cos_a = math.cos(angle)
-    sin_a = math.sin(angle)
 
-    px = xs.astype(np.float64) - cx
-    py = ys.astype(np.float64) - cy
-    pu = px * cos_a + py * sin_a
-    pv = -px * sin_a + py * cos_a
+def _scan_first_run(mx, my, inward, sample, max_steps):
+    solid_start = None
+    last_solid = 0
+    for t in range(max_steps):
+        x = int(round(mx + inward[0] * t))
+        y = int(round(my + inward[1] * t))
+        value = sample(x, y)
+        if value is not None and value >= 1:
+            if solid_start is None:
+                solid_start = t
+            last_solid = t
+        elif solid_start is not None:
+            break
+    if solid_start is None:
+        return None
+    return solid_start, last_solid - solid_start + 1
 
-    pu_b, pv_b = b_local
-    du = pu - pu_b
-    dv = pv - pv_b
-    dB2 = du * du + dv * dv
-    wB = np.exp(-dB2 / (2.0 * sigma2))
 
-    total_w = float(np.sum(wB))
-    if total_w < 1e-6:
+def _l_grab_point(box, sample, rect_size, center):
+    long_side, short_side = max(rect_size), min(rect_size)
+
+    long1, long2 = _l_long_edges(box, long_side)
+    solid_edge = (
+        long1
+        if _edge_solid_ratio(long1, sample) >= _edge_solid_ratio(long2, sample)
+        else long2
+    )
+
+    mx, my = _edge_midpoint(solid_edge)
+    inward = _inward_direction(solid_edge, center)
+    if inward is None:
         return None
 
-    pu_g = float(np.sum(wB * pu) / total_w)
-    pv_g = float(np.sum(wB * pv) / total_w)
+    # 反向扫描找mask实际边界，确保从边界处开始正向扫描
+    max_search = int(round(long_side + short_side)) + 2
+    scan_x, scan_y = mx, my
+    for t in range(max_search):
+        x = int(round(mx - inward[0] * t))
+        y = int(round(my - inward[1] * t))
+        val = sample(x, y)
+        if val is None or val < 1:
+            if t > 0:
+                scan_x = mx - inward[0] * (t - 1)
+                scan_y = my - inward[1] * (t - 1)
+            break
 
-    gx = cx + pu_g * cos_a - pv_g * sin_a
-    gy = cy + pu_g * sin_a + pv_g * cos_a
+    run = _scan_first_run(scan_x, scan_y, inward, sample, max_search)
+    if run is None:
+        return None
+    solid_start, cell = run
 
-    gx_int, gy_int = int(round(gx)), int(round(gy))
-    if 0 <= gy_int < height and 0 <= gx_int < width and mask[gy_int, gx_int] > 0:
-        return (gx_int, gy_int)
-
-    dist_sq = (xs - gx) ** 2 + (ys - gy) ** 2
-    nearest = int(np.argmin(dist_sq))
-    return (int(xs[nearest]), int(ys[nearest]))
+    gx = int(round(scan_x + inward[0] * (solid_start + cell / 2.0)))
+    gy = int(round(scan_y + inward[1] * (solid_start + cell / 2.0)))
+    value = sample(gx, gy)
+    if value is not None and value >= 1:
+        return (gx, gy)
+    return None
 
 print("实际解释器：", sys.executable)
 print("TensorRT 路径：", tensorrt.__file__)
@@ -292,56 +353,18 @@ def draw_mask_on_full_image(full_image, mask, crop_x1, crop_y1, color=(0, 255, 0
 def get_length(point1,point2):
         return math.sqrt((point1[0]-point2[0])**2+(point1[1]-point2[1])**2)
 def coreect_LL_location(box, mask, rect, block_px=None, connector_px=None):
-    """获取L型长臂3格的几何中心（软投票法）。"""
+    """获取L型横条中心（修复扫描法）。"""
     center_x, center_y = rect[0]
     height, width = mask.shape
-    long_side, short_side = max(rect[1]), min(rect[1])
 
-    ys, xs = np.where(mask > 0)
-    if len(xs) < 10:
-        return int(round(center_x)), int(round(center_y))
+    def _sample(x, y):
+        if 0 <= y < height and 0 <= x < width:
+            return mask[y, x]
+        return None
 
-    pts = np.column_stack([xs, ys]).astype(np.float64)
-    mean_pt = pts.mean(axis=0)
-    centered = pts - mean_pt
-    cov = np.cov(centered.T)
-    eigvals, eigvecs = np.linalg.eigh(cov)
-    long_axis = eigvecs[:, 1]
-    angle = math.atan2(long_axis[1], long_axis[0])
-
-    b_est = 2.0 * short_side - long_side
-    c_est = 2.0 * long_side - 3.0 * short_side
-    if b_est <= 0 or c_est < 0:
-        b_est = long_side / 3.0
-        c_est = 0.0
-
-    pca_cx, pca_cy = mean_pt[0], mean_pt[1]
-
-    cos_a = math.cos(angle)
-    sin_a = math.sin(angle)
-    pu = (xs - pca_cx) * cos_a + (ys - pca_cy) * sin_a
-    pv = -(xs - pca_cx) * sin_a + (ys - pca_cy) * cos_a
-    u_min, u_max = float(pu.min()), float(pu.max())
-    band = b_est * 0.8
-
-    lo_mask = pu < u_min + band
-    hi_mask = pu > u_max - band
-    v_range_lo = float(pv[lo_mask].max() - pv[lo_mask].min()) if lo_mask.any() else 0.0
-    v_range_hi = float(pv[hi_mask].max() - pv[hi_mask].min()) if hi_mask.any() else 0.0
-
-    if v_range_hi >= v_range_lo:
-        pv_end = pv[hi_mask]
-    else:
-        pv_end = pv[lo_mask]
-
-    v_sign = 1.0 if float(np.median(pv_end)) >= 0 else -1.0
-    pv_b = v_sign * 0.5 * (b_est + c_est)
-    b_local = (0.0, pv_b)
-
-    pick = _l_grab_point_v2(mask, angle, (pca_cx, pca_cy), b_est, c_est, b_local=b_local)
+    pick = _l_grab_point(box, _sample, rect[1], (center_x, center_y))
     if pick is not None:
         return pick
-
     return int(round(center_x)), int(round(center_y))
 
 
