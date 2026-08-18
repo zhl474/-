@@ -7,18 +7,58 @@ from ultralytics import YOLO
 import sys
 import tensorrt
 
-from image_process_lib.template_match.kernels_create import _l_grab_point, _l_grab_point_v2
+def _l_grab_point_v2(mask, angle, center, b, c, b_local=(0.0, 0.0)):
+    """软投票法：用L型拓扑先验让像素认领B格子，取加权质心。"""
+    height, width = mask.shape
+    ys, xs = np.where(mask > 0)
+    if len(xs) < 10:
+        return None
+
+    cx, cy = center
+    sigma = b / 2.0
+    sigma2 = sigma * sigma
+
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+
+    px = xs.astype(np.float64) - cx
+    py = ys.astype(np.float64) - cy
+    pu = px * cos_a + py * sin_a
+    pv = -px * sin_a + py * cos_a
+
+    pu_b, pv_b = b_local
+    du = pu - pu_b
+    dv = pv - pv_b
+    dB2 = du * du + dv * dv
+    wB = np.exp(-dB2 / (2.0 * sigma2))
+
+    total_w = float(np.sum(wB))
+    if total_w < 1e-6:
+        return None
+
+    pu_g = float(np.sum(wB * pu) / total_w)
+    pv_g = float(np.sum(wB * pv) / total_w)
+
+    gx = cx + pu_g * cos_a - pv_g * sin_a
+    gy = cy + pu_g * sin_a + pv_g * cos_a
+
+    gx_int, gy_int = int(round(gx)), int(round(gy))
+    if 0 <= gy_int < height and 0 <= gx_int < width and mask[gy_int, gx_int] > 0:
+        return (gx_int, gy_int)
+
+    dist_sq = (xs - gx) ** 2 + (ys - gy) ** 2
+    nearest = int(np.argmin(dist_sq))
+    return (int(xs[nearest]), int(ys[nearest]))
 
 print("实际解释器：", sys.executable)
 print("TensorRT 路径：", tensorrt.__file__)
-SRC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+SRC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 # 实际运行路径由 image_node 从 perception.yaml 注入；这里保留可独立调用时的默认值。
 SEG_MODEL_PATH = os.path.join(SRC_DIR, "competition", "model", "best_seg.engine")
 SEG_CONF = 0.25
 TOP_SURFACE_CLASS_NAME = "top_surface"
 _SEG_MODEL = None
 ALLOW_COLOR_FALLBACK = True
-last_ll_method = None
 
 
 def detect_dominant_color(image, v_threshold=120, h_bins=30, s_bins=32):
@@ -251,16 +291,14 @@ def draw_mask_on_full_image(full_image, mask, crop_x1, crop_y1, color=(0, 255, 0
 
 def get_length(point1,point2):
         return math.sqrt((point1[0]-point2[0])**2+(point1[1]-point2[1])**2)
-def coreect_LL_location(box,mask,rect):#获取L方块长边偏下的位置，L方块系中间吸不到（不用细看）
-    """获取L型长臂3格的几何中心（软投票法优先，边缘扫描法兜底）。"""
-    global last_ll_method
+def coreect_LL_location(box, mask, rect, block_px=None, connector_px=None):
+    """获取L型长臂3格的几何中心（软投票法）。"""
     center_x, center_y = rect[0]
     height, width = mask.shape
     long_side, short_side = max(rect[1]), min(rect[1])
 
     ys, xs = np.where(mask > 0)
     if len(xs) < 10:
-        last_ll_method = "fallback"
         return int(round(center_x)), int(round(center_y))
 
     pts = np.column_stack([xs, ys]).astype(np.float64)
@@ -302,20 +340,9 @@ def coreect_LL_location(box,mask,rect):#获取L方块长边偏下的位置，L�
 
     pick = _l_grab_point_v2(mask, angle, (pca_cx, pca_cy), b_est, c_est, b_local=b_local)
     if pick is not None:
-        last_ll_method = "soft_vote"
         return pick
 
-    def _sample(x, y):
-        if 0 <= y < height and 0 <= x < width:
-            return mask[y, x]
-        return None
-
-    pick = _l_grab_point(box, _sample, rect[1], (center_x, center_y))
-    if pick is None:
-        last_ll_method = "fallback"
-        return int(round(center_x)), int(round(center_y))
-    last_ll_method = "fallback"
-    return pick
+    return int(round(center_x)), int(round(center_y))
 
 
 def fill_holes(mask):#对检测到的mask进行填充

@@ -3017,8 +3017,24 @@ class ImageProcessor:
         return observed_blocks, placement_targets
 
     def _prepare_calibration_targets(self, image):
-        """标定模式准备：全部方块目标在前，可选 34 个托盘随机目标在后。"""
-        blocks, _counts = self._detect_blocks_raw(image)
+        """标定模式准备：全部方块目标在前，可选 34 个托盘随机目标在后。
+
+        识别链跟随 block_recognition.mode（v2 时走 V2 边缘模板链，含 YOLO 框
+        修正与角度锁定编辑，但无 Mask 人工修正；v1/shadow 时维持 V1+Mask 编辑
+        的历史行为，shadow 的 V2 对比只在正式模式生效）。
+        """
+        if self._block_recognition_mode() == "v2":
+            try:
+                blocks, _counts = self._summarize_detected_blocks(
+                    self._detect_blocks_v2_automatic(image)
+                )
+            except Exception as exc:
+                if not self.block_recognition_fallback_to_v1:
+                    raise
+                rospy.logerr("标定模式 V2 识别失败，自动回退 V1：%s", exc)
+                blocks, _counts = self._detect_blocks_raw(image)
+        else:
+            blocks, _counts = self._detect_blocks_raw(image)
         tray_found = False
         try:
             self._detect_board_for_task(image)

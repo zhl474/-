@@ -50,10 +50,10 @@ calibration:
   tray_pixel_to_tcp: image_process/config/tray_pixel_to_tcp_calibration.yaml
   hand_eye_matrix: camera/config/T_wrist2camera.npy
   # 左右方块标定文件（THREE_CALIBRATION 策略下按方块像素 u<640/u>=640 分侧使用）：
-  # 由离线工具 tools/vision/pixel_to_tcp_calibration_analysis.py 分侧生成后替换。
-  # 当前占位与单文件一致（SINGLE 策略不使用；THREE 下未替换前两侧同模型，等价旧行为）。
-  block_pixel_to_tcp_left: image_process/config/block_pixel_to_tcp_calibration.yaml
-  block_pixel_to_tcp_right: image_process/config/block_pixel_to_tcp_calibration.yaml
+  # 8-18 部署 29 点批次 20260817T225341 分侧文件（左15 affine / 右14 homography），
+  # 与 block/tray 同批，批次一致性校验可过。
+  block_pixel_to_tcp_left: image_process/config/block_pixel_to_tcp_calibration_left.yaml
+  block_pixel_to_tcp_right: image_process/config/block_pixel_to_tcp_calibration_right.yaml
   # direct（九点标定）分流分支的标定文件：由 tools/vision/nine_point_calibration.py
   # 填入像素-TCP 点对后生成（方块左右分侧 + 中心回退 + 托盘单模型共四份）。
   # 文件齐全时 direct/shadow 分支可用；mode 设为 direct/shadow 前必须先完成生成。
@@ -84,7 +84,8 @@ high_template_match:
 # V2 = YOLO 出框 + Canny 距离场全角度边缘模板匹配（tools/vision/edge_template_test 已验证）。
 # px/py/theta 输出口径与 V1 一致（L 类同为方案A抓点），可复用已部署的像素转 TCP 标定。
 # mode 可被运行时私有参数覆盖：rosparam set /image_process_node/block_recognition_mode v1
-# 切换即时生效，无需重启节点；标定模式固定走 V1，不受此开关影响。
+# 切换即时生效，无需重启节点；标定模式同样跟随此开关（v2 时无 Mask 人工修正，
+# 换成 YOLO 框修正 + 角度锁定编辑；fallback_to_v1 回退兜底同样生效）。
 block_recognition:
   # v1     只跑旧识别（默认，行为与旧版完全一致）
   # v2     跑 V2 边缘模板识别
