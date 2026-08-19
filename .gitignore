@@ -33,3 +33,22 @@ AGENTS.local.md
 CLAUDE.local.md
 
 新方法/
+
+# AI 助手工作目录
+.zcode/
+
+# 运行日志
+Log/
+
+# 备份与旧版（保留本地，不入库）
+jinjie/旧代码备份/
+jinjie/IDBS_head(1).h
+tools/找最优解/旧版先留着/
+image_process/config/*copy.yaml
+image_process/config/*.bak*
+
+# 可重新生成的实验输出与打包产物
+tools/vision/edge_confidence_test/output/
+tools/vision/edge_confidence_test/ecm_*.png
+tools/vision/exposure_top_mask_test/output/
+tools/vision/*.zip
