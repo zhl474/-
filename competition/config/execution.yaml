@@ -22,7 +22,7 @@ motion:
 
   # 抓取和摆放下探时的 MoveL 速度参数。
   # 下探比普通移动慢，用于降低碰撞和压坏方块的风险。
-  pick_speed: 80
+  pick_speed: 40
 
   # 视觉伺服每轮 XY 修正时的 MoveL 速度参数。
   # 太大可能过冲或画面未稳定，太小会增加每轮闭环耗时。
@@ -34,7 +34,7 @@ motion:
 
   # 最终抓取位上方的动态预抓取间隙，单位 mm。
   # 预抓取位会在这里等待机械臂停稳，随后仅下探该距离吸取方块。
-  pick_approach_clearance_mm: 5.0
+  pick_approach_clearance_mm: 8.5
 
   # 从方块相机伺服位斜向移动到吸盘预抓取位时的 MoveL 速度参数。
   pick_approach_speed: 100
@@ -45,7 +45,7 @@ motion:
 
   # 摆放释放前的下探深度，单位 mm。
   # 到达最终摆放位后继续竖直下探该距离再喷气；0 表示关闭下探、直接在释放高度喷气。
-  place_descent_offset_mm: 9.0
+  place_descent_offset_mm: 10.5
 
   # 到达最终摆放位时的 MoveL 圆滑半径，单位 mm。
   # 大于 0 时机械臂不在摆放位停下，而圆滑拐向下探点；0 表示关闭圆滑、精确停在摆放位。

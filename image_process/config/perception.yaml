@@ -95,7 +95,7 @@ block_recognition:
   fallback_to_v1: true
   v2:
     # 全角度采样步进，单位度；越小越准越慢（验证时用 2.0）。
-    angle_step_deg: 2.0
+    angle_step_deg: 1.0
     canny_low: 50
     canny_high: 150
     gaussian_ksize: 3

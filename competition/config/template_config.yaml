@@ -17,19 +17,19 @@ template_sizes:
       overrides:
         L_blue:
           x_runs: [36, 5, 36, 5, 38]
-          y_runs: [36, 5, 36]
+          y_runs: [36, 5, 38]
         L_yellow:
           x_runs: [36, 5, 36, 5, 38]
-          y_runs: [36, 5, 36]
+          y_runs: [36, 5, 38]
         z_blue:
-          x_runs: [36, 5, 36, 5, 38]
+          x_runs: [36, 5, 36, 5, 37]
           y_runs: [36, 5, 36]
         z_green:
-          x_runs: [36, 5, 36, 5, 38]
+          x_runs: [37, 5, 36, 5, 37]
           y_runs: [36, 5, 36]
         T:
-          x_runs: [36, 5, 36, 5, 38]
-          y_runs: [36, 5, 36]
+          x_runs: [37, 5, 36, 5, 37]
+          y_runs: [36, 5, 38]
         square:
           x_runs: [37, 5, 37]
           y_runs: [37, 5, 37]
